@@ -10,7 +10,7 @@ class AStockCollector:
         os.makedirs(self.save_path, exist_ok=True)
 
     def fetch_daily(self, symbol: str,
-                    start_date: str = "20220101",
+                    start_date: str = "20250101",
                     end_date: str = "20251231",
                     adjust: str = "qfq"):
         """

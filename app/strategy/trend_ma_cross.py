@@ -27,8 +27,7 @@ class TrendMaCrossStrategy(bt.Strategy):
 
         # ====== 1. 定义上升趋势 ======
         up_trend = (
-            self.ma_mid[0] > self.ma_slow[0] and
-            self.data.close[0] > self.ma_mid[0]
+                self.ma_slow[0] < self.ma_mid[0] < self.data.close[0]
         )
 
         # ====== 2. 没持仓 ======
@@ -36,6 +35,7 @@ class TrendMaCrossStrategy(bt.Strategy):
 
             # 只有在上升趋势中才允许交易
             if up_trend and self.cross > 0:
+                print(f'触发买操作')
                 self.buy(size=100)
 
         # ====== 3. 持仓 ======
@@ -43,4 +43,5 @@ class TrendMaCrossStrategy(bt.Strategy):
 
             # 趋势破坏 or 死叉 → 出场
             if (not up_trend) or self.cross < 0:
+                print(f'触发卖操作')
                 self.sell(size=100)
