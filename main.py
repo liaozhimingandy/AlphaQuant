@@ -2,15 +2,15 @@ import backtrader as bt
 import pandas as pd
 
 from app.strategy.ma_cross import MaCrossStrategy
-from app.strategy.trend_ma_cross import TrendMaCrossStrategy
+# from app.strategy.trend_ma_cross import TrendMaCrossStrategy
 
 
 def run_backtest():
 
     cerebro = bt.Cerebro()
-
+    INITIAL_CASH = 10000
     # 基础设置
-    cerebro.broker.setcash(10000)
+    cerebro.broker.setcash(INITIAL_CASH)
     cerebro.broker.setcommission(commission=0.0003)  # 万3手续费
     cerebro.broker.set_slippage_perc(perc=0.001)  # 0.1%滑点
 
@@ -45,13 +45,41 @@ def run_backtest():
     print("end:", cerebro.broker.getvalue())
     # 打印回测结果
     for strat in results:
-        print("夏普比率：", strat.analyzers.sharpe.get_analysis()["sharperatio"])
-        print("最大回撤：%.2f%%" % strat.analyzers.drawdown.get_analysis()["max"]["drawdown"])
-        print("交易次数：", strat.analyzers.trade.get_analysis()["total"]["total"])
-        print('*'*80)
+        # ================== 核心：输出最终盈利率+所有收益指标 ==================
+        final_value = cerebro.broker.get_value()
+        # 1. 核心最终盈利率
+        total_profit = final_value - INITIAL_CASH
+        total_profit_rate = (final_value - INITIAL_CASH) / INITIAL_CASH * 100
+
+        # 2. 复利年化收益率（自动计算回测天数，适配任意周期）
+        backtest_days = (df.index[-1] - df.index[0]).days
+        annual_return = ((final_value / INITIAL_CASH) ** (365 / backtest_days) - 1) * 100 if backtest_days > 0 else 0
+
+        # 3. 交易统计指标（安全取值，无交易也不会报错）
+        trade_analyzer = strat.analyzers.trade.get_analysis()
+        total_trades = trade_analyzer.get("total", {}).get("total", 0)
+        win_trades = trade_analyzer.get("won", {}).get("total", 0)
+        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+        max_drawdown = strat.analyzers.drawdown.get_analysis()["max"]["drawdown"]
+        sharpe_ratio = strat.analyzers.sharpe.get_analysis().get("sharperatio", 0)
+
+        # 格式化打印最终结果
+        print("\n" + "=" * 100)
+        print("📊 【最终回测结果】")
+        print("=" * 100)
+        print(f"最终账户总市值：{final_value:.2f}元")
+        print(f"总盈亏：{total_profit:.2f}元")
+        print(f"✅ 最终总盈利率：{total_profit_rate:.2f}%")
+        print(f"✅ 复利年化收益率：{annual_return:.2f}%")
+        print("-" * 50)
+        print(f"总交易次数：{total_trades}次")
+        print(f"交易胜率：{win_rate:.2f}%")
+        print(f"夏普比率：{sharpe_ratio:.2f}")
+        print(f"最大回撤：{max_drawdown:.2f}%")
+        print("=" * 100)
 
     # 绘制回测图（自动标记买卖点箭头）
-    cerebro.plot(style="candle")
+    # cerebro.plot(style="candle")
 
 
 if __name__ == "__main__":
