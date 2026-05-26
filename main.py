@@ -74,7 +74,7 @@ def run_backtest():
         print("-" * 50)
         print(f"总交易次数：{total_trades}次")
         print(f"交易胜率：{win_rate:.2f}%")
-        print(f"夏普比率：{sharpe_ratio:.2f}")
+        # print(f"夏普比率：{sharpe_ratio:.2f}")
         print(f"最大回撤：{max_drawdown:.2f}%")
         print("=" * 100)
 

@@ -30,9 +30,9 @@ class StockCollector:
 
     @retry(
         stop=stop_after_attempt(5),  # 最多重试5次
-        wait=wait_exponential(multiplier=1, min=2, max=20),  # 指数退避
+        wait=wait_exponential(multiplier=2, max=60),  # 指数退避
         retry=retry_if_exception_type(Exception),  # 捕获所有异常
-        reraise=True,
+        reraise=False,
         before=lambda rs: logger.info(f"🔁 第 {rs.attempt_number} 次尝试"),
     )
     def fetch_daily(
@@ -42,6 +42,13 @@ class StockCollector:
             end_date="20261231",
             adjust="qfq"
     ):
+        """
+        安全的akshare日线数据获取：自动限流+重试+缓存
+        :param symbol: 股票代码 000001/600000
+        :param start_date: 开始日期 20200101
+        :param end_date: 结束日期 20251231
+        :param adjust: 复权方式 qfq前复权/hfq后复权/不复权
+        """
 
         logger.info(f"开始采集股票: {symbol}")
 

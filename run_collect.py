@@ -12,6 +12,9 @@
 from tenacity import RetryError
 
 from app.data.collector.stock_collector import StockCollector
+from app.data.datasource import DataSourceFactory
+from app.db.database import SessionLocal
+from app.repository.stock_repository import StockRepository
 from app.utils.logger import logger
 
 def main(name: str = ''):
@@ -23,5 +26,21 @@ def main(name: str = ''):
     collector.close()
 
 
+def main2():
+    db = SessionLocal()
+    df = DataSourceFactory.get_stock_data(
+        code="000001",
+        start="2020-02-07",
+        end="2025-12-31",
+        adjust="qfq"
+    )
+    logger.info(df.head(10))
+    records = df.to_dict(orient="records")
+    StockRepository.batch_upsert(
+        db,
+        records
+    )
+    db.close()
+
 if __name__ == '__main__':
-    main()
+    main2()
