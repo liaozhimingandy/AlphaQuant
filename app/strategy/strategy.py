@@ -14,12 +14,12 @@ from typing import List
 
 import backtrader as bt
 
-from app.strategy.factor import BaseRule, BaseFactor
-from app.utils import logger
+from app.strategy.factor import BaseRule, IBaseFactor, MaCrossOverFactorI, MaCrossDownFactorI, AllRule, AnyRule
+from app.utils.logger import logger
 
 
 # -------------------------- 3. 核心策略模板：所有通用逻辑固化，新策略自动继承 --------------------------
-class BaseComposableStrategy(bt.Strategy, abc.ABC):
+class IBaseComposableStrategy(bt.Strategy):
     """
     可组合策略的核心模板，所有通用逻辑100%固化
     新策略只需要定义：因子列表、买入规则、卖出规则，其他全部自动继承
@@ -43,30 +43,30 @@ class BaseComposableStrategy(bt.Strategy, abc.ABC):
         self.frozen_cash = 0.0
 
         # 子类只需要实现这三个属性，就完成了一个新策略
-        self.entry_factors: List[BaseFactor] = self.define_entry_factors()
-        self.exit_factors: List[BaseFactor] = self.define_exit_factors()
+        self.entry_factors: List[IBaseFactor] = self.define_entry_factors()
+        self.exit_factors: List[IBaseFactor] = self.define_exit_factors()
         self.entry_rule: BaseRule = self.define_entry_rule()
         self.exit_rule: BaseRule = self.define_exit_rule()
 
     @abc.abstractmethod
-    def define_entry_factors(self) -> List[BaseFactor]:
+    def define_entry_factors(self) -> List[IBaseFactor]:
         """子类实现：定义开仓用的所有因子"""
-        pass
+        raise NotImplementedError("请实现 define_entry_factors 方法")
 
     @abc.abstractmethod
-    def define_exit_factors(self) -> List[BaseFactor]:
+    def define_exit_factors(self) -> List[IBaseFactor]:
         """子类实现：定义平仓用的所有因子"""
-        pass
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def define_entry_rule(self) -> BaseRule:
         """子类实现：定义开仓规则（AllRule/AnyRule）"""
-        pass
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def define_exit_rule(self) -> BaseRule:
         """子类实现：定义平仓规则（AllRule/AnyRule）"""
-        pass
+        raise NotImplementedError()
 
     # -------------------------- 以下所有逻辑100%通用，子类永远不用写 --------------------------
     @property
@@ -193,6 +193,32 @@ class BaseComposableStrategy(bt.Strategy, abc.ABC):
                 f"预计仓位={buy_size*current_price/self.broker.getvalue()*100:.1f}%"
             )
             self.order = self.buy(size=buy_size, exectype=bt.Order.Close)
+
+
+class PreciseMaCrossStrategyI(IBaseComposableStrategy):
+    """
+    精准均线策略：仅金叉买入，仅死叉卖出
+    无假信号、无重复触发、100%精准
+    """
+    def define_entry_factors(self):
+        # 开仓仅用金叉因子，可自由叠加其他过滤因子
+        return [
+            MaCrossOverFactorI(),          # 仅金叉当天触发
+        ]
+
+    def define_exit_factors(self):
+        # 平仓仅用死叉因子，可自由叠加其他平仓条件
+        return [
+            MaCrossDownFactorI(),          # 仅死叉当天触发
+        ]
+
+    def define_entry_rule(self):
+        # 所有开仓因子同时满足，才触发买入信号
+        return AllRule(self.entry_factors)
+
+    def define_exit_rule(self):
+        # 任意平仓因子满足，就触发卖出信号
+        return AnyRule(self.exit_factors)
 
 def main():
     pass
