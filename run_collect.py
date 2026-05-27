@@ -30,11 +30,10 @@ def main2():
     db = SessionLocal()
     df = DataSourceFactory.get_stock_data(
         code="000001",
-        start="2020-02-07",
-        end="2025-12-31",
+        start="2021-01-01",
+        end="2026-05-26",
         adjust="qfq"
     )
-    logger.info(df.head(10))
     records = df.to_dict(orient="records")
     StockRepository.batch_upsert(
         db,

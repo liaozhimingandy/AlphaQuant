@@ -1,14 +1,17 @@
 import backtrader as bt
 import pandas as pd
 
+from app.db.database import SessionLocal
+from app.repository.stock_repository import StockRepository
 from app.strategy.ma_cross import MaCrossStrategy
 # from app.strategy.trend_ma_cross import TrendMaCrossStrategy
 
+INITIAL_CASH = 10000
 
 def run_backtest():
 
     cerebro = bt.Cerebro()
-    INITIAL_CASH = 10000
+
     # 基础设置
     cerebro.broker.setcash(INITIAL_CASH)
     cerebro.broker.setcommission(commission=0.0003)  # 万3手续费
@@ -82,5 +85,193 @@ def run_backtest():
     # cerebro.plot(style="candle")
 
 
+def run_backtest2(
+        symbol: str = "000001",
+        start_date: str = "2023-01-01",
+        end_date: str = "2026-05-25"
+):
+
+    db = SessionLocal()
+
+    try:
+
+        # ======================
+        # 从数据库读取数据
+        # ======================
+
+        df = StockRepository.get_stock_df(
+            db=db,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if df.empty:
+            print("没有回测数据")
+            return
+
+        # ======================
+        # 初始化 Cerebro
+        # ======================
+
+        cerebro = bt.Cerebro()
+
+        cerebro.broker.setcash(INITIAL_CASH)
+
+        cerebro.broker.setcommission(
+            commission=0.0003
+        )
+
+        cerebro.broker.set_slippage_perc(
+            perc=0.001
+        )
+
+        # 禁止做空
+        cerebro.broker.set_shortcash(False)
+
+        # 开启资金检查
+        cerebro.broker.set_checksubmit(True)
+
+        # 收盘价成交
+        cerebro.broker.set_coc(True)
+
+        # ======================
+        # 加载数据
+        # ======================
+
+        data = bt.feeds.PandasData(
+            dataname=df
+        )
+
+        cerebro.adddata(data)
+
+        # ======================
+        # 添加策略
+        # ======================
+
+        cerebro.addstrategy(
+            MaCrossStrategy
+        )
+
+        # ======================
+        # 分析器
+        # ======================
+
+        cerebro.addanalyzer(
+            bt.analyzers.SharpeRatio,
+            _name="sharpe"
+        )
+
+        cerebro.addanalyzer(
+            bt.analyzers.DrawDown,
+            _name="drawdown"
+        )
+
+        cerebro.addanalyzer(
+            bt.analyzers.TradeAnalyzer,
+            _name="trade"
+        )
+
+        # ======================
+        # 开始回测
+        # ======================
+
+        print("=" * 100)
+        print(f"开始回测: {symbol}")
+        print(f"初始资金: {INITIAL_CASH:.2f}")
+        print("=" * 100)
+
+        results = cerebro.run()
+
+        final_value = cerebro.broker.getvalue()
+
+        strat = results[0]
+
+        # ======================
+        # 收益指标
+        # ======================
+
+        total_profit = final_value - INITIAL_CASH
+
+        total_profit_rate = (
+                total_profit / INITIAL_CASH
+        ) * 100
+
+        backtest_days = (
+            df.index[-1] - df.index[0]
+        ).days
+
+        annual_return = (
+            (
+                final_value / INITIAL_CASH
+            ) ** (
+                365 / backtest_days
+            ) - 1
+        ) * 100 if backtest_days > 0 else 0
+
+        trade_analysis = (
+            strat.analyzers.trade
+            .get_analysis()
+        )
+
+        total_trades = (
+            trade_analysis
+            .get("total", {})
+            .get("total", 0)
+        )
+
+        win_trades = (
+            trade_analysis
+            .get("won", {})
+            .get("total", 0)
+        )
+
+        win_rate = (
+            win_trades / total_trades * 100
+            if total_trades > 0 else 0
+        )
+
+        drawdown = (
+            strat.analyzers.drawdown
+            .get_analysis()["max"]["drawdown"]
+        )
+
+        sharpe = (
+            strat.analyzers.sharpe
+            .get_analysis()
+            .get("sharperatio", 0)
+        )
+
+        # ======================
+        # 打印结果
+        # ======================
+
+        print("\n" + "=" * 100)
+        print("📊 回测结果")
+        print("=" * 100)
+
+        print(f"最终资产: {final_value:.2f}")
+        print(f"总收益: {total_profit:.2f}")
+        print(f"总收益率: {total_profit_rate:.2f}%")
+        print(f"年化收益率: {annual_return:.2f}%")
+
+        print("-" * 50)
+
+        print(f"总交易次数: {total_trades}")
+        print(f"胜率: {win_rate:.2f}%")
+        print(f"最大回撤: {drawdown:.2f}%")
+        print(f"夏普比率: {sharpe}")
+
+        print("=" * 100)
+
+        # ======================
+        # 绘图
+        # ======================
+
+        # cerebro.plot(style="candle")
+
+    finally:
+
+        db.close()
 if __name__ == "__main__":
-    run_backtest()
+    run_backtest2()

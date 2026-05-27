@@ -12,7 +12,6 @@
 from app.db.database import engine
 from app.db.models import Base
 
-from app.utils.logger import logger
 
 def init_db():
 

@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
+    Date,
     UniqueConstraint
 )
 
@@ -26,7 +27,7 @@ class StockDaily(Base):
 
     id = Column(Integer, primary_key=True)
     symbol = Column(String(20), nullable=False)
-    trade_date = Column(String(20), nullable=False)
+    date = Column(Date, nullable=False)
     open = Column(Float)
     high = Column(Float)
     low = Column(Float)
@@ -37,7 +38,7 @@ class StockDaily(Base):
     __table_args__ = (
         UniqueConstraint(
             "symbol",
-            "trade_date",
-            name="uk_symbol_trade_date"
+            "date",
+            name="uk_symbol_date"
         ),
     )

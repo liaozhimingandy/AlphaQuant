@@ -22,7 +22,21 @@ from app.utils.logger import logger
 
 
 class IBaseDataSource(abc.ABC):
+    """
+    数据源抽象类
+    """
     name: str = "base"
+
+    REQUIRED_COLUMNS = [
+        "date",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount"
+    ]
 
     @abc.abstractmethod
     @retry(
@@ -42,13 +56,42 @@ class IBaseDataSource(abc.ABC):
     @staticmethod
     def _standardize_df(df: pd.DataFrame) -> pd.DataFrame:
         """统一格式化输出，所有数据源都走这个方法，保证100%格式一致"""
-        # ===== NaN 转 None =====
+        df = df.copy()
+
+        # 只保留统一字段
+        df = df[IBaseDataSource.REQUIRED_COLUMNS]
+
+        # NaN -> None
         df = df.where(pd.notnull(df), None)
-        df = df[["open", "high", "low", "close", "volume", "amount"]].sort_index()
-        # 强制类型转换，避免backtrader报错
-        for col in ["open", "high", "low", "close", "volume", "amount"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # 数值列统一
+        numeric_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount"
+        ]
+
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+        # 日期统一
+        df["date"] = pd.to_datetime(df["date"])
+
+        # 删除脏数据
         df = df.dropna()
+
+        # 排序
+        df = df.sort_values("date")
+
+        # 重置索引
+        df = df.reset_index(drop=True)
+
         return df
 
 
@@ -61,7 +104,7 @@ class AkshareDataSource(IBaseDataSource):
         wait=wait_exponential(multiplier=2, max=60),  # 指数退避
         retry=retry_if_exception_type(Exception),  # 捕获所有异常
         reraise=False,
-        before=lambda rs: logger.info(f"🔁 第 {rs.attempt_number} 次尝试"),
+        before=lambda rs: logger.info(f"[{rs.fn.__qualname__}] 🔁 第 {rs.attempt_number} 次尝试"),
     )
     def fetch_data(self, code: str, start_date: str, end_date: str, adjust: str = "qfq") -> pd.DataFrame:
         try:
@@ -92,23 +135,38 @@ class BaoStockDataSource(IBaseDataSource):
 
     name = "baostock"
 
+    def __init__(self):
+        lg = bs.login()
+        if lg.error_code != "0":
+            raise RuntimeError(
+                f"Baostock登录失败: {lg.error_msg}"
+            )
+    def __del__(self):
+        try:
+            bs.logout()
+        except Exception as e:
+            pass
+
     @retry(
         stop=stop_after_attempt(5),  # 最多重试5次
         wait=wait_exponential(multiplier=2, max=60),  # 指数退避
         retry=retry_if_exception_type(Exception),  # 捕获所有异常
-        reraise=False,
+        reraise=True,
         before=lambda rs: logger.info(f"🔁 第 {rs.attempt_number} 次尝试"),
     )
     def fetch_data(self, code: str, start_date: str, end_date: str, adjust: str = "qfq") -> pd.DataFrame:
 
-        lg = bs.login()
-        if lg.error_code != "0":
-            raise Exception(f"Baostock登录失败: {lg.error_msg}")
-
         bs_code = f"sh.{code}" if code.startswith(("6", "9")) else f"sz.{code}"
         start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
         end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
-        adjust_flag = "1" if adjust == "qfq" else "2" if adjust == "hfq" else "3"
+
+        # -------------------------- 3. 复权参数映射（避免写反） --------------------------
+        adjust_map = {
+            "qfq": "2",  # 前复权（和行情软件一致）
+            "hfq": "1",  # 后复权
+            "不复权": "3"  # 不复权
+        }
+        adjust_flag = adjust_map.get(adjust, "2")
 
         rs = bs.query_history_k_data_plus(
             bs_code, "date,open,high,low,close,volume,amount",
@@ -116,12 +174,12 @@ class BaoStockDataSource(IBaseDataSource):
         )
 
         data_list = []
-        while (rs.error_code == "0") & rs.next():
+        while rs.error_code == "0" and rs.next():
             data_list.append(rs.get_row_data())
+
         df = pd.DataFrame(data_list, columns=rs.fields)
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.set_index("date")
-        bs.logout()
+        df["symbol"] = code
+
         return self._standardize_df(df)
 
 class DataSourceFactory:
@@ -143,7 +201,7 @@ class DataSourceFactory:
         start: str,
         end: str,
         adjust: str = "qfq",
-        priority: Optional[List[str]] = ['baostock', 'akshare'],
+        priority: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """
         对外唯一统一入口：按优先级自动尝试数据源，失败自动降级
@@ -156,7 +214,7 @@ class DataSourceFactory:
         # 日期格式统一处理
         start_date = start.replace("-", "")
         end_date = end.replace("-", "")
-        priority = priority
+        priority = priority or ["baostock", "akshare"]
 
         # 按优先级依次尝试，失败自动切换下一个
         for source_name in priority:
@@ -169,4 +227,4 @@ class DataSourceFactory:
                 logger.warning(f"⚠️ [{source_name}] 获取失败: {str(e)}，自动切换下一个数据源")
                 continue
 
-        raise Exception("❌ 所有数据源均获取失败，请检查网络或配置")
+        raise RuntimeError("❌ 所有数据源均获取失败，请检查网络或配置")
