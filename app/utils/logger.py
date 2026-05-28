@@ -24,7 +24,7 @@ logger.remove()
 # ===== 控制台日志 =====
 logger.add(
     sys.stdout,
-    level="INFO",
+    level="DEBUG",
     colorize=True,
     format=(
         "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "

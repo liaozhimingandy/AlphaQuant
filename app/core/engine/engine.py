@@ -9,14 +9,13 @@
 # @Project     : AlphaQuant
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
-import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 import signal
 
 from twisted.internet import reactor, defer
 
-from app.core.engine.component import BaseComponent
+from app.core.engine.component import BaseComponent, TimerComponent
 from app.core.engine.event import EventBus, StandardEvents
 from app.core.engine.settings import EngineContext, EngineStatus, RunMode
 from app.utils.logger import logger
@@ -46,7 +45,7 @@ class IQuantEngine(ABC):
     # ------------------------------
     @abstractmethod
     def initialize(self) -> None:
-        """引擎初始化，整个生命周期仅执行1次"""
+        """引擎初始化时执行"""
         raise NotImplementedError
 
     @abstractmethod
@@ -66,7 +65,7 @@ class IQuantEngine(ABC):
         raise NotImplementedError
 
     # ------------------------------
-    # 组件管理接口（对应你架构的所有模块管理）
+    # 组件管理接口
     # ------------------------------
     @abstractmethod
     def register_component(self, component: BaseComponent) -> None:
@@ -141,7 +140,7 @@ class BaseQuantEngine(IQuantEngine):
     # 工厂方法实现
     # ------------------------------
     @classmethod
-    def create(cls, config: Dict[str, Any]) -> BaseQuantEngine:
+    def create(cls, config: Dict[str, Any]) -> IQuantEngine:
         return cls(config)
 
     # ------------------------------
@@ -157,6 +156,7 @@ class BaseQuantEngine(IQuantEngine):
         for component_name in self._component_order:
             component = self._components[component_name]
             if not component.enabled:
+                self.logger.warning(f'component "{component_name}" is disabled')
                 continue
             try:
                 self.logger.info(f"初始化组件: {component_name}")
@@ -185,7 +185,7 @@ class BaseQuantEngine(IQuantEngine):
 
         # 4. 启动Twisted Reactor主循环（永久运行，除非调用stop）
         # 对标Scrapy的reactor.run()，主线程卡在这里，永远不会执行完
-        reactor.run(installSignalHandlers=False)
+        reactor.run()
 
         # 5. Reactor停止后返回最终结果
         self._status = EngineStatus.STOPPED
@@ -257,7 +257,7 @@ class BaseQuantEngine(IQuantEngine):
         return self.event_bus
 
     # ------------------------------
-    # 内部核心逻辑（用户无需关心）
+    # 内部核心逻辑
     # ------------------------------
     def _start_all_components(self) -> None:
         """按注册顺序启动所有组件，异常隔离"""
@@ -308,14 +308,12 @@ class BaseQuantEngine(IQuantEngine):
 
         def handle_stop(signum, frame):
             signal_name = signal.Signals(signum).name
-            self.logger.warning(f"收到系统终止信号: {signal_name}")
+            self.logger.warning(f"收到系统终止信号: {signal_name}, {frame}")
             self.stop(graceful=True)
 
         for sig in [signal.SIGINT, signal.SIGTERM]:
-            try:
-                signal.signal(sig, handle_stop)
-            except Exception as e:
-                pass
+            signal.signal(sig, handle_stop)
+
 
     def _persist_state(self) -> None:
         """持久化引擎状态，可扩展"""
@@ -344,6 +342,9 @@ if __name__ == "__main__":
     # engine.register_component(Portfolio())          # 你的持仓账户
     # engine.register_component(Execution())          # 你的执行层
     # engine.register_component(BrokerAdapter())      # 你的券商适配器
+
+    # 测试一个自定义组件
+    engine.register_component(TimerComponent())
 
     # 4. 订阅事件示例（所有模块通过事件通信，无直接调用）
     def on_signal_generated(s):

@@ -21,7 +21,6 @@ class EventBus:
     """
     def __init__(self):
         self._receivers: Dict[str, List[Callable]] = defaultdict(list)
-        self.logger = logger
 
     def subscribe(self, event_name: str, receiver: Callable) -> None:
         """订阅事件"""
@@ -31,14 +30,18 @@ class EventBus:
         """发布事件，异常隔离，一个回调报错不影响其他回调"""
         for receiver in self._receivers[event_name]:
             try:
+                logger.debug(f"正在回调...{receiver.__name__}")
                 receiver(**kwargs)
             except Exception as e:
-                self.logger.error(f"事件 {event_name} 回调异常: {str(e)}", exc_info=True)
+                logger.error(f"事件 {event_name} 回调异常: {str(e)}", exc_info=True)
 
     def unsubscribe(self, event_name: str, receiver: Callable) -> None:
         """取消订阅"""
         if receiver in self._receivers[event_name]:
             self._receivers[event_name].remove(receiver)
+
+    def get_receiver(self):
+        return self._receivers
 
 
 # 预定义标准事件（你可以按需扩展）
