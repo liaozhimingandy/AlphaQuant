@@ -17,6 +17,7 @@ from twisted.internet import reactor, defer
 
 from app.core.engine.component import BaseComponent, TimerComponent
 from app.core.engine.event import EventBus, StandardEvents
+from app.core.engine.scheduler import TaskScheduler
 from app.core.engine.settings import EngineContext, EngineStatus, RunMode
 from app.utils.logger import logger
 
@@ -128,6 +129,9 @@ class BaseQuantEngine(IQuantEngine):
         self.context = EngineContext(run_mode=self.run_mode, config=config)
         self.event_bus = EventBus()
 
+        # 任务调度器
+        self.scheduler = TaskScheduler(self.context, self.event_bus)
+
         # 组件容器：管理你架构中所有注册的模块
         self._components: Dict[str, BaseComponent] = {}
         self._component_order: List[str] = []  # 按注册顺序初始化/启动
@@ -165,8 +169,22 @@ class BaseQuantEngine(IQuantEngine):
                 self.logger.error(f"组件 {component_name} 初始化失败: {str(e)}", exc_info=True)
                 self.event_bus.publish(StandardEvents.COMPONENT_ERROR, component=component_name, error=e)
 
+        # 启动任务调度器
+        self.scheduler.start()
+        self.event_bus.subscribe(event_name=StandardEvents.TASK_SUBMIT, receiver=self._on_task_submit)
+
         self.logger.info("=== 量化引擎初始化完成 ===")
         self.logger.info("=" * 60)
+
+    def _on_task_submit(self, *args, **kwargs):
+        # 引擎调用调度器！！！
+        logger.debug((kwargs, args))
+        self.scheduler.submit_task(
+            task_name=kwargs['task_name'],
+            handler=kwargs['handler'],
+            priority=kwargs['priority'],
+            max_retry=kwargs['max_retry']
+        )
 
     def start(self) -> EngineContext:
         self.logger.info(f"=== 引擎启动 | 运行模式: {self.run_mode.value} | 运行ID: {self.context.run_id} ===")

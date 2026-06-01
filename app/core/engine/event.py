@@ -19,8 +19,9 @@ class EventBus:
     全局事件总线
     发布-订阅模式，彻底解耦所有组件
     """
-    def __init__(self):
+    def __init__(self) -> None:
         self._receivers: Dict[str, List[Callable]] = defaultdict(list)
+
 
     def subscribe(self, event_name: str, receiver: Callable) -> None:
         """订阅事件"""
@@ -64,3 +65,5 @@ class StandardEvents:
     # 异常事件
     COMPONENT_ERROR = "component_error"
     ENGINE_ERROR = "engine_error"
+    # 任务提交
+    TASK_SUBMIT = "task_submit"

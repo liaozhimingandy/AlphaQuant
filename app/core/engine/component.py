@@ -11,11 +11,11 @@
 # -------------------------------------------------------------------------------
 from abc import ABC, abstractmethod
 from typing import Optional
-
-from backtrader import Signal
+from xml.sax import handler
 
 from app.core.engine.event import EventBus, StandardEvents
 from app.core.engine.settings import EngineContext
+from app.core.engine.task import TaskPriority
 from app.utils.logger import logger
 
 
@@ -74,6 +74,8 @@ class TimerComponent(BaseComponent):
 
     def start(self) -> None:
         logger.info("定时器组件开始...")
+        self.event_bus.publish(StandardEvents.TASK_SUBMIT, handler=self._deal_signal,
+                               priority=TaskPriority.HIGH, max_retry=3, task_name="测试")
 
     def stop(self, graceful: bool = True) -> None:
         logger.info("定时器组件停止...")
