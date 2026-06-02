@@ -111,7 +111,7 @@ class Task(ITask):
     # 核心排序字段
     # ------------------------------
     priority: TaskPriority = field(default=TaskPriority.MEDIUM, doc="任务优先级")
-    task_name: str = field(default="", doc="任务名称")
+    task_name: str = field(default="task-0", doc="任务名称")
     create_time: datetime = field(
         default=datetime.now(timezone.utc),
         compare=True

@@ -29,6 +29,8 @@ logger.add(
     format=(
         "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
         "<level>{level}</level> | "
+        "<magenta>{file}:{line}</magenta> | "  # 文件名:行号（核心！）
+        "<yellow>{function}</yellow> | "       # 函数名
         "<cyan>{message}</cyan>"
     )
 )

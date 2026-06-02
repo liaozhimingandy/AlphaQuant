@@ -1,10 +1,15 @@
 import backtrader as bt
 import pandas as pd
 
+from app.core.engine.component import TaskSchedulerComponent
+from app.core.engine.components import TimerComponent
+from app.core.engine.engine import BaseQuantEngine
+from app.core.engine.event import StandardEvents
 from app.db.database import SessionLocal
 from app.repository.stock_repository import StockRepository
 from app.strategy.ma_cross import MaCrossStrategy
 from app.strategy.strategy import PreciseMaCrossStrategyI
+from app.utils.logger import logger
 
 # from app.strategy.trend_ma_cross import TrendMaCrossStrategy
 
@@ -462,5 +467,41 @@ symbol: str = "000001",
         print(e)
         raise e
 
+
+def run_backtest4():
+    # 1. 全局配置
+    config = {
+        "RUN_MODE": "BACKTEST",  # 改BACKTEST就是回测自动停止
+        "SYMBOL": "000001.SZ",
+        "LOG_LEVEL": "INFO",
+    }
+
+    # 2. 创建引擎实例
+    engine = BaseQuantEngine.create(config)
+
+    engine.register_component(TaskSchedulerComponent())  # 1. 调度器（必须）
+    # engine.register_component(MarketCenter())  # 2. 行情中心（必须）
+    # engine.register_component(StrategyManager())  # 3. 策略管理器（必须）
+    # engine.register_component(RiskManager())        # 你的风控管理器
+    # engine.register_component(Sizer())              # 你的仓位计算器
+    # engine.register_component(Portfolio())          # 你的持仓账户
+    # engine.register_component(BrokerAdapter())  # 4. 券商/撮合适配器（必须）
+
+    # 测试一个自定义组件
+    engine.register_component(TimerComponent())
+
+    # 4. 订阅事件示例（所有模块通过事件通信，无直接调用）
+    def on_signal_generated(*args, **kwargs):
+        logger.debug(f"收到策略信号: {kwargs}")
+
+    engine.get_event_bus().subscribe(StandardEvents.ENGINE_STARTED, on_signal_generated)
+
+    # 5. 一键启动引擎
+    context = engine.start()
+
+    # 6. 运行完成后查看结果
+    logger.debug(f"运行完成 | 模式: {context.run_mode.value}")
+
+
 if __name__ == "__main__":
-    run_backtest3()
+    run_backtest4()

@@ -11,6 +11,7 @@
 # -------------------------------------------------------------------------------
 import queue
 import time
+from datetime import datetime
 
 from app.core.engine.event import EventBus
 from app.core.engine.settings import RunMode, EngineContext
@@ -93,7 +94,7 @@ class TaskScheduler:
         )
 
         self._task_queue.put(task)
-        logger.debug(f"任务已提交: {task_name} | ID: {task.task_id} | 优先级: {priority.name}")
+        logger.debug(f"任务已提交!任务名称: {task_name} | ID: {task.task_id} | 优先级: {priority.name}")
         return task.task_id
 
     # ------------------------------
@@ -139,7 +140,7 @@ class TaskScheduler:
                 result = task.handler(*task.args, **task.kwargs)
                 task.status = TaskStatus.SUCCESS
                 task.result = result
-                logger.debug(f"任务执行成功: {task.task_name} | ID: {task.task_id}")
+                logger.debug(f"任务执行成功! 任务名称: {task.task_name} | ID: {task.task_id}")
             except Exception as e:
                 task.error = e
                 # 重试逻辑
