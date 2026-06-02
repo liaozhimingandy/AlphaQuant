@@ -51,7 +51,7 @@ class IBaseStrategy(abc.ABC):
 
     def on_bar(
             self,
-            context: StrategyContext
+            context
     ) -> IBaseSignal | None:
 
         # 没持仓
@@ -77,14 +77,14 @@ class IBaseStrategy(abc.ABC):
     @abc.abstractmethod
     def generate_buy_signal(
             self,
-            context: StrategyContext
+            context
     ) -> IBaseSignal:
         pass
 
     @abc.abstractmethod
     def generate_sell_signal(
             self,
-            context: StrategyContext
+            context
     ) -> IBaseSignal:
         pass
 

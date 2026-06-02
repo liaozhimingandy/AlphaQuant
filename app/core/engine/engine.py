@@ -10,14 +10,15 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+import time
+from typing import Dict, Any, Optional, List, Generator
 import signal
 
 from twisted.internet import reactor, defer
+from twisted.internet.defer import Deferred
 
-from app.core.engine.component import BaseComponent, TimerComponent
+from app.core.engine.component import IBaseComponent, TimerComponent, TaskSchedulerComponent
 from app.core.engine.event import EventBus, StandardEvents
-from app.core.engine.scheduler import TaskScheduler
 from app.core.engine.settings import EngineContext, EngineStatus, RunMode
 from app.utils.logger import logger
 
@@ -69,7 +70,7 @@ class IQuantEngine(ABC):
     # 组件管理接口
     # ------------------------------
     @abstractmethod
-    def register_component(self, component: BaseComponent) -> None:
+    def register_component(self, component: IBaseComponent) -> None:
         """
         注册业务组件到引擎
         支持注册你架构中的所有模块：
@@ -78,7 +79,7 @@ class IQuantEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_component(self, component_name: str) -> Optional[BaseComponent]:
+    def get_component(self, component_name: str) -> Optional[IBaseComponent]:
         """根据名称获取组件实例"""
         pass
 
@@ -110,6 +111,17 @@ class IQuantEngine(ABC):
         """获取全局事件总线"""
         raise NotImplementedError
 
+    @classmethod
+    def async_sleep(cls, seconds: float) -> defer.Deferred:
+        """
+        全版本兼容的Twisted异步sleep，替代高版本才有的defer.sleep
+        :param seconds: 等待时间（秒），支持小数如0.1、0.01
+        :return: Deferred对象，等待完成后自动触发callback
+        """
+        d = defer.Deferred()
+        reactor.callLater(delay=seconds, callable=d.callback,)
+        return d
+
 
 class BaseQuantEngine(IQuantEngine):
     """
@@ -130,19 +142,15 @@ class BaseQuantEngine(IQuantEngine):
         self.event_bus = EventBus()
 
         # 任务调度器
-        self.scheduler = TaskScheduler(self.context, self.event_bus)
+        # self.scheduler = TaskScheduler(self.context, self.event_bus)
 
         # 组件容器：管理你架构中所有注册的模块
-        self._components: Dict[str, BaseComponent] = {}
+        self._components: Dict[str, IBaseComponent] = {}
         self._component_order: List[str] = []  # 按注册顺序初始化/启动
 
         # 日志与信号
-        self.logger = logger
         self._register_system_signals()
 
-    # ------------------------------
-    # 工厂方法实现
-    # ------------------------------
     @classmethod
     def create(cls, config: Dict[str, Any]) -> IQuantEngine:
         return cls(config)
@@ -151,8 +159,8 @@ class BaseQuantEngine(IQuantEngine):
     # 生命周期核心实现
     # ------------------------------
     def initialize(self) -> None:
-        self.logger.info("=" * 60)
-        self.logger.info("=== 量化引擎开始初始化 ===")
+        logger.info("=" * 60)
+        logger.info("=== 量化引擎开始初始化 ===")
         self._status = EngineStatus.INITIALIZING
         self.context.engine_status = self._status
 
@@ -160,34 +168,24 @@ class BaseQuantEngine(IQuantEngine):
         for component_name in self._component_order:
             component = self._components[component_name]
             if not component.enabled:
-                self.logger.warning(f'component "{component_name}" is disabled')
+                logger.warning(f'component "{component_name}" is disabled')
                 continue
             try:
-                self.logger.info(f"初始化组件: {component_name}")
+                logger.info(f"初始化组件: {component_name}")
                 component.initialize(self.context, self.event_bus)
             except Exception as e:
-                self.logger.error(f"组件 {component_name} 初始化失败: {str(e)}", exc_info=True)
+                logger.error(f"组件 {component_name} 初始化失败: {str(e)}", exc_info=True)
                 self.event_bus.publish(StandardEvents.COMPONENT_ERROR, component=component_name, error=e)
 
         # 启动任务调度器
-        self.scheduler.start()
-        self.event_bus.subscribe(event_name=StandardEvents.TASK_SUBMIT, receiver=self._on_task_submit)
+        # self.scheduler.start()
+        # self.event_bus.subscribe(event_name=StandardEvents.TASK_SUBMIT, receiver=self._on_task_submit)
 
-        self.logger.info("=== 量化引擎初始化完成 ===")
-        self.logger.info("=" * 60)
-
-    def _on_task_submit(self, *args, **kwargs):
-        # 引擎调用调度器！！！
-        logger.debug((kwargs, args))
-        self.scheduler.submit_task(
-            task_name=kwargs['task_name'],
-            handler=kwargs['handler'],
-            priority=kwargs['priority'],
-            max_retry=kwargs['max_retry']
-        )
+        logger.info("=== 量化引擎初始化完成 ===")
+        logger.info("=" * 60)
 
     def start(self) -> EngineContext:
-        self.logger.info(f"=== 引擎启动 | 运行模式: {self.run_mode.value} | 运行ID: {self.context.run_id} ===")
+        logger.info(f"=== 引擎启动 | 运行模式: {self.run_mode.value} | 运行ID: {self.context.run_id} ===")
         self._status = EngineStatus.RUNNING
         self.context.engine_status = self._status
         self._stop_requested = False
@@ -200,34 +198,34 @@ class BaseQuantEngine(IQuantEngine):
 
         # 3. 发布引擎启动事件
         self.event_bus.publish(StandardEvents.ENGINE_STARTED, context=self.context)
-
+        self._status = EngineStatus.RUNNING
         # 4. 启动Twisted Reactor主循环（永久运行，除非调用stop）
-        # 对标Scrapy的reactor.run()，主线程卡在这里，永远不会执行完
         reactor.run()
 
         # 5. Reactor停止后返回最终结果
         self._status = EngineStatus.STOPPED
         self.context.engine_status = self._status
         self.event_bus.publish(StandardEvents.ENGINE_STOPPED, context=self.context)
-        self.logger.info("=== 量化引擎已正常停止 ===")
+        logger.info("=== 量化引擎已正常停止 ===")
         return self.context
 
     def stop(self, graceful: bool = True) -> None:
+        logger.debug(f"目前引擎状态:{self._status}")
         if self._status not in [EngineStatus.RUNNING, EngineStatus.PAUSED]:
             return
         self._graceful_stop = graceful
         self._stop_requested = True
         self._status = EngineStatus.STOPPING
         self.context.engine_status = self._status
-        self.logger.warning("收到引擎停止请求，正在执行优雅退出...")
+        logger.warning("收到引擎停止请求，正在执行优雅退出...")
 
         # 异步执行优雅退出流程
         reactor.callLater(0, self._graceful_shutdown)
 
     # ------------------------------
-    # 组件管理实现（完全匹配你的架构模块）
+    # 组件管理实现
     # ------------------------------
-    def register_component(self, component: BaseComponent) -> None:
+    def register_component(self, component: IBaseComponent) -> None:
         """
         注册你架构中的所有模块，按注册顺序调度
         推荐注册顺序（和你的架构完全一致）：
@@ -247,20 +245,20 @@ class BaseQuantEngine(IQuantEngine):
 
         self._components[component.name] = component
         self._component_order.append(component.name)
-        self.logger.info(f"注册组件: {component.name} | 状态: {'启用' if component.enabled else '禁用'}")
+        logger.info(f"注册组件: {component.name} | 状态: {'启用' if component.enabled else '禁用'}")
 
-    def get_component(self, component_name: str) -> Optional[BaseComponent]:
+    def get_component(self, component_name: str) -> Optional[IBaseComponent]:
         return self._components.get(component_name)
 
     def enable_component(self, component_name: str) -> None:
         component = self._get_component_or_throw(component_name)
         component.enabled = True
-        self.logger.info(f"动态启用组件: {component_name}")
+        logger.info(f"动态启用组件: {component_name}")
 
     def disable_component(self, component_name: str) -> None:
         component = self._get_component_or_throw(component_name)
         component.enabled = False
-        self.logger.info(f"动态禁用组件: {component_name}")
+        logger.info(f"动态禁用组件: {component_name}")
 
     # ------------------------------
     # 状态与管理接口
@@ -284,29 +282,45 @@ class BaseQuantEngine(IQuantEngine):
             if not component.enabled:
                 continue
             try:
-                self.logger.info(f"启动组件: {component_name}")
+                logger.info(f"启动组件: {component_name}")
                 component.start()
             except Exception as e:
-                self.logger.error(f"组件 {component_name} 启动失败: {str(e)}", exc_info=True)
+                logger.error(f"组件 {component_name} 启动失败: {str(e)}", exc_info=True)
                 self.event_bus.publish(StandardEvents.COMPONENT_ERROR, component=component_name, error=e)
 
     @defer.inlineCallbacks
-    def _graceful_shutdown(self) -> defer.Deferred:
+    def _graceful_shutdown(self) -> Generator[Deferred[Any], Any, None]:
         """优雅退出流程，对标Scrapy"""
-        self.logger.info("开始执行优雅退出流程...")
+        logger.info("开始执行优雅退出流程...")
+        self.event_bus.publish(StandardEvents.ENGINE_STOPPED, context=self.context)
+
+        # 全局停止超时：最多60秒，超时强制退出
+        shutdown_timeout = 60
+        start_time = time.time()
         # 1. 等待当前任务完成（优雅模式）
         if self._graceful_stop:
-            self.logger.info("等待当前任务处理完成...")
-            yield defer.sleep(2)
+            logger.info("等待当前任务处理完成...")
+            scheduler = self.get_component("task_scheduler")
+            max_task_wait = 30
+            waited = 0
+            while not scheduler.is_idle and waited < max_task_wait:
+                if time.time() - start_time > shutdown_timeout:
+                    logger.warning("⚠️ 全局停止超时，终止任务等待")
+                    break
+                logger.debug(f"等待中 | 活跃任务: {scheduler.active_tasks} | 待执行: {scheduler._task_queue.qsize()} | 已等待: {waited:.1f}s")
+                self.async_sleep(0.1)
+                waited += 0.1
 
         # 2. 逆序停止所有组件（先停下游交易层，再停上游行情层）
         for component_name in reversed(self._component_order):
             component = self._components[component_name]
             try:
-                self.logger.info(f"停止组件: {component_name}")
-                yield component.stop(self._graceful_stop)
+                logger.info(f"停止组件: {component_name}")
+                d = defer.maybeDeferred(component.stop, self._graceful_stop)
+                d.addTimeout(5, reactor)
+                yield d
             except Exception as e:
-                self.logger.error(f"组件 {component_name} 停止异常: {str(e)}", exc_info=True)
+                logger.error(f"组件 {component_name} 停止异常: {str(e)}", exc_info=True)
 
         # 3. 持久化状态
         self._persist_state()
@@ -314,8 +328,11 @@ class BaseQuantEngine(IQuantEngine):
         # 4. 停止Twisted Reactor
         if reactor.running:
             reactor.stop()
+        self._status = EngineStatus.STOPPED
 
-    def _get_component_or_throw(self, component_name: str) -> BaseComponent:
+        yield defer.succeed(None)
+
+    def _get_component_or_throw(self, component_name: str) -> IBaseComponent:
         component = self._components.get(component_name)
         if not component:
             raise ValueError(f"未找到组件: {component_name}")
@@ -326,7 +343,7 @@ class BaseQuantEngine(IQuantEngine):
 
         def handle_stop(signum, frame):
             signal_name = signal.Signals(signum).name
-            self.logger.warning(f"收到系统终止信号: {signal_name}, {frame}")
+            logger.warning(f"收到系统终止信号: {signal_name}, {frame}")
             self.stop(graceful=True)
 
         for sig in [signal.SIGINT, signal.SIGTERM]:
@@ -335,7 +352,7 @@ class BaseQuantEngine(IQuantEngine):
 
     def _persist_state(self) -> None:
         """持久化引擎状态，可扩展"""
-        self.logger.info("引擎状态已持久化")
+        logger.info("引擎状态已持久化")
 
 
 if __name__ == "__main__":
@@ -349,29 +366,25 @@ if __name__ == "__main__":
     # 2. 创建引擎实例
     engine = BaseQuantEngine.create(config)
 
-    # 3. 严格按照你的架构顺序注册所有模块（完全对应你的架构图）
-    # 核心层
-    # engine.register_component(MarketCenter())       # 你的行情中心
-    # engine.register_component(TaskScheduler())      # 你的定时调度器
-    # # 业务层
-    # engine.register_component(StrategyManager())    # 你的策略管理器
+    engine.register_component(TaskSchedulerComponent())  # 1. 调度器（必须）
+    # engine.register_component(MarketCenter())  # 2. 行情中心（必须）
+    # engine.register_component(StrategyManager())  # 3. 策略管理器（必须）
     # engine.register_component(RiskManager())        # 你的风控管理器
     # engine.register_component(Sizer())              # 你的仓位计算器
     # engine.register_component(Portfolio())          # 你的持仓账户
-    # engine.register_component(Execution())          # 你的执行层
-    # engine.register_component(BrokerAdapter())      # 你的券商适配器
+    # engine.register_component(BrokerAdapter())  # 4. 券商/撮合适配器（必须）
 
     # 测试一个自定义组件
     engine.register_component(TimerComponent())
 
     # 4. 订阅事件示例（所有模块通过事件通信，无直接调用）
-    def on_signal_generated(s):
-        print(f"收到策略信号: {s}")
+    def on_signal_generated(*args, **kwargs):
+        logger.debug(f"收到策略信号: {kwargs}")
 
-    engine.get_event_bus().subscribe(StandardEvents.SIGNAL_GENERATED, on_signal_generated)
+    engine.get_event_bus().subscribe(StandardEvents.ENGINE_STARTED, on_signal_generated)
 
     # 5. 一键启动引擎
     context = engine.start()
 
     # 6. 运行完成后查看结果
-    print(f"\n运行完成 | 模式: {context.run_mode.value} | 最终权益: {context.extra.get('total_equity', 0):.2f}")
+    logger.debug(f"运行完成 | 模式: {context.run_mode.value}")

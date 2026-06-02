@@ -14,38 +14,8 @@ from typing import Dict, List, Callable
 
 from app.utils.logger import logger
 
-class EventBus:
-    """
-    全局事件总线
-    发布-订阅模式，彻底解耦所有组件
-    """
-    def __init__(self) -> None:
-        self._receivers: Dict[str, List[Callable]] = defaultdict(list)
 
-
-    def subscribe(self, event_name: str, receiver: Callable) -> None:
-        """订阅事件"""
-        self._receivers[event_name].append(receiver)
-
-    def publish(self, event_name: str, **kwargs) -> None:
-        """发布事件，异常隔离，一个回调报错不影响其他回调"""
-        for receiver in self._receivers[event_name]:
-            try:
-                logger.debug(f"正在回调...{receiver.__name__}")
-                receiver(**kwargs)
-            except Exception as e:
-                logger.error(f"事件 {event_name} 回调异常: {str(e)}", exc_info=True)
-
-    def unsubscribe(self, event_name: str, receiver: Callable) -> None:
-        """取消订阅"""
-        if receiver in self._receivers[event_name]:
-            self._receivers[event_name].remove(receiver)
-
-    def get_receiver(self):
-        return self._receivers
-
-
-# 预定义标准事件（你可以按需扩展）
+# 预定义标准事件
 class StandardEvents:
     """全系统标准事件，所有组件统一使用"""
     # 引擎生命周期
@@ -67,3 +37,38 @@ class StandardEvents:
     ENGINE_ERROR = "engine_error"
     # 任务提交
     TASK_SUBMIT = "task_submit"
+
+    TIMER_3MIN = "timer_3min"
+
+
+class EventBus:
+    """
+    全局事件总线
+    发布-订阅模式,解耦所有组件
+    """
+
+    def __init__(self) -> None:
+        self._receivers: Dict[str, List[Callable]] = defaultdict(list)
+
+
+    def subscribe(self, event_name: str, receiver: Callable) -> None:
+        """订阅事件"""
+        self._receivers[event_name].append(receiver)
+
+    def publish(self, event_name: str, **kwargs) -> None:
+        """发布事件"""
+        for receiver in self._receivers[event_name]:
+            try:
+                logger.debug(f"正在回调...{receiver.__name__}")
+                receiver(**kwargs)
+            except Exception as e:
+                logger.error(f"事件 {event_name} 回调异常: {str(e)}", exc_info=True)
+
+    def unsubscribe(self, event_name: str, receiver: Callable) -> None:
+        """取消订阅"""
+        if receiver in self._receivers[event_name]:
+            self._receivers[event_name].remove(receiver)
+
+    def get_receiver(self):
+        return self._receivers
+
