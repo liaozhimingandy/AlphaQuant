@@ -19,7 +19,6 @@ from app.core.engine.event import EventBus
 from app.core.engine.settings import EngineContext
 from app.utils.logger import logger
 
-
 # ======================
 # 1. 组件状态枚举
 # ======================
@@ -47,6 +46,7 @@ class IBaseComponent(ABC):
         # 由Engine自动注入，所有组件共享
         self.context: Optional[EngineContext] = None
         self.event_bus: Optional[EventBus] = None
+
         self.component_config: dict = {}  # 组件独立配置
 
         # 状态管理
@@ -55,6 +55,7 @@ class IBaseComponent(ABC):
         self._subscribed_events: list[tuple[str, Callable]] = []
 
     def initialize(self, context: EngineContext, event_bus: EventBus, component_config: dict = None) -> None:
+
         """
         组件初始化，整个生命周期仅执行1次
         用途：加载配置、初始化连接、订阅事件

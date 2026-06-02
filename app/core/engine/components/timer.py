@@ -13,7 +13,7 @@
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Dict, Callable, Optional, List, Any, Generator
+from typing import Dict, Callable, Any, Generator
 from twisted.internet import reactor, defer
 from twisted.internet.defer import Deferred
 from twisted.internet.task import LoopingCall

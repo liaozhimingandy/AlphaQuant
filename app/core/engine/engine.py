@@ -19,6 +19,7 @@ from twisted.internet.defer import Deferred
 
 from app.core.engine.component import IBaseComponent, TaskSchedulerComponent
 from app.core.engine.components import TimerComponent
+
 from app.core.engine.event import EventBus, StandardEvents
 from app.core.engine.settings import EngineContext, EngineStatus, RunMode
 from app.core.engine.utils import async_sleep
@@ -112,6 +113,17 @@ class IQuantEngine(ABC):
     def get_event_bus(self) -> EventBus:
         """获取全局事件总线"""
         raise NotImplementedError
+
+    @classmethod
+    def async_sleep(cls, seconds: float) -> defer.Deferred:
+        """
+        全版本兼容的Twisted异步sleep，替代高版本才有的defer.sleep
+        :param seconds: 等待时间（秒），支持小数如0.1、0.01
+        :return: Deferred对象，等待完成后自动触发callback
+        """
+        d = defer.Deferred()
+        reactor.callLater(delay=seconds, callable=d.callback,)
+        return d
 
 
 class BaseQuantEngine(IQuantEngine):
@@ -299,7 +311,8 @@ class BaseQuantEngine(IQuantEngine):
                     logger.warning("⚠️ 全局停止超时，终止任务等待")
                     break
                 logger.debug(f"等待中 | 活跃任务: {scheduler.active_tasks} | 待执行: {scheduler._task_queue.qsize()} | 已等待: {waited:.1f}s")
-                yield async_sleep(0.1)
+
+                self.async_sleep(0.1)
                 waited += 0.1
 
         # 2. 逆序停止所有组件（先停下游交易层，再停上游行情层）
@@ -372,6 +385,7 @@ if __name__ == "__main__":
     # 4. 订阅事件示例（所有模块通过事件通信，无直接调用）
     def on_signal_generated(*args, **kwargs):
         logger.debug(f"收到策略信号: {kwargs}")
+
 
     engine.get_event_bus().subscribe(StandardEvents.ENGINE_STARTED, on_signal_generated)
 
