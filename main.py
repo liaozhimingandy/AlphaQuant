@@ -11,6 +11,7 @@ from app.repository.stock_repository import StockRepository
 from app.strategy.ma_cross import MaCrossStrategy
 from app.strategy.strategy import PreciseMaCrossStrategyI
 from app.utils.logger import logger
+from app.core.engine import cli
 
 # from app.strategy.trend_ma_cross import TrendMaCrossStrategy
 
@@ -503,6 +504,9 @@ def run_backtest4():
     # 6. 运行完成后查看结果
     logger.debug(f"运行完成 | 模式: {context.run_mode.value}")
 
+def run_backtest5():
+    cli()
+
 
 if __name__ == "__main__":
-    run_backtest4()
+    run_backtest3()

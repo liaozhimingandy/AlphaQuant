@@ -22,21 +22,15 @@ class StockRepository:
     @staticmethod
     def batch_upsert(db:Session, records: list[dict]):
         """批量插入数据"""
-
         if not records:
             return
-
         stmt = insert(StockDaily).values(records)
-
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["symbol", "date"]
         )
-
         db.execute(stmt)
-
         db.commit()
-
-        logger.info(f"批量入库完成，共 {len(records)} 条")
+        logger.debug(f"批量入库完成,共计{len(records)}条")
 
     @staticmethod
     def get_stock_df(

@@ -31,7 +31,7 @@ def main2():
     df = DataSourceFactory.get_stock_data(
         code="000001",
         start="2021-01-01",
-        end="2026-05-26",
+        end="2026-06-06",
         adjust="qfq"
     )
     records = df.to_dict(orient="records")
