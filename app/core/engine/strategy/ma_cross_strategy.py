@@ -9,8 +9,9 @@
 # @Project     : AlphaQuant
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
-from utils.logger import logger
-from base import IBaseStrategy, Bar, TradeSignal, Order
+from app.core.engine.strategy.entities import Order, TradeSignal, Bar
+from app.utils.logger import logger
+from app.core.engine.strategy.base import IBaseStrategy
 from typing import List
 
 
@@ -71,7 +72,7 @@ class MaCrossStrategy(IBaseStrategy):
             self.buy(price=bar.close, size=size)
         elif signal.signal == -1:
             self.close_position()
-
+        logger.debug(f'{bar.timestamp}')
         # 提交耗时任务（报表生成）
         self.submit_task(self.generate_report, bar)
 

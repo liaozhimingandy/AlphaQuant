@@ -10,85 +10,11 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 import abc
-import uuid
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import Optional, Dict, Any, List
 
-from utils.logger import logger
-
-
-# --------------------- 枚举定义 ---------------------
-class OrderStatus(Enum):
-
-    """订单状态
-
-    | 状态        | 含义    | 什么时候触发              |
-        | --------- | ----- | ------------------- |
-        | Created   | 已创建   | 你刚调用 `buy()/sell()` |
-        | Submitted | 已提交   | 提交给 broker          |
-        | Accepted  | 已接受   | broker 接受订单         |
-        | Partial   | 部分成交  | 只成交了一部分             |
-        | Completed | 完全成交  | 全部成交完成              |
-        | Canceled  | 已取消   | 主动 cancel           |
-        | Expired   | 已过期   | 订单过期                |
-        | Margin    | 保证金不足 | 资金不够                |
-        | Rejected  | 被拒绝   | broker 拒单           |
-    """
-    CREATED = field(default="created", doc="已创建")
-    SUBMITTED = "submitted"
-    COMPLETED = "completed"
-    CANCELED = "canceled"
-    REJECTED = "rejected"
-    MARGIN_INSUFFICIENT = "margin_insufficient"
-
-class OrderSide(Enum):
-    """订单方向"""
-    BUY = "buy"
-    SELL = "sell"
-
-# --------------------- 核心数据结构 ---------------------
-@dataclass
-class Bar:
-    """K线数据（全框架通用）"""
-    symbol: str
-    timestamp: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-
-@dataclass
-class Order:
-    """订单"""
-    order_id: str = field(default_factory=lambda: str(uuid.uuid4()), doc="订单唯一标识")
-    side: OrderSide = field(default=OrderSide.BUY, doc="")
-    price: float = field(default=0.0, doc="价格")
-    size: float= field(default=0, doc="仓位")
-    status: OrderStatus = field(default=OrderStatus.CREATED, doc="状态")
-    commission: float = field(default=0.0, doc="交易费率")
-
-@dataclass
-class Position:
-    """持仓"""
-    symbol: str
-    size: float = 0.0
-    avg_price: float = 0.0
-
-@dataclass
-class Account:
-    """账户"""
-    cash: float = 100000.0
-    frozen_cash: float = 0.0
-    total_assets: float = 100000.0
-
-@dataclass
-class TradeSignal:
-    """交易信号"""
-    signal: int  # 1=买入, -1=卖出, 0=持仓
-    reason: str = ""
-
+from app.core.engine.strategy.entities import Account, Position, Order, Bar, TradeSignal, OrderSide, OrderStatus
+from app.core.engine.strategy.factor import IFactor, FactorSignal
+from app.utils.logger import logger
 
 class IBaseStrategy(abc.ABC):
     # 策略基础信息
@@ -170,7 +96,7 @@ class IBaseStrategy(abc.ABC):
         if size <= 0 or self.account.cash < price * size:
             return None
         self.account.frozen_cash = price * size
-        logger.info(f"买入 | {self.symbol} 价格={price} 数量={size}")
+        logger.info(f"买入 - {self.symbol} - 价格={price} - 数量={size}")
         return Order(order_id="buy_001", side=OrderSide.BUY, price=price, size=size, status=OrderStatus.CREATED)
 
     def sell(self, price: float, size: float) -> Optional[Order]:

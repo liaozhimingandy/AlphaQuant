@@ -11,9 +11,9 @@
 # -------------------------------------------------------------------------------
 import backtrader as bt
 
-from db.database import SessionLocal
-from repository.stock_repository import StockRepository
-from base import IBaseStrategy, Bar
+from app.db.database import SessionLocal
+from app.repository.stock_repository import StockRepository
+from app.core.engine.strategy.base import IBaseStrategy, Bar
 from ma_cross_strategy import MaCrossStrategy
 
 
