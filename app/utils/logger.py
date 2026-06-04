@@ -40,7 +40,7 @@ logger.add(
     "logs/alphaquant_{time:YYYY-MM-DD}.log",
     rotation="00:00",
     retention="30 days",
-    level="INFO",
+    level="DEBUG",
     encoding="utf-8",
     enqueue=True,
     format=(

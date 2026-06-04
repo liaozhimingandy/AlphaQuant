@@ -28,7 +28,8 @@ class Bar:
 
 
 class OrderStatus(Enum):
-    """订单状态
+    """
+    订单状态
 
     | 状态        | 含义    | 什么时候触发              |
         | --------- | ----- | ------------------- |
@@ -47,7 +48,7 @@ class OrderStatus(Enum):
     COMPLETED = "completed"
     CANCELED = "canceled"
     REJECTED = "rejected"
-    MARGIN_INSUFFICIENT = "margin_insufficient"
+    MARGIN_INSUFFICIENT = "margin"
 
 
 class OrderSide(Enum):
@@ -89,3 +90,12 @@ class TradeSignal:
     signal: int  # 1=买入, -1=卖出, 0=持仓
     reason: str = ""
 
+class FactorSignal(Enum):
+    """因子标准化输出信号
+    LONG: 看多/买入
+    SHORT: 看空/卖出
+    NEUTRAL: 观望/无信号
+    """
+    LONG = 1
+    SHORT = -1
+    NEUTRAL = 0

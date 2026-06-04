@@ -10,21 +10,13 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 import abc
-from enum import Enum
+from dataclasses import dataclass, field
+from typing import List
+
+from utils.logger import logger
+from .entities import Bar, FactorSignal
 
 
-# --------------------- 因子信号标准（统一输出） ---------------------
-class FactorSignal(Enum):
-    """因子标准化输出信号
-    LONG: 看多/买入
-    SHORT: 看空/卖出
-    NEUTRAL: 观望/无信号
-    """
-    LONG = 1
-    SHORT = -1
-    NEUTRAL = 0
-
-# --------------------- 【顶层因子抽象接口】可插拔、可组合 ---------------------
 class IFactor(abc.ABC):
     """所有因子（指标）必须继承此类
     独立计算、独立输出信号，与策略完全解耦
@@ -46,4 +38,39 @@ class IFactor(abc.ABC):
     @abc.abstractmethod
     def reset(self) -> None:
         """重置因子状态"""
+        pass
+
+
+@dataclass
+class MaCrossFactor(IFactor):
+    """
+    520均线
+    """
+    items: List[float] = field(default_factory=list)
+
+    def on_init(self) -> None:
+        pass
+
+    def on_bar(self, bar: Bar) -> FactorSignal:
+        self.items.append(bar.close)
+
+        if len(self.items) < 5:
+            return FactorSignal.NEUTRAL
+
+        # 计算均线
+        ma_f = sum(self.items[-5:]) / 5
+        ma_s = sum(self.items[-20:]) / 20
+        ma_t = sum(self.items[-60:]) / 60
+
+        # 趋势过滤
+        trend_up = ma_t < bar.close
+        # 金叉买入
+        if trend_up and ma_f > ma_s:
+            return FactorSignal.LONG
+        # 死叉卖出
+        if ma_f < ma_s:
+            return FactorSignal.SHORT
+        return FactorSignal.NEUTRAL
+
+    def reset(self) -> None:
         pass

@@ -44,11 +44,6 @@ class BacktraderStrategyAdapter(bt.Strategy):
         )
         self.strategy.on_bar(bar)
 
-    def notify_order(self, order):
-        """backtrader 有订单时回调"""
-        pass
-
-
 if __name__ == "__main__":
     cerebro = bt.Cerebro()
 
@@ -57,13 +52,11 @@ if __name__ == "__main__":
     df = StockRepository.get_stock_df(
         db=db,
         symbol="000001",
-        start_date="2023-01-01",
+        start_date="2022-01-01",
         end_date="2026-06-02"
     )
 
-    data = bt.feeds.PandasData(
-        dataname=df
-    )
+    data = bt.feeds.PandasData(dataname=df)
 
     cerebro.adddata(data)
     cerebro.broker.setcash(10000)
@@ -80,7 +73,7 @@ if __name__ == "__main__":
     # 收盘价成交
     cerebro.broker.set_coc(True)
 
-    strategy = MaCrossStrategy(symbol='', config={})
+    strategy = MaCrossStrategy(symbol='000001', config={})
     cerebro.addstrategy(BacktraderStrategyAdapter, strategy_instance=strategy)
 
     cerebro.run()

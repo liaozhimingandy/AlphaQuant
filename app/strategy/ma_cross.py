@@ -19,7 +19,6 @@ class MaCrossStrategy(bt.Strategy):
         self.ma_fast = bt.indicators.SMA(self.data.close, period=self.p.fast)
         self.ma_slow = bt.indicators.SMA(self.data.close, period=self.p.slow)
         self.ma_trend = bt.indicators.SMA(self.data.close, period=self.p.trend_slow)
-
         self.crossover = bt.indicators.CrossOver(self.ma_fast, self.ma_slow)
 
         self.order = None
