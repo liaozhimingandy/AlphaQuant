@@ -42,7 +42,12 @@ class IBaseStrategy(abc.ABC):
     def on_bar(self, bar: Bar) -> None:
         """一次K线,执行一次"""
         # 保存计算过的数据
-
+        logger.debug(
+            f"每日监控 | 日期:{bar.timestamp} | 价格={bar.close:.2f} | 持仓={self.position.size:.0f}股 | "
+            f"持仓市值={self.position.size*bar.close:.2f} | 总资产={self.account.cash:.2f} | "
+            f"可用资金={self.account.cash:.2f} | 仓位=0.0% | "
+            f"冻结资金={self.account.frozen_cash:.2f}"
+        )
         self.close_prices.append(bar.close)
         signal = self.generate_signal(bar)
         if signal.signal == 1:
@@ -60,10 +65,9 @@ class IBaseStrategy(abc.ABC):
     def generate_signal(self, bar: Bar) -> TradeSignal:
         """生成交易信号"""
         signal = self._aggregate_factor_signals(bar)
-        logger.debug(signal)
-        if signal.LONG:
+        if signal == FactorSignal.LONG:
             return TradeSignal(1, "+")
-        elif signal.SHORT:
+        elif signal == FactorSignal.SHORT:
             return TradeSignal(-1, "-")
         return TradeSignal(0, "空")
 
@@ -73,19 +77,18 @@ class IBaseStrategy(abc.ABC):
         【引擎自动调用】订单状态变更时触发
         触发时机：订单 成交/取消/拒绝 后
         """
-        logger.debug(
-            f"每日监控 | 价格={self.position.avg_price:.2f} | 持仓={self.position.size:.0f}股 | "
-            f"持仓市值={self.account.cash:.2f} | 总资产={self.account.total_assets:.2f} | "
-            f"可用资金={self.account.cash:.2f} | 仓位=0.0% | "
-            f"冻结资金={self.account.frozen_cash:.2f}"
-        )
-        logger.debug(order)
         if order.status == OrderStatus.CREATED and order.side == OrderSide.BUY:
+            logger.info(f'✅ 买入成交 | 价格={order.price:.2f} | 数量={order.size:.0f}股')
             self.buy_price = order.price
             self.account.cash -= order.price * order.size
             self.position.size += order.size
             self.account.frozen_cash = self.account.cash
-
+        elif order.status == OrderStatus.CREATED and order.side == OrderSide.SELL:
+            logger.info(f'❌ 卖出成交 | 价格={order.price:.2f} | 数量={order.size:.0f}股')
+            self.buy_price = 0.0
+            self.account.cash += order.price * order.size
+            self.position.size -= order.size
+            self.account.frozen_cash = 0
         self.active_order = None
 
 
@@ -122,7 +125,7 @@ class IBaseStrategy(abc.ABC):
     def buy(self, bar: Bar) -> Optional[Order]:
         """标准买入接口"""
         size = self._calc_buy_size(bar.close)
-        if self.position.size <= 0 or self.account.cash < bar.close * size:
+        if self.account.cash < bar.close * size:
             return None
         self.account.frozen_cash = bar.close * size
         # logger.info(f"买入 - {self.symbol} - 价格={price} - 数量={size}")

@@ -13,7 +13,6 @@ import abc
 from dataclasses import dataclass, field
 from typing import List
 
-from utils.logger import logger
 from .entities import Bar, FactorSignal
 
 
