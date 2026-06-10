@@ -30,14 +30,21 @@ class IBaseStrategy(abc.ABC):
         self.stop_order: Optional[Order] = None
         self.buy_price: float = 0.0
         self.close_prices: List[float] = [] # 存放历史价格
-
         self.factors: List[IFactor] = []  # 注册的因子
+        self.trades: List[str] = []
 
 
     def on_init(self) -> None:
         """策略初始化"""
         pass
 
+    def on_start(self):
+        """策略开始"""
+        pass
+
+    def on_stop(self) -> None:
+        """策略停止"""
+        pass
 
     def on_bar(self, bar: Bar) -> None:
         """一次K线,执行一次"""
@@ -49,28 +56,29 @@ class IBaseStrategy(abc.ABC):
             f"冻结资金={self.account.frozen_cash:.2f}"
         )
         self.close_prices.append(bar.close)
+        # 根据最新的数据获取交易信号
         signal = self.generate_signal(bar)
         if signal.signal == 1:
+            self.trades.append('B')
             self.active_order = self.buy(bar)
         elif signal.signal == -1:
+            # 清仓
+            self.trades.append('S')
             self.active_order = self.close_position(bar)
+        # 若需要交易
         if self.active_order:
             self.on_order_update(self.active_order)
 
-
-    def on_stop(self) -> None:
-        """策略停止"""
-        pass
-
     def generate_signal(self, bar: Bar) -> TradeSignal:
         """生成交易信号"""
+        # 根据注册的因子，进行组合生成交易信号
         signal = self._aggregate_factor_signals(bar)
-        if signal == FactorSignal.LONG:
-            return TradeSignal(1, "+")
-        elif signal == FactorSignal.SHORT:
-            return TradeSignal(-1, "-")
-        return TradeSignal(0, "空")
-
+        _SIGNAL_MAPPING = {
+            FactorSignal.LONG: (1, "+"),
+            FactorSignal.SHORT: (-1, "-"),
+        }
+        s, r = _SIGNAL_MAPPING.get(signal, (0, '无'))
+        return TradeSignal(signal=s, reason=r)
 
     def on_order_update(self, order: Order) -> None:
         """
@@ -113,11 +121,12 @@ class IBaseStrategy(abc.ABC):
         # 获取所有因子信号
         signals = [factor.on_bar(bar) for factor in self.factors]
 
-        # 聚合规则1：全部看多 → 买入
+        # 聚合规则1-满足所有买入条件则买入
         if all(s == FactorSignal.LONG for s in signals):
             return FactorSignal.LONG
-        # 聚合规则2：全部看空 → 卖出
-        if all(s == FactorSignal.SHORT for s in signals):
+
+        # 聚合规则2-满足任一卖出条件则卖出
+        if any(s == FactorSignal.SHORT for s in signals):
             return FactorSignal.SHORT
 
         return FactorSignal.NEUTRAL

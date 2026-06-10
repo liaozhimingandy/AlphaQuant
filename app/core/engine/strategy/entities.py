@@ -32,16 +32,16 @@ class OrderStatus(Enum):
     订单状态
 
     | 状态        | 含义    | 什么时候触发              |
-        | --------- | ----- | ------------------- |
-        | Created   | 已创建   | 你刚调用 `buy()/sell()` |
-        | Submitted | 已提交   | 提交给 broker          |
-        | Accepted  | 已接受   | broker 接受订单         |
-        | Partial   | 部分成交  | 只成交了一部分             |
-        | Completed | 完全成交  | 全部成交完成              |
-        | Canceled  | 已取消   | 主动 cancel           |
-        | Expired   | 已过期   | 订单过期                |
-        | Margin    | 保证金不足 | 资金不够                |
-        | Rejected  | 被拒绝   | broker 拒单           |
+    | --------- | ----- | ------------------- |
+    | Created   | 已创建   | 你刚调用 `buy()/sell()` |
+    | Submitted | 已提交   | 提交给 broker          |
+    | Accepted  | 已接受   | broker 接受订单         |
+    | Partial   | 部分成交  | 只成交了一部分             |
+    | Completed | 完全成交  | 全部成交完成              |
+    | Canceled  | 已取消   | 主动 cancel           |
+    | Expired   | 已过期   | 订单过期                |
+    | Margin    | 保证金不足 | 资金不够                |
+    | Rejected  | 被拒绝   | broker 拒单           |
     """
     CREATED = field(default="created", doc="已创建")
     SUBMITTED = "submitted"

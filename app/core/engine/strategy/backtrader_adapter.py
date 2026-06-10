@@ -14,6 +14,7 @@ import backtrader as bt
 from app.db.database import SessionLocal
 from app.repository.stock_repository import StockRepository
 from app.core.engine.strategy.base import IBaseStrategy, Bar
+from app.utils.logger import logger
 from ma_cross_strategy import MaCrossStrategy
 
 
@@ -25,6 +26,11 @@ class BacktraderStrategyAdapter(bt.Strategy):
     params = dict(
         strategy_instance=None,  # 注入抽象策略
     )
+
+    def start(self):
+        super().start()
+        self.strategy.on_start()
+        logger.debug(f"策略 {self.strategy.symbol} 开始回测")
 
     def __init__(self):
         super().__init__()
@@ -43,6 +49,27 @@ class BacktraderStrategyAdapter(bt.Strategy):
             volume=self.data.volume[0],
         )
         self.strategy.on_bar(bar)
+
+    def stop(self):
+        super().stop()
+        self.strategy.on_stop()
+        symbol = self.strategy.symbol
+
+        # ========== ==========
+        # 假设 self.strategy.trades 是你自己维护的交易列表
+        trade_count = len(self.strategy.trades) // 2  # 整数除法，避免浮点数
+        logger.debug(f"【回测结束】标的{symbol}，共交易 {trade_count} 次")
+
+        # 示例1：打印最终资金
+        final_cash = self.strategy.account.total_assets
+        logger.debug(f"【回测结束】标的{symbol}，最终总资产：{final_cash:.2f}")
+
+        # 示例2：调用自研策略内部的收尾方法（解耦推荐）
+        if hasattr(self.strategy, "on_finish"):
+            self.strategy.on_finish()
+
+        # 示例3：临时数据清理
+        self.strategy.trades.clear()
 
 if __name__ == "__main__":
     cerebro = bt.Cerebro()

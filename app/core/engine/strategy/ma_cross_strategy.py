@@ -36,7 +36,6 @@ class MaCrossStrategy(IBaseStrategy):
         self.add_factor(MaCrossFactor())
 
     def on_stop(self):
-        self.close_position()
         logger.info("策略停止，已清仓")
 
 
