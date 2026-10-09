@@ -91,6 +91,21 @@ class IBaseComposableStrategy(bt.Strategy):
             self.cancel(self.stop_order)
             self.stop_order = None
 
+    def _kill_zombie_stops(self):
+        """清理僵尸止损单：空仓时以 broker 实际挂单为准，一律撤掉止损卖单。
+
+        在同一根K线内"先挂止损、再撤单"时 backtrader 的撤单会失效，
+        残留的止损单日后触发会在空仓状态卖出，产生负仓位。
+        """
+        if self.position.size != 0:
+            return
+        for order in list(self.broker.get_orders_open()):
+            try:
+                if order.exectype == bt.Order.Stop and not order.isbuy():
+                    self.cancel(order)
+            except Exception:
+                continue
+
     def _close_position(self, reason: str):
         self._cancel_stop_order()
         current_price = self.data.close[0]
@@ -122,7 +137,8 @@ class IBaseComposableStrategy(bt.Strategy):
                     f"手续费={order.executed.comm:.2f} | 持仓总成本={self.buy_total_cost:.2f}元 | "
                     f"仓位={self.position.size*executed_price/self.broker.getvalue()*100:.1f}%"
                 )
-                if self.p.stop_loss_pct > 0:
+                # 只有确实持有多头时才挂止损单，避免挂出无对应持仓的空单
+                if self.p.stop_loss_pct > 0 and self.position.size > 0:
                     stop_price = (self.buy_total_cost / executed_size) * (1 - self.p.stop_loss_pct)
                     self.stop_order = self.sell(size=self.position.size, exectype=bt.Order.Stop, price=stop_price)
                     self.log(f"🛡️ 止损单已挂出 | 止损价={stop_price:.2f}")
@@ -147,6 +163,8 @@ class IBaseComposableStrategy(bt.Strategy):
             self.log(f"⚠️ 订单异常 | 状态={order.getstatusname()} | 冻结资金已退回")
 
     def next(self):
+        self._kill_zombie_stops()
+
         current_price = self.data.close[0]
         position_size = self.position.size
         position_value = position_size * current_price

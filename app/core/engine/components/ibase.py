@@ -69,6 +69,17 @@ class IBaseComponent(ABC):
         if not self.name or not isinstance(self.name, str):
             raise ValueError(f"组件 {self.__class__.__name__} 必须定义类属性 name")
 
+        # 3. 生命周期方法遮蔽检测
+        #    构造参数若与 start/stop/initialize 同名，会把方法覆盖成标量，
+        #    报错信息（"'str' object is not callable"）极难定位，这里提前拦掉
+        for method in ("start", "stop", "initialize", "health_check"):
+            attr = getattr(self, method, None)
+            if not callable(attr):
+                raise TypeError(
+                    f"组件 {self.__class__.__name__} 的 {method}() 被实例属性遮蔽"
+                    f"（当前值={attr!r}），请重命名构造参数"
+                )
+
         self.context = context
         self.event_bus = event_bus
         self.component_config = component_config or {}

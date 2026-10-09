@@ -67,12 +67,6 @@ def timer(interval: float, event_name: str, event_data: Dict = None, run_immedia
 class TimerComponent(IBaseComponent):
     """
     基于 Twisted LoopingCall 的工业级定时器组件
-    ✅ 原生周期性调度，无任务重叠
-    ✅ 声明式装饰器注册，代码更优雅
-    ✅ 类型安全的配置管理
-    ✅ 完美的优雅停止（等待当前任务完成）
-    ✅ 异常隔离，单个任务报错不影响全局
-    ✅ 支持一次性延迟任务
     """
     name = "timerV2"
 
@@ -80,7 +74,6 @@ class TimerComponent(IBaseComponent):
         super().__init__()
         self._timers: Dict[str, LoopingCall] = {}
         self._is_stopping = False
-
 
     def on_initialize(self) -> None:
         # 运行中的 LoopingCall 实例池

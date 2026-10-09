@@ -189,20 +189,8 @@ class TaskSchedulerComponent(IBaseComponent):
         with self._lock:
             return list(self._task_queue.queue)
 
-class TimerComponent(IBaseComponent):
 
-    name = "timer"
-
-    def on_initialize(self) -> None:
-        self.subscribe_event(event_name=StandardEvents.ENGINE_STARTED, handler=self._deal_signal)
-
-    def on_start(self) -> None:
-        logger.info("定时器组件开始...")
-        self.event_bus.publish(StandardEvents.TASK_SUBMIT, handler=self._deal_signal,
-                               priority=TaskPriority.HIGH, max_retry=3, task_name="定时器任务测试")
-
-    def on_stop(self, graceful: bool = True) -> None:
-        logger.info("定时器组件停止...")
-
-    def _deal_signal(self, **kwargs) -> None:
-        logger.debug(f'收到信号: {kwargs}')
+# 注意：
+# 本文件早期曾定义过一个同名的 TimerComponent(name="timer")，
+# 与 app/core/engine/components/timer.py 中的实现重复，已删除。
+# 全项目统一使用 `from app.core.engine.components import TimerComponent`。

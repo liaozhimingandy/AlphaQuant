@@ -10,13 +10,16 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 from abc import ABC, abstractmethod
+import threading
 import time
+from datetime import datetime
 from typing import Dict, Any, Optional, List, Generator
 import signal
 
 from twisted.internet import reactor, defer
 from twisted.internet.defer import Deferred
 
+from app.core.config import settings
 from app.core.engine.component import IBaseComponent, TaskSchedulerComponent
 from app.core.engine.components import TimerComponent
 
@@ -175,7 +178,11 @@ class BaseQuantEngine(IQuantEngine):
                 continue
             try:
                 logger.info(f"初始化组件: {component_name}")
-                component.initialize(self.context, self.event_bus)
+                # 组件配置从全局配置里按组件名取，这样一个组件的行为
+                # 也能通过配置驱动，不必改代码
+                components_cfg = self.config.get("components") or {}
+                cfg = components_cfg.get(component_name) or self.config.get(component_name) or {}
+                component.initialize(self.context, self.event_bus, cfg)
             except Exception as e:
                 logger.error(f"组件 {component_name} 初始化失败: {str(e)}", exc_info=True)
                 self.event_bus.publish(StandardEvents.COMPONENT_ERROR, component=component_name, error=e)
@@ -202,25 +209,106 @@ class BaseQuantEngine(IQuantEngine):
         # 3. 发布引擎启动事件
         self.event_bus.publish(StandardEvents.ENGINE_STARTED, context=self.context)
         self._status = EngineStatus.RUNNING
+
+        # 3.1 回测模式：装一个"空闲自动停止"看门狗。
+        #      否则 reactor.run() 会永久阻塞，回测永远不会返回——这是旧实现最大的可用性问题。
+        if self.run_mode == RunMode.BACKTEST and self.config.get(
+            "BACKTEST_AUTO_STOP", settings.BACKTEST_AUTO_STOP
+        ):
+            self._start_idle_watchdog()
+
         # 4. 启动Twisted Reactor主循环（永久运行，除非调用stop）
         reactor.run()
 
         # 5. Reactor停止后返回最终结果
         self._status = EngineStatus.STOPPED
         self.context.engine_status = self._status
+        self.context.end_time = datetime.now()
         self.event_bus.publish(StandardEvents.ENGINE_STOPPED, context=self.context)
         logger.info("=== 量化引擎已正常停止 ===")
         return self.context
 
+    def _start_idle_watchdog(self) -> None:
+        """回测模式空闲看门狗：调度器持续空闲 N 秒后自动停止引擎。
+
+        这样"跑完就退出"成为默认行为；SIMULATE/LIVE 模式不会安装它。
+        """
+        timeout = float(
+            self.config.get("BACKTEST_IDLE_TIMEOUT", settings.BACKTEST_IDLE_TIMEOUT)
+        )
+        idle_since: Optional[float] = None
+
+        def _watch() -> None:
+            nonlocal idle_since
+            if self._status in (EngineStatus.STOPPING, EngineStatus.STOPPED):
+                return
+            if self._stop_requested:
+                return
+
+            if self._is_idle():
+                if idle_since is None:
+                    idle_since = time.time()
+                elif time.time() - idle_since >= timeout:
+                    logger.info(
+                        f"回测模式：调度器已空闲 {timeout:.1f}s，触发自动停止"
+                    )
+                    self.stop(graceful=True)
+                    return
+            else:
+                idle_since = None
+
+            reactor.callLater(0.5, _watch)
+
+        logger.info(f"回测模式已启用空闲自动停止 | 空闲阈值: {timeout:.1f}s")
+        reactor.callLater(0.5, _watch)
+
+    def _component_is_busy(self) -> bool:
+        """是否有业务组件仍在工作。
+
+        只问 task_scheduler 是不够的：回放行情、轮询新闻这类组件不往调度器里
+        放任务，但显然不应该被判定为空闲。所以这里让组件自己声明忙闲。
+        """
+        for comp in self._components.values():
+            fn = getattr(comp, "is_busy", None)
+            if not callable(fn):
+                continue
+            try:
+                if bool(fn()):
+                    return True
+            except Exception as exc:
+                logger.debug(f"组件 {getattr(comp, 'name', comp)} 忙闲检测失败: {exc}")
+        return False
+
+    def _is_idle(self) -> bool:
+        """调度器是否空闲。调度器组件缺失时视为空闲。"""
+        if self._component_is_busy():
+            return False
+        scheduler = self.get_component("task_scheduler")
+        if scheduler is None:
+            return True
+        is_idle = getattr(scheduler, "is_idle", None)
+        if is_idle is None:
+            return True
+        try:
+            return bool(is_idle)
+        except Exception as exc:
+            logger.debug(f"调度器空闲检测失败，按空闲处理: {exc}")
+            return True
+
     def stop(self, graceful: bool = True) -> None:
         logger.debug(f"目前引擎状态:{self._status}")
-        if self._status not in [EngineStatus.RUNNING, EngineStatus.PAUSED]:
+        if self._status in [EngineStatus.STOPPING, EngineStatus.STOPPED]:
             return
         self._graceful_stop = graceful
         self._stop_requested = True
         self._status = EngineStatus.STOPPING
         self.context.engine_status = self._status
         logger.warning("收到引擎停止请求，正在执行优雅退出...")
+
+        if not reactor.running:
+            # Reactor 尚未启动（例如启动阶段就失败），同步退出避免 callLater 丢失
+            defer.maybeDeferred(self._graceful_shutdown)
+            return
 
         # 异步执行优雅退出流程
         reactor.callLater(0, self._graceful_shutdown)
@@ -293,27 +381,25 @@ class BaseQuantEngine(IQuantEngine):
 
     @defer.inlineCallbacks
     def _graceful_shutdown(self) -> Generator[Deferred[Any], Any, None]:
-        """优雅退出流程，对标Scrapy"""
+        """优雅退出流程，对标Scrapy。"""
         logger.info("开始执行优雅退出流程...")
-        self.event_bus.publish(StandardEvents.ENGINE_STOPPED, context=self.context)
 
-        # 全局停止超时：最多60秒，超时强制退出
-        shutdown_timeout = 60
-        start_time = time.time()
         # 1. 等待当前任务完成（优雅模式）
+        #    注意：旧实现里 self.async_sleep(0.1) 没有 yield，
+        #    结果是 while 循环瞬间跑满 300 次并阻塞 reactor——这里修正为真等待。
         if self._graceful_stop:
             logger.info("等待当前任务处理完成...")
-            scheduler = self.get_component("task_scheduler")
-            max_task_wait = 30
-            waited = 0
-            while not scheduler.is_idle and waited < max_task_wait:
-                if time.time() - start_time > shutdown_timeout:
-                    logger.warning("⚠️ 全局停止超时，终止任务等待")
-                    break
-                logger.debug(f"等待中 | 活跃任务: {scheduler.active_tasks} | 待执行: {scheduler._task_queue.qsize()} | 已等待: {waited:.1f}s")
-
-                self.async_sleep(0.1)
+            max_task_wait = float(
+                self.config.get("SHUTDOWN_TASK_WAIT", 30)
+            )
+            deadline = time.time() + max_task_wait
+            waited = 0.0
+            while not self._is_idle() and time.time() < deadline:
+                logger.debug(f"等待剩余任务完成 | 已等待: {waited:.1f}s")
+                yield self.async_sleep(0.1)
                 waited += 0.1
+            if not self._is_idle():
+                logger.warning(f"⚠️ 任务等待超时({max_task_wait:.0f}s)，强制进入停止流程")
 
         # 2. 逆序停止所有组件（先停下游交易层，再停上游行情层）
         for component_name in reversed(self._component_order):
@@ -330,11 +416,12 @@ class BaseQuantEngine(IQuantEngine):
         self._persist_state()
 
         # 4. 停止Twisted Reactor
+        self._status = EngineStatus.STOPPED
+        self.context.engine_status = self._status
         if reactor.running:
             reactor.stop()
-        self._status = EngineStatus.STOPPED
 
-        yield defer.succeed(None)
+        logger.info("优雅退出流程执行完毕")
 
     def _get_component_or_throw(self, component_name: str) -> IBaseComponent:
         component = self._components.get(component_name)
@@ -343,15 +430,25 @@ class BaseQuantEngine(IQuantEngine):
         return component
 
     def _register_system_signals(self) -> None:
-        """捕获系统终止信号，触发退出"""
+        """捕获系统终止信号，触发优雅退出。
+
+        仅在**主线程**注册：Python 规定 signal.signal 只能在主线程调用，
+        在子线程里注册会抛 ValueError（这也是单元测试里容易踩的坑）。
+        """
+        if threading.current_thread() is not threading.main_thread():
+            logger.debug("非主线程，跳过系统信号注册")
+            return
 
         def handle_stop(signum, frame):
             signal_name = signal.Signals(signum).name
-            logger.warning(f"收到系统终止信号: {signal_name}, {frame}")
+            logger.warning(f"收到系统终止信号: {signal_name}")
             self.stop(graceful=True)
 
         for sig in [signal.SIGINT, signal.SIGTERM]:
-            signal.signal(sig, handle_stop)
+            try:
+                signal.signal(sig, handle_stop)
+            except ValueError as exc:
+                logger.debug(f"注册信号 {sig} 失败(可忽略): {exc}")
 
 
     def _persist_state(self) -> None:

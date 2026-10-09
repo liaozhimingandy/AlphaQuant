@@ -1,0 +1,97 @@
+{
+  "_comment": "AlphaQuant 任务配置示例。改这里即可增删策略，不需要改代码。",
+  "mode": "SIMULATE",
+  "market_mode": "replay",
+  "market_interval": 0.01,
+  "start": "2023-01-01",
+  "end": "2024-06-30",
+  "data_source": "db",
+
+  "tasks": [
+    {
+      "task_id": "ma-000001",
+      "name": "双均线-稳健",
+      "symbol": "000001",
+      "enabled": true,
+      "initial_cash": 100000,
+      "warmup_bars": 30,
+      "sizer": { "type": "percent", "pct": 0.3, "lot_size": 100 },
+      "strategy": {
+        "type": "ma_cross",
+        "params": { "fast": 5, "slow": 20 }
+      },
+      "risk": [
+        { "type": "cooldown", "min_bars": 1 },
+        { "type": "cash_reserve" },
+        { "type": "position_limit", "max_position_pct": 0.6 },
+        { "type": "max_drawdown", "max_drawdown": 0.2 }
+      ]
+    },
+    {
+      "task_id": "rsi-000001",
+      "name": "RSI超卖反弹",
+      "symbol": "000001",
+      "enabled": true,
+      "initial_cash": 100000,
+      "warmup_bars": 30,
+      "sizer": { "type": "percent", "pct": 0.25, "lot_size": 100 },
+      "strategy": {
+        "type": "combo",
+        "params": { "strength": 1.0 },
+        "entry": {
+          "all": [
+            { "factor": "rsi", "op": "lt", "value": 35, "params": { "period": 14 } },
+            { "factor": "price_position", "op": "lt", "value": 0.5, "params": { "period": 20 } }
+          ]
+        },
+        "exit": { "factor": "rsi", "op": "gt", "value": 65, "params": { "period": 14 } }
+      },
+      "risk": [
+        { "type": "cooldown", "min_bars": 2 },
+        { "type": "cash_reserve" },
+        { "type": "max_drawdown", "max_drawdown": 0.25 }
+      ]
+    },
+    {
+      "task_id": "news-000001",
+      "name": "新闻事件驱动",
+      "symbol": "000001",
+      "enabled": true,
+      "initial_cash": 80000,
+      "warmup_bars": 30,
+      "sizer": { "type": "percent", "pct": 0.2, "lot_size": 100 },
+      "strategy": {
+        "type": "combo",
+        "params": { "use_news_confidence_as_strength": true },
+        "entry": "never",
+        "exit": "never",
+        "event_entry": {
+          "all": [
+            { "factor": "news_impact", "op": "gt", "value": 0.3 },
+            { "factor": "news_confidence", "op": "gte", "value": 0.5 }
+          ]
+        },
+        "event_exit": {
+          "all": [
+            { "factor": "news_impact", "op": "lt", "value": -0.3 },
+            { "factor": "news_confidence", "op": "gte", "value": 0.5 }
+          ]
+        }
+      },
+      "risk": [
+        { "type": "news_confidence", "min_confidence": 0.5 },
+        { "type": "cash_reserve" },
+        { "type": "cooldown", "min_bars": 1 }
+      ]
+    }
+  ],
+
+  "news": {
+    "interval": 60,
+    "analyzers": [ { "type": "keyword" } ],
+    "sources": [],
+    "keyword_map": {
+      "平安银行": "000001"
+    }
+  }
+}

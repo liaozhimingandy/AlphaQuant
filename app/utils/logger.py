@@ -1,55 +1,70 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/26 14:30
 # @FileName    : logger.py
-# @Description : 本文件功能描述
+# @Description : 全局日志：绝对路径 + 环境变量控制级别 + 可重复初始化
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
+from __future__ import annotations
+
+import sys
 
 from loguru import logger
-import sys
-import os
 
+from app.core.config import settings
 
-# 创建 logs 目录
-os.makedirs("logs", exist_ok=True)
+# 防止重复 add（模块被多次导入 / 子进程 reload 时会产生重复日志）
+_CONFIGURED = False
 
-# 删除默认日志
-logger.remove()
-
-# ===== 控制台日志 =====
-logger.add(
-    sys.stdout,
-    level="DEBUG",
-    colorize=True,
-    format=(
-        "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-        "<level>{level}</level> | "
-        "<magenta>{file}:{line}</magenta> | "  # 文件名:行号（核心！）
-        "<yellow>{function}</yellow> | "       # 函数名
-        "<cyan>{message}</cyan>"
-    )
+_CONSOLE_FORMAT = (
+    "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+    "<level>{level: <8}</level> | "
+    "<magenta>{file}:{line}</magenta> | "
+    "<yellow>{function}</yellow> | "
+    "<cyan>{message}</cyan>"
 )
 
-# ===== 文件日志 =====
-logger.add(
-    "logs/alphaquant_{time:YYYY-MM-DD}.log",
-    rotation="00:00",
-    retention="30 days",
-    level="DEBUG",
-    encoding="utf-8",
-    enqueue=True,
-    format=(
-        "{time:YYYY-MM-DD HH:mm:ss} | "
-        "{level} | "
-        "{message}"
+_FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {file}:{line} | {function} | {message}"
+
+
+def setup_logging(level: str | None = None, force: bool = False) -> None:
+    """初始化日志。
+
+    :param level: 日志级别，None 表示使用 settings.LOG_LEVEL
+    :param force: 强制重新初始化（一般不需要）
+    """
+    global _CONFIGURED
+    if _CONFIGURED and not force:
+        return
+
+    settings.ensure_dirs()
+    level = (level or settings.LOG_LEVEL).upper()
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level=level,
+        colorize=True,
+        format=_CONSOLE_FORMAT,
+        backtrace=True,
+        diagnose=False,
     )
-)
+    logger.add(
+        (settings.LOG_DIR / "alphaquant_{time:YYYY-MM-DD}.log").as_posix(),
+        rotation="00:00",
+        retention=settings.LOG_RETENTION,
+        level=level,
+        encoding="utf-8",
+        enqueue=True,
+        format=_FILE_FORMAT,
+        backtrace=True,
+        diagnose=False,
+    )
+    _CONFIGURED = True
 
 
-if __name__ == '__main__':
-    logger.info("test")
+setup_logging()
+
+
+if __name__ == "__main__":
+    logger.info("logger 自检完成，日志目录: {}", settings.LOG_DIR)

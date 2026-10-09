@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/28 11:29
-# @FileName    : __init__.py.py
-# @Description : 本文件功能描述
+# @FileName    : __init__.py
+# @Description : 指标层导出，并自动注册内置指标
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
+from app.core.indicator.base import IBaseIndicator
+from app.core.indicator.registry import (
+    clear_indicators,
+    create_indicator,
+    has_indicator,
+    indicator_registry,
+    list_indicators,
+    register_indicator,
+)
 
-def main(name: str = ''):
-    print(f'Hi, {name}')
+# 自动注册内置指标：新增指标只要在 builtin.BUILTIN_INDICATORS 里加一行
+from app.core.indicator.builtin import BUILTIN_INDICATORS
 
+for _cls in BUILTIN_INDICATORS:
+    register_indicator(_cls)
 
-if __name__ == '__main__':
-    main()
+__all__ = [
+    "IBaseIndicator",
+    "register_indicator",
+    "create_indicator",
+    "has_indicator",
+    "list_indicators",
+    "indicator_registry",
+    "clear_indicators",
+    "BUILTIN_INDICATORS",
+]

@@ -1,12 +1,16 @@
 import backtrader as bt
 
+from app.utils.logger import logger
+
 
 class TrendMaCrossStrategy(bt.Strategy):
+    """三均线趋势跟随：快中均线金叉 + 价格站上中/长均线才买。"""
 
     params = dict(
         fast=5,
         mid=20,
-        slow=60
+        slow=60,
+        printlog=False,
     )
 
     def __init__(self):
@@ -23,6 +27,12 @@ class TrendMaCrossStrategy(bt.Strategy):
         # 金叉
         self.cross = bt.ind.CrossOver(self.ma_fast, self.ma_mid)
 
+    def log(self, txt):
+        if not self.p.printlog:
+            return
+        dt = self.data.datetime.date(0)
+        logger.info(f"{dt} | {txt}")
+
     def next(self):
 
         # ====== 1. 定义上升趋势 ======
@@ -35,7 +45,7 @@ class TrendMaCrossStrategy(bt.Strategy):
 
             # 只有在上升趋势中才允许交易
             if up_trend and self.cross > 0:
-                print(f'触发买操作')
+                self.log("🔔 触发买操作")
                 self.buy(size=100)
 
         # ====== 3. 持仓 ======
@@ -43,5 +53,5 @@ class TrendMaCrossStrategy(bt.Strategy):
 
             # 趋势破坏 or 死叉 → 出场
             if (not up_trend) or self.cross < 0:
-                print(f'触发卖操作')
+                self.log("🔔 触发卖操作")
                 self.sell(size=100)

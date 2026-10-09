@@ -15,7 +15,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 class RunMode(Enum):
@@ -45,6 +45,7 @@ class EngineContext:
     run_mode: RunMode = RunMode.BACKTEST
     engine_status: EngineStatus = EngineStatus.INITIALIZING
     start_time: datetime = field(default_factory=datetime.now)
+    end_time: Optional[datetime] = None
 
     # 全局配置
     config: Dict[str, Any] = field(default_factory=dict)

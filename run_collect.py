@@ -1,45 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/26 17:17
 # @FileName    : run_collect.py
-# @Description : 本文件功能描述
+# @Description : 兼容旧入口：等价于 `python main.py collect -s <symbol>`
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
-from tenacity import RetryError
+import sys
 
-from app.data.collector.stock_collector import StockCollector
-from app.data.datasource import DataSourceFactory
-from app.db.database import SessionLocal
-from app.repository.stock_repository import StockRepository
-from app.utils.logger import logger
+from app.cli import cli
 
-def main(name: str = ''):
-    collector = StockCollector()
-    try:
-        collector.fetch_daily('000001')
-    except RetryError:
-        logger.error(f"下载失败")
-    collector.close()
-
-
-def main2():
-    db = SessionLocal()
-    df = DataSourceFactory.get_stock_data(
-        code="000001",
-        start="2021-01-01",
-        end="2026-06-06",
-        adjust="qfq"
-    )
-    records = df.to_dict(orient="records")
-    StockRepository.batch_upsert(
-        db,
-        records
-    )
-    db.close()
-
-if __name__ == '__main__':
-    main2()
+if __name__ == "__main__":
+    # 没有额外参数时默认采集 000001，保持旧脚本行为
+    if len(sys.argv) == 1:
+        sys.argv += ["collect", "-s", "000001"]
+    cli()

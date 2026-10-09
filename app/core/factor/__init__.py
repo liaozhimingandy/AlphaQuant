@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/28 11:31
-# @FileName    : __init__.py.py
-# @Description : 本文件功能描述
+# @FileName    : __init__.py
+# @Description : 因子层导出，自动注册内置因子
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
+from app.core.factor.base import IBaseFactor
+from app.core.factor.context import FactorContext
+from app.core.factor.registry import (
+    clear_factors,
+    create_factor,
+    factor_registry,
+    has_factor,
+    list_factors,
+    register_factor,
+)
 
-def main(name: str = ''):
-    print(f'Hi, {name}')
+# 导入即注册内置因子（装饰器在 import 时生效）
+import app.core.factor.builtin  # noqa: F401
+from app.core.factor.builtin import BUILTIN_FACTORS
 
-
-if __name__ == '__main__':
-    main()
+__all__ = [
+    "IBaseFactor",
+    "FactorContext",
+    "register_factor",
+    "create_factor",
+    "has_factor",
+    "list_factors",
+    "factor_registry",
+    "clear_factors",
+    "BUILTIN_FACTORS",
+]

@@ -24,8 +24,15 @@ class StandardEvents:
     # 行情事件
     BAR_RECEIVED = "bar_received"
     TICK_RECEIVED = "tick_received"
+    # 新闻/事件通道
+    NEWS_RECEIVED = "news_received"      # 采集到新新闻（未分析）
+    NEWS_ANALYZED = "news_analyzed"      # 已完成分析（含情感/置信度）
     # 策略事件
     SIGNAL_GENERATED = "signal_generated"
+    SIGNAL_REJECTED = "signal_rejected"  # 被风控否决，必须留痕
+    # 任务事件
+    TASK_STARTED = "task_started"
+    TASK_STOPPED = "task_stopped"
     # 交易事件
     ORDER_CREATED = "order_created"
     ORDER_FILLED = "order_filled"

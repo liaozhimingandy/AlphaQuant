@@ -1,123 +1,64 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/26 16:58
 # @FileName    : stock_collector.py
-# @Description : 本文件功能描述
+# @Description : 采集器（薄封装，实际逻辑统一走 MarketDataService）
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
-import akshare as ak
-import pandas as pd
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from __future__ import annotations
 
-from app.db.database import SessionLocal
-from app.repository.stock_repository import StockRepository
+from typing import Optional
+
+import pandas as pd
+
+from app.data.service import MarketDataService
 from app.utils.logger import logger
 
 
 class StockCollector:
+    """保留旧 API，内部统一委托给 MarketDataService。
 
-    def __init__(self):
+    旧实现直接调 akshare 且 tenacity 使用 reraise=False，
+    失败时静默返回 None（调用方再 .to_dict() 会炸），这里一并修正。
+    """
 
-        self.db = SessionLocal()
+    def __init__(self, db=None):
+        self.db = db
 
-    def close(self):
+    def close(self) -> None:
+        pass
 
-        self.db.close()
-
-    @retry(
-        stop=stop_after_attempt(5),  # 最多重试5次
-        wait=wait_exponential(multiplier=2, max=60),  # 指数退避
-        retry=retry_if_exception_type(Exception),  # 捕获所有异常
-        reraise=False,
-        before=lambda rs: logger.info(f"🔁 第 {rs.attempt_number} 次尝试"),
-    )
     def fetch_daily(
-            self,
-            symbol: str,
-            start_date="20200101",
-            end_date="20261231",
-            adjust="qfq"
-    ):
-        """
-        安全的akshare日线数据获取：自动限流+重试+缓存
-        :param symbol: 股票代码 000001/600000
-        :param start_date: 开始日期 20200101
-        :param end_date: 结束日期 20251231
-        :param adjust: 复权方式 qfq前复权/hfq后复权/不复权
-        """
+        self,
+        symbol: str,
+        start_date: str = "20200101",
+        end_date: Optional[str] = None,
+        adjust: str = "qfq",
+        save_csv: bool = False,
+    ) -> pd.DataFrame:
+        df = MarketDataService.collect(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+            db=self.db,
+            save_csv=save_csv,
+        )
+        logger.info(f"{symbol} 采集完成，共 {len(df)} 条")
+        return df
 
-        logger.info(f"开始采集股票: {symbol}")
-
-        try:
-
-            df = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust
-            )
-
-            if df.empty or df is None:
-                logger.warning(f"{symbol} 无数据")
-                raise ValueError("数据为空，触发重试")
-
-            # ===== 字段映射 =====
-            df = df.rename(columns={
-                "日期": "trade_date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
-                "成交额": "amount"
-            })
-
-            # ===== 保留字段 =====
-            df = df[
-                [
-                    "trade_date",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "amount"
-                ]
-            ]
-
-            # ===== 类型处理 =====
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-
-            df["symbol"] = symbol
-
-            # ===== NaN 转 None =====
-            df = df.where(pd.notnull(df), None)
-
-            records = df.to_dict(orient="records")
-
-            # ===== 入库 =====
-            StockRepository.batch_upsert(
-                self.db,
-                records
-            )
-
-            logger.info(
-                f"{symbol} 采集完成，共 {len(records)} 条"
-            )
-
-        except Exception as e:
-            raise
-
-def main(name: str = ''):
-    collector = StockCollector()
-    collector.fetch_daily("000001")
-    collector.close()
-
-
-if __name__ == '__main__':
-    main()
+    def fetch_many(
+        self,
+        symbols: list[str],
+        start_date: str = "20200101",
+        end_date: Optional[str] = None,
+        adjust: str = "qfq",
+    ) -> dict[str, pd.DataFrame]:
+        """批量采集，单只失败不影响其余标的。"""
+        result: dict[str, pd.DataFrame] = {}
+        for sym in symbols:
+            try:
+                result[sym] = self.fetch_daily(sym, start_date, end_date, adjust)
+            except Exception as exc:
+                logger.error(f"{sym} 采集失败: {exc}")
+        return result

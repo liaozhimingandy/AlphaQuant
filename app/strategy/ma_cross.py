@@ -56,6 +56,25 @@ class MaCrossStrategy(bt.Strategy):
             self.cancel(self.stop_order)
             self.stop_order = None
 
+    def _kill_zombie_stops(self):
+        """清理"僵尸止损单"。
+
+        问题背景：如果在一根K线内先挂止损单、再立刻撤单，
+        backtrader 对尚未被 broker Accept 的订单撤单是无效的，
+        该单会在下一根K线被重新 Accept 并长期挂在那里。
+        若干天后价格跌破止损价，它会在**空仓状态**下卖出 → 凭空产生空头持仓。
+
+        因此这里不看引用记帐，直接以 broker 实际挂单为准：空仓时一律清掉止损卖单。
+        """
+        if self.position.size != 0:
+            return
+        for order in list(self.broker.get_orders_open()):
+            try:
+                if order.exectype == bt.Order.Stop and not order.isbuy():
+                    self.cancel(order)
+            except Exception:
+                continue
+
     def _close_position(self, reason: str):
         """平仓时先撤止损单，再市价/收盘平仓"""
         self._cancel_stop_order()
@@ -97,7 +116,8 @@ class MaCrossStrategy(bt.Strategy):
                     f"手续费={order.executed.comm:.2f}"
                 )
 
-                if self.p.stop_loss_pct > 0:
+                # 只有确实持有多头时才挂止损单，否则会挂出无对应持仓的空单
+                if self.p.stop_loss_pct > 0 and self.position.size > 0:
                     stop_price = self.buy_price * (1 - self.p.stop_loss_pct)
                     self.stop_order = self.sell(
                         size=self.position.size,
@@ -129,6 +149,9 @@ class MaCrossStrategy(bt.Strategy):
             self.log(f"⚠️ 订单异常(取消之前的止损单) | 状态={order.getstatusname()} | 冻结资金已退回")
 
     def next(self):
+        # 先清理可能残留的僵尸止损单，避免空仓时被卖出形成负仓位
+        self._kill_zombie_stops()
+
         current_price = self.data.close[0]
 
         position_size = self.position.size

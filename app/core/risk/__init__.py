@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/28 11:43
-# @FileName    : __init__.py.py
-# @Description : 本文件功能描述
+# @FileName    : __init__.py
+# @Description : 风控层：可插拔闸门链
+#                数据流: Signal -> RiskChain -> (allowed?, scale)
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
+from app.core.risk.base import IBaseRiskRule, RiskVerdict
+from app.core.risk.registry import (
+    RiskChain,
+    build_risk_chain,
+    create_risk,
+    get_risk,
+    list_risks,
+    register_risk,
+)
+from app.core.risk import builtin  # noqa: F401  触发内置风控注册
 
-def main(name: str = ''):
-    print(f'Hi, {name}')
-
-
-if __name__ == '__main__':
-    main()
+__all__ = [
+    "IBaseRiskRule",
+    "RiskVerdict",
+    "RiskChain",
+    "build_risk_chain",
+    "create_risk",
+    "get_risk",
+    "list_risks",
+    "register_risk",
+]
