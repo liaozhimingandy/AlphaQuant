@@ -1,0 +1,15 @@
+{
+  "task_id": "manual-ma-000001",
+  "name": "手动新增-短周期双均线",
+  "symbol": "000001",
+  "enabled": true,
+  "initial_cash": 100000,
+  "warmup_bars": 30,
+  "sizer": { "type": "percent", "pct": 0.2, "lot_size": 100 },
+  "strategy": { "type": "ma_cross", "params": { "fast": 3, "slow": 10 } },
+  "risk": [
+    { "type": "cooldown", "min_bars": 1 },
+    { "type": "cash_reserve" },
+    { "type": "max_drawdown", "max_drawdown": 0.15 }
+  ]
+}

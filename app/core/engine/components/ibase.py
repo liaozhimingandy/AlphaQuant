@@ -126,7 +126,7 @@ class IBaseComponent(ABC):
         if self._component_status in [ComponentState.STOPPING, ComponentState.STOPPED]:
             return
 
-        self._state = ComponentState.STOPPING
+        self._component_status = ComponentState.STOPPING
         logger.info(f"🛑停止组件 {self.name} | 优雅模式: {graceful}")
 
         try:

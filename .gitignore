@@ -1,5 +1,31 @@
+# 虚拟环境
 .venv/*
+.venv/
 
-logs
+# Python 生成物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 运行产物：全是跑出来的东西，不该进版本库
+#   output/ 运行快照、运行时任务、服务状态、跨进程消息总线、*.pid / *.stop
+#   logs/   每天一个日志文件
+#   data/   本地 SQLite 库 + 导出的 CSV（随时可重建）
+output/
+logs/
+data/
+*.pid
+*.stop
+
+# IDE / 系统
 .idea/
-*.pyc
+.vscode/
+.DS_Store
+Thumbs.db

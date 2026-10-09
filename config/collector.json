@@ -1,0 +1,26 @@
+{
+  "enabled": true,
+  "adjust": "qfq",
+  "interval": "5m",
+  "period": "1d",
+  "min_interval": 15,
+  "trading_hours_only": null,
+  "backfill_on_start": true,
+  "lookback_days": 30,
+  "keep_days": 0,
+  "holidays": [],
+  "symbols": [
+    "000001",
+    {
+      "symbol": "600000",
+      "period": "1d",
+      "interval": "30m"
+    },
+    {
+      "symbol": "000858",
+      "period": "5",
+      "interval": "5m",
+      "keep_days": 30
+    }
+  ]
+}

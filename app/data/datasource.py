@@ -12,6 +12,7 @@ from __future__ import annotations
 import abc
 import threading
 import time
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -85,6 +86,30 @@ class DataFetchError(RuntimeError):
     """数据源获取失败。"""
 
 
+# 分钟线支持的周期（与 akshare ``period`` 参数口径一致）
+MINUTE_PERIODS = ("1", "5", "15", "30", "60")
+
+# 分钟线列名别名：不同数据源/不同版本返回值差异很大，
+# 这里做一次集中映射，避免每加一个源就复制一遍中文列名。
+MINUTE_COLUMN_ALIASES = {
+    "时间": "dt",
+    "日期": "dt",
+    "datetime": "dt",
+    "date": "dt",
+    "开盘": "open",
+    "开盘价": "open",
+    "最高": "high",
+    "最高价": "high",
+    "最低": "low",
+    "最低价": "low",
+    "收盘": "close",
+    "收盘价": "close",
+    "成交量": "volume",
+    "成交额": "amount",
+    "成交额(元)": "amount",
+}
+
+
 class IBaseDataSource(abc.ABC):
     """数据源抽象类。子类只需实现 fetch_data，输出格式由 _standardize_df 统一。"""
 
@@ -112,6 +137,9 @@ class IBaseDataSource(abc.ABC):
         raise NotImplementedError
 
     # ---------------- 通用工具 ----------------
+    #: 子类若支持分钟线，置为 True 并实现 fetch_minute_data
+    supports_minute: bool = False
+
     @staticmethod
     def _throttle() -> None:
         """简单限速：距上次请求不足最小间隔就 sleep。"""
@@ -162,6 +190,50 @@ class IBaseDataSource(abc.ABC):
         df = df.sort_values("date").drop_duplicates(subset=["date"], keep="last")
         df = df.reset_index(drop=True)
         return df
+
+    # ---------------- 分钟线（可选能力）----------------
+    def fetch_minute_data(
+        self,
+        code: str,
+        period: str = "1",
+        start_datetime: Optional[str] = None,
+        end_datetime: Optional[str] = None,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """获取分钟线。不支持分钟线的数据源调用时会明确报错，而不是返回空表。"""
+        raise DataFetchError(f"数据源 {self.name} 不支持分钟线")
+
+    @classmethod
+    def _standardize_minute_df(
+        cls, df: pd.DataFrame, code: str, period: str
+    ) -> pd.DataFrame:
+        """统一分钟线输出：dt/symbol/ohlcv/amount，按时间升序去重。"""
+        columns = ["dt", "symbol", "open", "high", "low", "close", "volume", "amount"]
+        if df is None or len(df) == 0:
+            return pd.DataFrame(columns=columns)
+
+        df = df.copy()
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        df = df.rename(columns={k: v for k, v in MINUTE_COLUMN_ALIASES.items()})
+
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            # 列名映射失败时把真实列名打出来，否则只能看到一堆 KeyError
+            raise DataFetchError(
+                f"[{cls.name}] 分钟线返回数据缺少必需列: {missing}，"
+                f"实际列: {list(df.columns)}"
+            )
+
+        df = df[columns]
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["symbol"] = normalize_symbol(code)
+        df["period"] = str(period)
+
+        df = df.dropna(subset=["dt", "open", "high", "low", "close"])
+        df = df.sort_values("dt").drop_duplicates(subset=["dt"], keep="last")
+        return df.reset_index(drop=True)
 
 
 def _retry_kwargs(fn_name: str):
@@ -259,6 +331,7 @@ class AkshareDataSource(IBaseDataSource):
     """Akshare：数据全，作为降级数据源。"""
 
     name = "akshare"
+    supports_minute = True
 
     @retry(**_retry_kwargs("akshare.fetch_data"))
     def fetch_data(
@@ -294,6 +367,50 @@ class AkshareDataSource(IBaseDataSource):
         df = self._standardize_df(df, symbol)
         if df.empty:
             raise DataFetchError(f"Akshare 未返回 {symbol} 在 {start}~{end} 的数据")
+        return df
+
+    @retry(**_retry_kwargs("akshare.fetch_minute_data"))
+    def fetch_minute_data(
+        self,
+        code: str,
+        period: str = "1",
+        start_datetime: Optional[str] = None,
+        end_datetime: Optional[str] = None,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """分钟线（含当日盘中数据），走东财接口。
+
+        :param period: 1/5/15/30/60，单位分钟
+        :param start_datetime: 'YYYY-MM-DD HH:MM:SS'，缺省为当日开盘
+        :param end_datetime:   同上，缺省为当日收盘
+        """
+        ak = _lazy_akshare()
+        self._throttle()
+
+        period = str(period).strip().rstrip("mMiInN")
+        if period not in MINUTE_PERIODS:
+            raise DataFetchError(
+                f"不支持的分钟周期: {period} | 可用: {', '.join(MINUTE_PERIODS)}"
+            )
+
+        symbol = normalize_symbol(code)
+        today = datetime.now()
+        default_day = today.strftime("%Y-%m-%d")
+        start = start_datetime or f"{default_day} 09:30:00"
+        end = end_datetime or f"{default_day} 15:00:00"
+
+        df = ak.stock_zh_a_hist_min_em(
+            symbol=symbol,
+            period=period,
+            adjust=adjust or "",
+            start_date=start,
+            end_date=end,
+        )
+        df = self._standardize_minute_df(df, symbol, period)
+        if df.empty:
+            raise DataFetchError(
+                f"Akshare 未返回 {symbol} {period}分钟线 ({start} ~ {end})"
+            )
         return df
 
 
@@ -408,6 +525,51 @@ class DataSourceFactory:
         raise DataFetchError(
             f"所有数据源均获取失败 ({symbol} {start_d}~{end_d})：\n  " + "\n  ".join(errors)
         )
+
+    @classmethod
+    def get_minute_data(
+        cls,
+        code: str,
+        period: str = "1",
+        adjust: str = "qfq",
+        priority: Optional[List[str]] = None,
+        start_datetime: Optional[str] = None,
+        end_datetime: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """分钟线统一入口：在支持分钟线的数据源里按优先级降级。
+
+        与日线分开的入口是有意的——不是每个源都提供分钟数据，
+        把它们塞进同一个 ``fetch_data`` 只会让调用方到处 try/except。
+        """
+        symbol = normalize_symbol(code)
+        priority = priority or settings.priority_list()
+
+        errors: List[str] = []
+        for source_name in priority:
+            source = cls.get(source_name)
+            if not getattr(source, "supports_minute", False):
+                continue
+            try:
+                logger.info(f"尝试分钟源 [{source_name}] | {symbol} {period}分钟")
+                df = source.fetch_minute_data(
+                    symbol,
+                    period=period,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    adjust=adjust,
+                )
+                if df.empty:
+                    raise DataFetchError("返回空数据")
+                logger.success(f"分钟源 [{source_name}] 获取成功 | {len(df)} 条")
+                return df
+            except Exception as exc:
+                msg = f"[{source_name}] {type(exc).__name__}: {exc}"
+                logger.warning(f"⚠️ {msg}，自动切换下一个数据源")
+                errors.append(msg)
+                continue
+
+        detail = "\n  ".join(errors) or "所有候选数据源都不支持分钟线"
+        raise DataFetchError(f"分钟线获取失败 ({symbol} {period}分钟)：\n  {detail}")
 
     @classmethod
     def shutdown(cls) -> None:

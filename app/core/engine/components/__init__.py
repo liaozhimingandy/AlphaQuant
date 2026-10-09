@@ -10,6 +10,7 @@ from .timer import TimerComponent
 from .market import MarketCenterComponent, df_to_bars
 from .news import NewsCenterComponent
 from .strategy import StrategyManagerComponent
+from .collector import DataCollectorComponent, parse_interval
 
 __all__ = [
     "IBaseComponent",
@@ -18,4 +19,6 @@ __all__ = [
     "df_to_bars",
     "NewsCenterComponent",
     "StrategyManagerComponent",
+    "DataCollectorComponent",
+    "parse_interval",
 ]

@@ -1,0 +1,159 @@
+{
+  "_comment": [
+    "AlphaQuant 多服务编排。改这个文件就能增删服务，不用改代码。",
+    "协作模型：每个服务是独立进程；通过文件总线（output/bus/*.jsonl）交换行情与新闻。",
+    "  · market      行情服务：连数据源，把 bar 发布到总线，自己不跑策略",
+    "  · alpha/beta  策略服务：不连行情源（market_mode=none），从总线订阅 bar 驱动策略",
+    "  这样行情采集与策略执行可以各自扩容、各自重启，互不影响。",
+    "启动：python main.py hub start   （聚合面板默认 http://127.0.0.1:8899/）"
+  ],
+  "hub": { "host": "127.0.0.1", "port": 8899 },
+  "state_dir": "output/services",
+  "bus_dir": "output/bus",
+  "heartbeat_timeout": 15,
+
+  "services": [
+    {
+      "id": "market",
+      "role": "行情服务",
+      "enabled": true,
+      "port": 8788,
+      "mode": "SIMULATE",
+      "market_mode": "replay",
+      "interval": 0.05,
+      "start": "2023-01-01",
+      "end": "2024-06-30",
+      "data_source": "db",
+      "symbols": ["000001"],
+      "news": false,
+      "monitor": true,
+      "snapshot_interval": 5,
+      "publish": ["bar"],
+      "subscribe": [],
+      "autorestart": true,
+      "tasks": []
+    },
+    {
+      "id": "alpha",
+      "role": "策略服务A-双均线",
+      "enabled": true,
+      "port": 8789,
+      "mode": "SIMULATE",
+      "market_mode": "none",
+      "data_source": "db",
+      "news": false,
+      "monitor": true,
+      "snapshot_interval": 5,
+      "publish": [],
+      "subscribe": ["bar"],
+      "bus_interval": 0.5,
+      "autorestart": true,
+      "tasks": [
+        {
+          "task_id": "alpha-ma-000001",
+          "name": "双均线-稳健",
+          "symbol": "000001",
+          "enabled": true,
+          "initial_cash": 100000,
+          "warmup_bars": 30,
+          "sizer": { "type": "percent", "pct": 0.3, "lot_size": 100 },
+          "strategy": { "type": "ma_cross", "params": { "fast": 5, "slow": 20 } },
+          "risk": [
+            { "type": "cooldown", "min_bars": 1 },
+            { "type": "cash_reserve" },
+            { "type": "position_limit", "max_position_pct": 0.6 },
+            { "type": "max_drawdown", "max_drawdown": 0.2 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "beta",
+      "role": "策略服务B-RSI+新闻",
+      "enabled": true,
+      "port": 8790,
+      "mode": "SIMULATE",
+      "market_mode": "none",
+      "data_source": "db",
+      "news": false,
+      "monitor": true,
+      "snapshot_interval": 5,
+      "publish": [],
+      "subscribe": ["bar", "news"],
+      "bus_interval": 0.5,
+      "autorestart": true,
+      "tasks": [
+        {
+          "task_id": "beta-rsi-000001",
+          "name": "RSI超卖反弹",
+          "symbol": "000001",
+          "enabled": true,
+          "initial_cash": 100000,
+          "warmup_bars": 30,
+          "sizer": { "type": "percent", "pct": 0.25, "lot_size": 100 },
+          "strategy": {
+            "type": "combo",
+            "entry": {
+              "all": [
+                { "factor": "rsi", "op": "lt", "value": 35, "params": { "period": 14 } },
+                { "factor": "price_position", "op": "lt", "value": 0.5, "params": { "period": 20 } }
+              ]
+            },
+            "exit": { "factor": "rsi", "op": "gt", "value": 65, "params": { "period": 14 } }
+          },
+          "risk": [
+            { "type": "cooldown", "min_bars": 2 },
+            { "type": "cash_reserve" },
+            { "type": "max_drawdown", "max_drawdown": 0.25 }
+          ]
+        },
+        {
+          "task_id": "beta-news-000001",
+          "name": "新闻事件驱动",
+          "symbol": "000001",
+          "enabled": true,
+          "initial_cash": 80000,
+          "warmup_bars": 30,
+          "sizer": { "type": "percent", "pct": 0.2, "lot_size": 100 },
+          "strategy": {
+            "type": "combo",
+            "params": { "use_news_confidence_as_strength": true },
+            "entry": "never",
+            "exit": "never",
+            "event_entry": {
+              "all": [
+                { "factor": "news_impact", "op": "gt", "value": 0.3 },
+                { "factor": "news_confidence", "op": "gte", "value": 0.5 }
+              ]
+            },
+            "event_exit": {
+              "all": [
+                { "factor": "news_impact", "op": "lt", "value": -0.3 },
+                { "factor": "news_confidence", "op": "gte", "value": 0.5 }
+              ]
+            }
+          },
+          "risk": [
+            { "type": "news_confidence", "min_confidence": 0.5 },
+            { "type": "cash_reserve" },
+            { "type": "cooldown", "min_bars": 1 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "news",
+      "role": "新闻服务（需配置 NEWS_SOURCES 才会真正采集）",
+      "enabled": false,
+      "port": 8791,
+      "mode": "SIMULATE",
+      "market_mode": "none",
+      "news": true,
+      "monitor": true,
+      "publish": ["news"],
+      "subscribe": [],
+      "autorestart": true,
+      "tasks": []
+    }
+  ]
+}

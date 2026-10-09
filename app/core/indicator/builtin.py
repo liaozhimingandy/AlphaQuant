@@ -55,6 +55,91 @@ def _wilder_ma(arr: np.ndarray, period: int) -> np.ndarray:
     return out
 
 
+def _week_index(dts) -> np.ndarray:
+    """把日线的时间序列映射成「周序号」：同一自然周同一个 id，跨周 +1。
+
+    用 ISO 年 + ISO 周做键，跨年是天然正确的（不会出现第 52 周回滚成 0）。
+    """
+    n = len(dts)
+    out = np.empty(n, dtype=np.int64)
+    prev_key = None
+    cur = -1
+    for i, d in enumerate(dts):
+        cal = d.isocalendar()
+        key = (cal[0], cal[1])
+        if key != prev_key:
+            cur += 1
+            prev_key = key
+        out[i] = cur
+    return out
+
+
+def weekly_ma(
+    series: BarSeries,
+    period: int,
+    field: str = "close",
+    method: str = "sma",
+) -> np.ndarray:
+    """在**日线**序列上直接算「N 周均线」，返回值拉回到日线长度（便于按位置对齐）。
+
+    口径与通达信/同花顺一致：
+
+      - 每周取该周**最后一根**日线的收盘价作为周收盘价；
+      - 当周还没走完时，用最新一根日线的收盘价当「本周实时价」参与计算。
+
+    所以同一周里每天算出来的周均线会随最新价变化 —— 这正是行情软件的行为，
+    也是"盘中就能看到本周金叉成型"的原因。
+
+    ``method='sma'`` 需要至少 ``period`` 个周（含当周）；
+    ``method='ema'`` 因为用前 ``period`` 周做种子，需要 ``period + 1`` 个周。
+
+    :param period: 周数（5 = 5 周均线）
+    :param field: 参与聚合的字段（close/high/low/open），每根日线取该字段值参与周聚合
+    :param method: sma / ema
+    """
+    values = np.asarray(getattr(series, field), dtype=float)
+    n = values.size
+    out = np.full(n, np.nan, dtype=float)
+    if n == 0 or period <= 0:
+        return out
+
+    wk = _week_index(series.dt)
+    n_weeks = int(wk[-1]) + 1
+
+    # 每周最后一根日线的下标 → 该周收盘价
+    last_of_week = np.zeros(n_weeks, dtype=np.int64)
+    for i in range(n):
+        last_of_week[wk[i]] = i
+    wc = values[last_of_week]
+
+    # 第 i 根日线（位于第 k 周）能看到的周收盘价序列 = wc[0..k-1] + [values[i]]
+    #   刻意排除 wc[k]：那是"本周还没走完的最终收盘价"，用它就是未来函数。
+    #   当 i 恰好就是本周最后一根时 values[i] == wc[k]，不泄漏也不重复。
+    k = wk
+
+    if str(method).lower() == "ema":
+        # EMA 可以按周递推：当周只需在"上周的周均线"上再走一步，全周常数可复用
+        ema_wc = _ema(wc, period)          # EMA over 已完成周序列
+        prev = np.full(n, np.nan, dtype=float)
+        moved = k > 0
+        prev[moved] = ema_wc[k[moved] - 1]
+        alpha = 2.0 / (period + 1.0)
+        with np.errstate(invalid="ignore"):
+            cur = np.asarray(values, dtype=float)
+            out = alpha * cur + (1.0 - alpha) * prev
+        # prev 为 nan（周数不够做种子）的位置自然也是 nan，无需再mask
+        return out
+
+    # SMA：用前缀和把"取最近 period-1 个已完成周"做成 O(1)
+    prefix = np.concatenate(([0.0], np.cumsum(wc)))
+    lo = np.maximum(k - (period - 1), 0)
+    sums = prefix[k] - prefix[lo]
+    totals = sums + values
+    valid = (k - lo + 1) >= period
+    out[valid] = totals[valid] / period
+    return out
+
+
 class SMAIndicator(IBaseIndicator):
     """简单移动平均"""
     name = "sma"
@@ -221,6 +306,33 @@ class StdIndicator(IBaseIndicator):
         return _rolling_std(series.close, self.period)
 
 
+class WeeklyMAIndicator(IBaseIndicator):
+    """周均线（N 周均线，默认 5 周）。
+
+    直接在日线序列上算，不需要另外准备周线数据 —— 这点很关键：
+    实时链路里每来一根日线就要能立刻看到本周均线到哪了，
+    如果要求"必须先把周线拼出来"，策略就会整整延迟一周。
+    """
+
+    name = "wma"
+
+    def __init__(
+        self,
+        period: int = 5,
+        field: str = "close",
+        method: str = "sma",
+    ) -> None:
+        super().__init__(period=period, field=field, method=method)
+        self.period = int(period)
+        self.field = str(field or "close")
+        self.method = str(method or "sma").lower()
+        if self.method not in ("sma", "ema"):
+            raise ValueError(f"周均线不支持的算法: {method} | 可用: sma, ema")
+
+    def compute(self, series: BarSeries) -> np.ndarray:
+        return weekly_ma(series, self.period, self.field, self.method)
+
+
 BUILTIN_INDICATORS = [
     SMAIndicator,
     EMAIndicator,
@@ -233,4 +345,5 @@ BUILTIN_INDICATORS = [
     MomentumIndicator,
     BiasIndicator,
     StdIndicator,
+    WeeklyMAIndicator,
 ]

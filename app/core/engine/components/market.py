@@ -112,21 +112,65 @@ class MarketCenterComponent(IBaseComponent):
         if not self.start_date or not self.end_date:
             logger.warning("replay 模式缺少 start/end，跳过加载")
             return
+        for sym in self.symbols:
+            self._load_symbol_history(sym)
+
+    def _load_symbol_history(self, symbol: str) -> int:
+        """加载单个标的的历史K线到回放队列。返回载入根数。"""
+        if not self.start_date or not self.end_date:
+            return 0
         from app.data.service import MarketDataService
         from app.data.datasource import normalize_symbol
 
-        for sym in self.symbols:
-            try:
-                df = MarketDataService.load(sym, self.start_date, self.end_date, source=self.data_source)
-                bars = df_to_bars(normalize_symbol(sym), df)
-            except Exception as exc:
-                self.stats["errors"] += 1
-                logger.error(f"加载 {sym} 历史数据失败: {exc}")
-                bars = []
-            self._queues[sym] = deque(bars)
-            logger.info(f"  {sym}: 载入 {len(bars)} 根K线")
+        try:
+            df = MarketDataService.load(
+                symbol, self.start_date, self.end_date, source=self.data_source
+            )
+            bars = df_to_bars(normalize_symbol(symbol), df)
+        except Exception as exc:
+            self.stats["errors"] += 1
+            logger.error(f"加载 {symbol} 历史数据失败: {exc}")
+            bars = []
+        self._queues[symbol] = deque(bars)
+        logger.info(f"  {symbol}: 载入 {len(bars)} 根K线")
+        return len(bars)
+
+    # ---------------- 动态订阅 ----------------
+    def watch(self, symbol: str) -> bool:
+        """运行时新增一个订阅标的（面板/CLI 新增任务时调用）。
+
+        返回 True 表示这是一次新增；False 表示已在订阅列表中。
+        replay 模式下需要同时把该标的的历史补进回放队列，
+        否则新任务会一直"行情不足"。
+        """
+        symbol = str(symbol or "").strip()
+        if not symbol:
+            return False
+        if symbol in self.symbols:
+            return False
+        self.symbols.append(symbol)
+        # 初始化之前不要在这里加载历史——on_initialize 会统一遍历 self.symbols 加载，
+        # 否则同一标的会被读两次数据（慢了一倍，还容易踩到数据源限流）
+        if self.mode == "replay" and self.context is not None:
+            self._load_symbol_history(symbol)
+        logger.info(f"行情中心新增订阅: {symbol} | 当前标的: {self.symbols}")
+        return True
+
+    def unwatch(self, symbol: str) -> bool:
+        """取消订阅。不会清空已有队列，避免误伤仍在使用该标的的任务。"""
+        symbol = str(symbol or "").strip()
+        if symbol not in self.symbols:
+            return False
+        self.symbols.remove(symbol)
+        self._queues.pop(symbol, None)
+        logger.info(f"行情中心取消订阅: {symbol}")
+        return True
 
     def on_start(self) -> defer.Deferred:
+        if self.mode not in ("replay", "poll"):
+            # 行情由外部（如文件总线）供给时，本组件不产生任何推送
+            logger.info(f"行情中心模式 {self.mode!r}：本地行情源关闭，交由外部供给")
+            return defer.succeed(None)
         if not self.symbols:
             logger.warning("行情中心未配置标的，跳过启动")
             return defer.succeed(None)

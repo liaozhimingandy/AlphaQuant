@@ -22,10 +22,12 @@ from twisted.internet.defer import Deferred
 from app.core.config import settings
 from app.core.engine.component import IBaseComponent, TaskSchedulerComponent
 from app.core.engine.components import TimerComponent
+from app.core.engine.control import ControlCenter
 
 from app.core.engine.event import EventBus, StandardEvents
 from app.core.engine.settings import EngineContext, EngineStatus, RunMode
 from app.core.engine.utils import async_sleep
+from app.utils.jsonio import json_safe
 from app.utils.logger import logger
 
 
@@ -146,6 +148,9 @@ class BaseQuantEngine(IQuantEngine):
         # 全局上下文与核心组件
         self.context = EngineContext(run_mode=self.run_mode, config=config)
         self.event_bus = EventBus()
+
+        # 运行时控制中心：面板 / CLI 通过它增删任务、启停组件、优雅停止
+        self.control = ControlCenter(self)
 
         # 任务调度器
         # self.scheduler = TaskScheduler(self.context, self.event_bus)
@@ -364,6 +369,70 @@ class BaseQuantEngine(IQuantEngine):
         return self.event_bus
 
     # ------------------------------
+    # 快照（面板 / 落盘 / 复盘共用）
+    # ------------------------------
+    @property
+    def uptime_seconds(self) -> float:
+        end = self.context.end_time or datetime.now()
+        return max(0.0, (end - self.context.start_time).total_seconds())
+
+    def component_names(self) -> List[str]:
+        """组件注册顺序（启停顺序即此顺序，停止时逆序）。"""
+        return list(self._component_order)
+
+    def snapshot(self) -> Dict[str, Any]:
+        """聚合引擎 + 全部组件的瞬时状态，供监控面板与快照落盘使用。
+
+        设计约束：**任何组件快照失败都不能让整体快照失败**。
+        监控链路本身崩掉是最糟的失败模式——你恰恰在出问题时看不到问题。
+        """
+        components: Dict[str, Any] = {}
+        for name in self._component_order:
+            comp = self._components[name]
+            entry: Dict[str, Any] = {
+                "name": name,
+                "enabled": bool(comp.enabled),
+                "state": comp.state,
+            }
+            try:
+                healthy, detail = comp.health_check()
+                entry["healthy"] = bool(healthy)
+                entry["health_detail"] = detail
+            except Exception as exc:  # pragma: no cover - 防御
+                entry["healthy"] = None
+                entry["health_detail"] = f"health_check 异常: {exc}"
+
+            snap_fn = getattr(comp, "snapshot", None)
+            if callable(snap_fn):
+                try:
+                    entry["snapshot"] = json_safe(snap_fn())
+                except Exception as exc:
+                    entry["snapshot_error"] = str(exc)
+            components[name] = entry
+
+        try:
+            idle = bool(self._is_idle())
+        except Exception:
+            idle = None
+
+        return {
+            "engine": {
+                "run_id": self.context.run_id,
+                "mode": self.run_mode.value,
+                "status": self._status.value,
+                "started_at": self.context.start_time.isoformat(),
+                "ended_at": (
+                    self.context.end_time.isoformat() if self.context.end_time else None
+                ),
+                "uptime_sec": round(self.uptime_seconds, 1),
+                "stop_requested": self._stop_requested,
+                "idle": idle,
+                "component_order": list(self._component_order),
+            },
+            "components": components,
+        }
+
+    # ------------------------------
     # 内部核心逻辑
     # ------------------------------
     def _start_all_components(self) -> None:
@@ -452,7 +521,25 @@ class BaseQuantEngine(IQuantEngine):
 
 
     def _persist_state(self) -> None:
-        """持久化引擎状态，可扩展"""
+        """持久化引擎状态。
+
+        监控组件在场时让它写最后一份快照——否则"停止前最后一次权益"
+        这条最有价值的数据就丢了。
+        """
+        monitor = self.get_component("monitor")
+        flush = getattr(monitor, "flush", None)
+        if callable(flush):
+            try:
+                flush()
+            except Exception as exc:
+                logger.error(f"最终快照落盘失败: {exc}", exc_info=True)
+
+        # 运行时新增的任务，停止时固化，下次可用同一 run_id 重放
+        try:
+            self.control.save_runtime_tasks()
+        except Exception as exc:
+            logger.debug(f"运行时任务固化失败（可忽略）: {exc}")
+
         logger.info("引擎状态已持久化")
 
 

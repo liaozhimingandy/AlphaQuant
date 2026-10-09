@@ -24,6 +24,7 @@ class StandardEvents:
     # 行情事件
     BAR_RECEIVED = "bar_received"
     TICK_RECEIVED = "tick_received"
+    DATA_COLLECTED = "data_collected"  # 采集服务落库了一批行情（symbol/period/rows）
     # 新闻/事件通道
     NEWS_RECEIVED = "news_received"      # 采集到新新闻（未分析）
     NEWS_ANALYZED = "news_analyzed"      # 已完成分析（含情感/置信度）
@@ -33,6 +34,16 @@ class StandardEvents:
     # 任务事件
     TASK_STARTED = "task_started"
     TASK_STOPPED = "task_stopped"
+    TASK_PAUSED = "task_paused"
+    TASK_RESUMED = "task_resumed"
+    TASK_ADDED = "task_added"          # 运行时新增任务（面板/CLI 下发）
+    TASK_REMOVED = "task_removed"
+    # 组件事件
+    COMPONENT_ENABLED = "component_enabled"
+    COMPONENT_DISABLED = "component_disabled"
+    # 监控事件
+    SNAPSHOT_SAVED = "snapshot_saved"
+    CONTROL_COMMAND = "control_command"  # 控制指令留痕（谁在什么时候改了什么）
     # 交易事件
     ORDER_CREATED = "order_created"
     ORDER_FILLED = "order_filled"
