@@ -32,6 +32,7 @@ def _load_builtin() -> None:
     if _BUILTIN_LOADED:
         return
     from app.strategy.ma_cross import MaCrossStrategy
+    from app.strategy.score_strategy import ScoreStrategy as BtScoreStrategy
     from app.strategy.spec_strategy import DeclarativeStrategy
     from app.strategy.strategy import PreciseMaCrossStrategyI
     from app.strategy.trend_ma_cross import TrendMaCrossStrategy
@@ -46,6 +47,8 @@ def _load_builtin() -> None:
             "trend_ma_cross": lambda: TrendMaCrossStrategy,
             # 声明式：把 entry/exit 规则写成 JSON/配置即可，零代码
             "declarative": lambda: DeclarativeStrategy,
+            # 多维度综合评分：与实盘共用 stock_score 表里的同一份评分
+            "score": lambda: BtScoreStrategy,
         }
     )
     _BUILTIN_LOADED = True

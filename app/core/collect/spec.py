@@ -103,22 +103,35 @@ A_SHARE_SESSIONS = (
 
 def is_trading_day(dt: Optional[datetime] = None,
                    holidays: Optional[Sequence[str]] = None) -> bool:
-    """周一~周五且不在自定义节假日里。
+    """是否交易日：周一~周五且不在节假日里。
 
-    法定节假日无法离线穷举（日历要联网维护），所以这里只认工作日 + 用户自己
-    在配置里补的 ``holidays``；法定节日那天采集会拿到"和上一交易日一样"的数据，
-    入库是幂等的，不会有副作用。
+    节假日现在来自 :mod:`app.core.market.calendar`（内置已公布的交易所安排 +
+    ``config/trade_calendar.json`` 缓存），不再只靠"是不是周末" ——
+    国庆那七天里会有五个工作日，按旧逻辑会白采五天。
+
+    :param holidays: 额外的休市日，与日历里的并集（保留旧调用方式）
     """
+    from app.core.market.calendar import get_calendar
+
+    cal = get_calendar()
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
+    if not cal.is_trading_day(dt):
         return False
-    iso = dt.date().isoformat()
-    return iso not in set(holidays or ())
+    d = _as_date(dt)
+    return d not in {_as_date(h) for h in (holidays or ()) if h}
 
 
 def in_trading_session(dt: Optional[datetime] = None,
                        buffer_minutes: int = _SESSION_BUFFER_MINUTES) -> bool:
-    """是否处在（含缓冲的）交易时段内。"""
+    """是否处在（含缓冲的）**连续竞价时段**内。
+
+    缓冲是对**每一段**分别加的：9:30 前 30 分钟和 15:00 后 30 分钟都算，
+    于是午休两端各扩 30 分钟后正好接上（12:00 落在两边缓冲的交界上）。
+
+    注意这里只管**时段**，不管是不是交易日 —— 调用方通常先判交易日。
+    要一次性拿到"盘前/交易中/午休/收盘结算/非交易日"这种细粒度状态，
+    用 :func:`market_state` 或交易日历的 ``state()``。
+    """
     dt = dt or datetime.now()
     now = dt.time()
     buf = timedelta(minutes=max(0, int(buffer_minutes)))
@@ -128,8 +141,29 @@ def in_trading_session(dt: Optional[datetime] = None,
         end = datetime.combine(d, closing) + buf
         if start <= dt <= end:
             return True
-    # 午休也属于交易日的活跃区间（数据源此刻仍在更新当日数据）
     return False
+
+
+def market_state(dt: Optional[datetime] = None) -> str:
+    """当前市场状态（盘前/交易中/午休/收盘结算中/已收市/非交易日）。"""
+    from app.core.market.calendar import get_calendar
+
+    return get_calendar().state(dt)
+
+
+def _as_date(value: Any):
+    from datetime import date as _date
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, _date):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
 
 
 # ===========================================================================
@@ -190,7 +224,11 @@ class CollectorSpec:
     config_path: str = ""
 
     def should_run(self, job: CollectJob, now: Optional[datetime] = None) -> bool:
-        """这个任务此刻该不该跑。"""
+        """这个任务此刻该不该跑。
+
+        闭市就别请求：请求发出去了、限流风险占了、日志刷了一屏，
+        拿回来的还是和昨天一模一样的数据。日频数据在闭市时重复采是最典型的浪费。
+        """
         if not (self.enabled and job.enabled):
             return False
         enforce = self.trading_hours_only
@@ -361,6 +399,7 @@ __all__ = [
     "is_intraday",
     "is_trading_day",
     "load_collector_spec",
+    "market_state",
     "normalize_period",
     "parse_frequency",
 ]

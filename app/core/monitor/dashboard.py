@@ -105,7 +105,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tabs button.on{background:var(--bg);border-color:var(--line);color:var(--accent)}
   label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--muted)}
   label input,label select{font-size:12px}
-  main.hidden,#page-backtest.hidden,#page-live.hidden{display:none}
+  main.hidden,#page-backtest.hidden,#page-live.hidden,#page-pool.hidden{display:none}
   h3{font-weight:600;color:var(--fg)}
 </style>
 </head>
@@ -139,6 +139,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <nav class="tabs" id="tabs">
   <button data-page="live" class="on">实盘监控</button>
+  <button data-page="factor">因子实验室</button>
+  <button data-page="pool">选股 · 股票池</button>
+  <button data-page="strategy">策略库</button>
   <button data-page="backtest">回测监控</button>
 </nav>
 
@@ -272,6 +275,268 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section class="panel">
     <h2>运行日志 <span class="muted" id="log-hint"></span></h2>
     <div class="body"><pre id="logs">加载中…</pre></div>
+  </section>
+</main>
+
+<!-- ==================== 选股 / 股票池 ==================== -->
+<main id="page-strategy" class="hidden">
+  <section class="panel">
+    <h2>我的策略 <span class="muted" id="stg-hint"></span></h2>
+    <div class="body">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>名称</th><th>类型</th><th>说明</th><th>配置</th><th></th>
+          </tr></thead>
+          <tbody id="stg-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>新建 / 编辑策略</h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>名称<br><input id="s-name" placeholder="my_rule" style="width:150px"></label>
+        <label>类型<br>
+          <select id="s-kind" style="width:150px">
+            <option value="declarative">规则策略</option>
+            <option value="score">综合评分</option>
+            <option value="multi_factor">多因子加权</option>
+          </select>
+        </label>
+        <label>说明<br><input id="s-desc" placeholder="一句话说明" style="width:200px"></label>
+      </div>
+
+      <div id="s-form-rule" style="margin-top:10px">
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+          <label>入场条件组合<br>
+            <select id="s-in-combine" style="width:110px">
+              <option value="all">全部满足</option>
+              <option value="any">任一满足</option>
+            </select></label>
+        </div>
+        <div id="s-in-rules"></div>
+        <button class="mini" id="btn-s-in-add">＋ 入场条件</button>
+
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:10px">
+          <label>出场条件组合<br>
+            <select id="s-out-combine" style="width:110px">
+              <option value="any">任一满足</option>
+              <option value="all">全部满足</option>
+            </select></label>
+        </div>
+        <div id="s-out-rules"></div>
+        <button class="mini" id="btn-s-out-add">＋ 出场条件</button>
+        <p class="hint">因子按类别分组，可自由组合。
+        灰色的因子表示库里还没有数据（用了会得到空值）—— 先去「因子实验室」采一次。</p>
+      </div>
+
+      <div id="s-form-score" class="hidden" style="margin-top:10px">
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+          <label>买入分（≥）<br><input id="s-entry-score" type="number" value="70" style="width:110px"></label>
+          <label>卖出分（≤）<br><input id="s-exit-score" type="number" value="55" style="width:110px"></label>
+        </div>
+      </div>
+
+      <div id="s-form-multi" class="hidden" style="margin-top:10px">
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+          <label style="flex:1;min-width:260px">因子与权重（JSON 数组）<br>
+            <input id="s-multi-factors" style="width:100%"
+                   value='[{"name":"mom_20","weight":1}]'>
+          </label>
+          <label>买入（≥）<br><input id="s-multi-entry" type="number" value="0.55" style="width:100px"></label>
+          <label>卖出（≤）<br><input id="s-multi-exit" type="number" value="-0.3" style="width:100px"></label>
+        </div>
+        <p class="hint">留空则用因子库里全部启用因子（等权）。权重可以把
+        <code>main.py factor fit</code> 的结果拷进来。</p>
+      </div>
+
+
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:10px">
+        <button id="btn-s-save" class="primary">保存策略</button>
+        <button id="btn-s-reload">重新扫描 strategies/</button>
+        <span class="hint" id="s-msg"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>上线为实盘任务</h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>策略名<br><input id="d-name" placeholder="my_rule" style="width:150px"></label>
+        <label>标的<br><input id="d-symbol" placeholder="000001" style="width:120px"></label>
+        <label>初始资金<br><input id="d-cash" type="number" value="100000" style="width:120px"></label>
+        <button id="btn-s-deploy">上线</button>
+      </div>
+      <p class="hint" id="d-msg"></p>
+      <p class="hint muted">上线会**真的开始下单**。默认自动补一条 max_drawdown 风控
+      （用户常常忘记配），任务可在「实盘监控」页暂停/删除。</p>
+    </div>
+  </section>
+</main>
+
+<main id="page-factor" class="hidden">
+  <section class="panel">
+    <h2>可用因子（全部类别） <span class="muted" id="factor-hint"></span></h2>
+    <div class="body">
+      <p class="hint" id="factor-tip">灰色的因子表示库里还没有对应数据 —— 用了也会得到空值，
+      先去「数据采集」区采一次。</p>
+      <div id="factor-groups"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>新增因子（写一句公式）</h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>名称<br><input id="f-name" placeholder="my_factor" style="width:150px"></label>
+        <label>分类<br><input id="f-cat" value="自定义" style="width:110px"></label>
+        <label>说明<br><input id="f-desc" placeholder="一句话说明" style="width:180px"></label>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:8px">
+        <label style="flex:1;min-width:280px">表达式<br>
+          <input id="f-expr" placeholder="close / MA(close, 20) - 1" style="width:100%">
+        </label>
+        <button id="btn-f-validate">校验</button>
+        <button id="btn-f-check">检验有效性</button>
+        <button id="btn-f-save" class="primary">存入因子库</button>
+      </div>
+      <p class="hint" id="f-msg"></p>
+      <p class="hint muted" id="f-valid"></p>
+      <details style="margin-top:6px">
+        <summary class="hint">可用算子与变量（点开）</summary>
+        <div id="f-catalog" class="hint" style="margin-top:6px"></div>
+      </details>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>数据采集</h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label style="flex:1;min-width:240px">标的（逗号分隔）<br>
+          <input id="c-symbols" placeholder="000001, 600519" style="width:100%">
+        </label>
+        <button id="btn-c-now" class="primary">立即采集（全类别）</button>
+      </div>
+      <p class="hint" id="c-msg"></p>
+      <p class="hint muted">会跑：日线 → 资金流 → 筹码 → 基本面 →
+      龙虎榜 → 两融 → 业绩预告 → 股东户数 → 机构评级 → 新闻 → 宏观 → 市场宽度。
+      单类别失败不影响其它。</p>
+      <div id="c-report" class="kv-grid"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>采集时间窗口 <span class="muted" id="sch-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>盘前提前(分钟)<br><input id="sch-pre" type="number" value="30" style="width:100px"></label>
+        <label>闭市后延迟(分钟)<br><input id="sch-post" type="number" value="30" style="width:100px"></label>
+        <label>盘后宽限(分钟)<br><input id="sch-grace" type="number" value="120" style="width:100px"></label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center">
+          <input id="sch-pre-on" type="checkbox" checked> 启用盘前轮
+        </label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center">
+          <input id="sch-intraday" type="checkbox"> 盘中也采日频数据
+        </label>
+        <button id="btn-sch-save" class="primary">保存</button>
+      </div>
+      <p class="hint" id="sch-msg"></p>
+      <p class="hint muted">默认：开盘前 30 分钟（9:00）采一轮补齐，
+      闭市 30 分钟后（15:30）采当日<b>定稿</b>数据。
+      15:00 整去拉拿到的是未定稿数据，所以必须留这段结算时间。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>机器学习挖掘因子</h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>代数<br><input id="m-gen" type="number" value="10" style="width:80px"></label>
+        <label>每代候选<br><input id="m-pop" type="number" value="50" style="width:80px"></label>
+        <label>时间预算(秒)<br><input id="m-sec" type="number" value="60" style="width:90px"></label>
+        <label>最低分数<br><input id="m-min" type="number" value="45" style="width:80px"></label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center">
+          <input id="m-save" type="checkbox"> 直接入库
+        </label>
+        <button id="btn-f-mine" class="primary">开始挖掘</button>
+      </div>
+      <p class="hint" id="m-msg"></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>#</th><th class="num">分数</th><th class="num">IC</th>
+            <th class="num">ICIR</th><th>表达式</th>
+          </tr></thead>
+          <tbody id="m-rows"></tbody>
+        </table>
+      </div>
+      <p class="hint muted">挖出来的因子绝大多数是过拟合的：分数高的先当作假设，
+      再用更长区间、更多标的复验，别直接上实盘。</p>
+    </div>
+  </section>
+
+  <section class="panel hidden" id="f-report-panel">
+    <h2>检验报告 <button class="mini" id="btn-f-report-close">收起</button></h2>
+    <div class="body"><div id="f-report" class="kv-grid"></div></div>
+  </section>
+</main>
+
+<main id="page-pool" class="hidden">
+  <section class="panel">
+    <h2>股票池 <span class="muted" id="pool-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>候选池<br>
+          <select id="pool-source" style="width:150px">
+            <option value="">（默认）</option>
+            <option value="limitup">涨停池</option>
+            <option value="hot">人气榜</option>
+            <option value="theme">热门题材成分</option>
+            <option value="flow">资金流排名</option>
+            <option value="watch">自选</option>
+            <option value="all">全市场</option>
+          </select>
+        </label>
+        <label>保留前<br><input id="pool-limit" type="number" value="30" style="width:80px"></label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center">
+          <input id="pool-sync" type="checkbox" checked> 联网同步
+        </label>
+        <button id="btn-pool-refresh" class="primary">刷新</button>
+        <span class="hint" id="pool-msg"></span>
+      </div>
+      <p class="hint" id="pool-cfg"></p>
+      <p class="hint muted" id="pool-market"></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>#</th><th>代码</th><th class="num">综合分</th><th>等级</th>
+            <th class="num">资金链</th><th class="num">题材</th><th class="num">筹码</th>
+            <th class="num">技术</th><th class="num">涨停</th><th>来源</th><th>操作</th>
+          </tr></thead>
+          <tbody id="pool-rows"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="hint">打分是**多维度加权**：题材热度 + 资金链 + 筹码结构 + 技术面 + 涨停效应，
+      再减去风险扣分。某维度没数据时它的权重会**分摊给其它维度**（不按 0 算）；
+      可用维度不足 2 个时**拒绝给分** —— 维度太少就打分只会骗人。
+      权重与阈值都在 <code>config/score.json</code>，候选池在 <code>config/pool.json</code>。</p>
+    </div>
+  </section>
+
+  <section class="panel hidden" id="pool-detail">
+    <h2><span id="pool-d-title">评分明细</span> <span class="muted" id="pool-d-hint"></span></h2>
+    <div class="body">
+      <div class="grid2" id="pool-d-kv"></div>
+      <div class="panel" style="margin-top:12px">
+        <h2>为什么是这个分</h2>
+        <div class="body"><pre id="pool-d-reasons">-</pre></div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -834,11 +1099,68 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       $('bt-spec-msg').textContent = '已填入示例：5/20 金叉买（需同时站上均线）、死叉卖';
       return;
     }
+    if(b.id === 'btn-s-in-add'){ addRuleRow('s-in-rules'); return; }
+    if(b.id === 'btn-s-out-add'){ addRuleRow('s-out-rules'); return; }
+    if(b.id === 'btn-s-save'){ doSaveStrategy(); return; }
+    if(b.id === 'btn-s-deploy'){ doDeployStrategy(); return; }
+    if(b.id === 'btn-s-reload'){
+      post('/api/strategies/reload', {}).then(function(r){
+        toast(r && r.ok ? '已重新扫描用户策略目录' : '扫描失败', !(r&&r.ok));
+        loadStrategies();
+      }).catch(function(e){ toast('扫描失败: ' + e.message, true); });
+      return;
+    }
+    if(b.id === 'btn-f-validate'){ doValidate(); return; }
+    if(b.id === 'btn-f-check'){ doCheck(); return; }
+    if(b.id === 'btn-f-save'){ doSave(); return; }
+    if(b.id === 'btn-f-mine'){ doMine(); return; }
+    if(b.id === 'btn-c-now'){ doCollectNow(); return; }
+    if(b.id === 'btn-sch-save'){ doSaveSchedule(); return; }
+    if(b.id === 'btn-f-report-close'){ $('f-report-panel').classList.add('hidden'); return; }
     if(b.id === 'btn-refresh-acct'){
       post('/api/live/refresh', {}).then(function(r){
         toast(r && r.ok ? '已从券商刷新账户' : ('刷新失败: ' + ((r&&r.error)||'')), !(r&&r.ok));
         loadLive();
       }).catch(function(e){ toast('刷新失败: ' + e.message, true); });
+      return;
+    }
+    // ---- 股票池 ----
+    if(b.id === 'btn-pool-refresh'){
+      $('pool-msg').textContent = '刷新中…（联网同步 + 打分，可能需要几十秒）';
+      post('/api/pool/refresh', {
+        source: $('pool-source').value,
+        limit: Number($('pool-limit').value) || 30,
+        sync: $('pool-sync').checked,
+      }, 120).then(function(r){
+        if(r && r.ok){
+          $('pool-msg').textContent = '完成：' + (r.count || 0) + ' 只';
+          toast('股票池已刷新');
+        } else {
+          $('pool-msg').textContent = '失败: ' + ((r && r.error) || '未知错误');
+          toast('股票池刷新失败', true);
+        }
+        loadPool();
+      }).catch(function(e){ $('pool-msg').textContent = '失败: ' + e.message; });
+      return;
+    }
+    var poolAct = b.getAttribute('data-act');
+    if(poolAct === 'pool-detail'){ loadPoolDetail(b.getAttribute('data-sym')); return; }
+    if(poolAct === 'stg-del'){
+      var sname = b.getAttribute('data-name');
+      if(!confirm('确认删除策略 ' + sname + ' ？已上线的任务不受影响（它们持有的是任务自己的配置）。')) return;
+      post('/api/strategies/remove', {name: sname}).then(function(r){
+        toast(r && r.ok ? '已删除 ' + sname : ('删除失败: ' + ((r&&r.message)||'')));
+        loadStrategies();
+      }).catch(function(e){ toast('删除失败: ' + e.message, true); });
+      return;
+    }
+    if(poolAct === 'factor-del'){
+      var fname = b.getAttribute('data-name');
+      if(!confirm('确认删除因子 ' + fname + ' ？引用它的策略会立刻失效。')) return;
+      post('/api/factors/remove', {name: fname}).then(function(r){
+        toast(r && r.ok ? '已删除 ' + fname : ('删除失败: ' + ((r&&r.message)||'')));
+        loadFactors();
+      }).catch(function(e){ toast('删除失败: ' + e.message, true); });
       return;
     }
     var btAct = b.getAttribute('data-act');
@@ -1058,6 +1380,474 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     });
   }
 
+  // ==================== 选股 / 股票池 ====================
+  var DIM_KEYS = ['capital','theme','chip','technical','limitup','fundamental',
+                  'sentiment','macro'];
+  var DIM_CN = {capital:'资金链', theme:'题材', chip:'筹码', technical:'技术',
+                limitup:'涨停', fundamental:'基本面', sentiment:'舆情',
+                macro:'宏观'};
+
+  function gradePill(g){
+    var m = {A:'run', B:'info', C:'warn', D:'off', 'N/A':'off'};
+    return '<span class="pill ' + (m[g]||'off') + '">' + esc(g||'-') + '</span>';
+  }
+
+  function renderPool(d){
+    var rows = d.results || [];
+    var cfg = d.config || {};
+    if(cfg.weights){
+      var w = cfg.weights;
+      $('pool-cfg').innerHTML = '权重：资金 ' + (w.capital||0) + ' · 题材 ' + (w.theme||0) +
+        ' · 筹码 ' + (w.chip||0) + ' · 技术 ' + (w.technical||0) + ' · 涨停 ' + (w.limitup||0) +
+        ' ｜ 默认候选池 ' + esc(cfg.source||'-') + '（配置文件 ' + esc((cfg.path||'').replace(/\\/g,'/')) + '）';
+    }
+    $('pool-hint').textContent = '(' + rows.length + ' 只'
+      + (d.dates && d.dates.length ? ' · 最新 ' + d.dates[0] : '') + ')';
+    if(!rows.length){
+      $('pool-rows').innerHTML = '<tr><td colspan="14" class="muted">还没有评分。' +
+        '点「刷新」生成；本机无网络可先在命令行跑 <code>main.py pool demo</code> 看效果。</td></tr>';
+      return;
+    }
+    $('pool-rows').innerHTML = rows.map(function(r){
+      var dm = r.dims || {};
+      var cells = DIM_KEYS.map(function(k){
+        var v = dm[k];
+        return '<td class="num">' + (v == null ? '<span class="muted">—</span>' : v.toFixed(0)) + '</td>';
+      }).join('');
+      var tot = r.total == null ? '<span class="muted">—</span>' : r.total.toFixed(1);
+      return '<tr><td>' + (r.rank||'-') + '</td>' +
+        '<td><b>' + esc(r.symbol) + '</b></td>' +
+        '<td class="num">' + tot + '</td>' +
+        '<td>' + gradePill(r.grade) + '</td>' + cells +
+        '<td class="muted">' + esc(r.source||'') + '</td>' +
+        '<td><button class="mini" data-act="pool-detail" data-sym="' + esc(r.symbol) + '">明细</button></td></tr>';
+    }).join('');
+  }
+
+  function loadPool(){
+    api('/api/pool?limit=' + (Number($('pool-limit').value) || 30)).then(renderPool)
+      .catch(function(e){ $('pool-hint').textContent = '(加载失败: ' + e.message + ')'; });
+  }
+
+  // ================= 策略库 =================
+  var STG_KIND_CN = {declarative:'规则', score:'综合评分', multi_factor:'多因子'};
+
+  function renderStrategies(d){
+    var rows = d.user || [];
+    $('stg-hint').textContent = '(' + rows.length + ' 条 · ' + (d.path||'') + ')';
+    if(!rows.length){
+      $('stg-rows').innerHTML = '<tr><td colspan="5" class="muted">还没有自定义策略。' +
+        '在下面选个类型填几个参数就能存一条。</td></tr>';
+    }else{
+      $('stg-rows').innerHTML = rows.map(function(s){
+        return '<tr><td><b>' + esc(s.name) + '</b></td>' +
+          '<td>' + esc(STG_KIND_CN[s.kind] || s.kind) + '</td>' +
+          '<td class="muted">' + esc(s.description||'') + '</td>' +
+          '<td><code>' + esc(JSON.stringify(s.spec).slice(0,70)) + '</code></td>' +
+          '<td><button class="mini danger" data-act="stg-del" data-name="' +
+            esc(s.name) + '">删除</button></td></tr>';
+      }).join('');
+    }
+    // 因子下拉候选：**按类别分组**的 optgroup，而不是一长串平铺的名字
+    FACTOR_GROUPS = d.groups || [];
+    buildFactorOptions();
+  }
+
+  var FACTOR_GROUPS = [];
+  var OPS = [['gt','>'],['gte','≥'],['lt','<'],['lte','≤'],['eq','=']];
+
+  function factorOptionsHtml(sel){
+    var html = '<option value="">（不选）</option>';
+    FACTOR_GROUPS.forEach(function(g){
+      if(!g.factors.length) return;
+      html += '<optgroup label="' + esc(g.key) + '">';
+      g.factors.forEach(function(f){
+        var mark = (f.has_data === false) ? '（无数据）' : '';
+        var s = (f.name === sel) ? ' selected' : '';
+        html += '<option value="' + esc(f.name) + '"' + s + '>' +
+                esc(f.name) + mark + '</option>';
+      });
+      html += '</optgroup>';
+    });
+    return html;
+  }
+
+  function buildFactorOptions(){
+    ['s-in-rules','s-out-rules'].forEach(function(id){
+      var box = $(id);
+      if(!box) return;
+      Array.prototype.forEach.call(box.querySelectorAll('select.f-factor'), function(sel){
+        var cur = sel.value;
+        sel.innerHTML = factorOptionsHtml(cur);
+      });
+    });
+  }
+
+  function addRuleRow(boxId, rule){
+    var box = $(boxId);
+    if(!box) return;
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'flex-wrap:wrap;gap:6px;align-items:flex-end;margin-top:6px';
+    var f = rule ? rule.factor : '';
+    var op = rule ? (rule.op||'gt') : 'gt';
+    var v = rule ? (rule.value||0) : 0;
+    row.innerHTML =
+      '<select class="f-factor" style="width:190px">' + factorOptionsHtml(f) + '</select>' +
+      '<select class="f-op" style="width:70px">' +
+        OPS.map(function(o){
+          return '<option value="' + o[0] + '"' + (o[0]===op?' selected':'') + '>' +
+                 o[1] + '</option>';
+        }).join('') + '</select>' +
+      '<input class="f-value" type="number" value="' + v + '" style="width:100px">' +
+      '<button class="mini danger f-del">删除</button>';
+    row.querySelector('.f-del').addEventListener('click', function(){ row.remove(); });
+    box.appendChild(row);
+  }
+
+  function collectRules(boxId){
+    var out = [];
+    Array.prototype.forEach.call($(boxId).children, function(row){
+      var f = row.querySelector('.f-factor').value.trim();
+      if(!f) return;
+      out.push({
+        factor: f,
+        op: row.querySelector('.f-op').value,
+        value: Number(row.querySelector('.f-value').value)
+      });
+    });
+    return out;
+  }
+
+  function loadStrategies(){
+    api('/api/strategy-library').then(renderStrategies)
+      .catch(function(e){ $('stg-hint').textContent = '(加载失败: ' + e.message + ')'; });
+  }
+
+  function syncKindForm(){
+    var k = $('s-kind').value;
+    $('s-form-rule').classList.toggle('hidden', k !== 'declarative');
+    $('s-form-score').classList.toggle('hidden', k !== 'score');
+    $('s-form-multi').classList.toggle('hidden', k !== 'multi_factor');
+  }
+
+  function currentSpec(){
+    var k = $('s-kind').value;
+    if(k === 'score'){
+      return {entry_score: Number($('s-entry-score').value),
+              exit_score: Number($('s-exit-score').value)};
+    }
+    if(k === 'multi_factor'){
+      var raw = $('s-multi-factors').value.trim();
+      var facs = [];
+      if(raw){ try{ facs = JSON.parse(raw); }catch(e){ return null; } }
+      return {factors: facs,
+              entry: Number($('s-multi-entry').value),
+              exit: Number($('s-multi-exit').value)};
+    }
+    var spec = {};
+    var inRules = collectRules('s-in-rules');
+    if(inRules.length === 1){
+      spec.entry = inRules[0];
+    }else if(inRules.length > 1){
+      // 多条才需要组合器：单条直接展开，避免 {all:[一条]} 这种噪音结构
+      spec.entry = {combine: $('s-in-combine').value, rules: inRules};
+    }
+    var outRules = collectRules('s-out-rules');
+    if(outRules.length === 1){
+      spec.exit = outRules[0];
+    }else if(outRules.length > 1){
+      spec.exit = {combine: $('s-out-combine').value, rules: outRules};
+    }
+    return spec;
+  }
+
+  function doSaveStrategy(){
+    var name = $('s-name').value.trim();
+    if(!name){ $('s-msg').textContent = '请填策略名'; return; }
+    var spec = currentSpec();
+    if(spec === null){ $('s-msg').textContent = '因子权重不是合法 JSON'; return; }
+    post('/api/strategies/save', {
+      name: name, kind: $('s-kind').value, spec: spec,
+      description: $('s-desc').value.trim(), overwrite: true,
+    }).then(function(r){
+      $('s-msg').textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || '');
+      if(r.ok){ loadStrategies(); toast('策略已保存: ' + name); }
+    }).catch(function(e){ $('s-msg').textContent = '保存失败: ' + e.message; });
+  }
+
+  function doDeployStrategy(){
+    var name = $('d-name').value.trim() || $('s-name').value.trim();
+    var sym = $('d-symbol').value.trim();
+    if(!name || !sym){ $('d-msg').textContent = '策略名和标的都要填'; return; }
+    if(!confirm('确认把策略 ' + name + ' 上线到 ' + sym + ' ？这会真的开始下单。')) return;
+    $('d-msg').textContent = '上线中…';
+    post('/api/strategies/deploy', {
+      name: name, symbol: sym, initial_cash: Number($('d-cash').value) || 100000,
+    }).then(function(r){
+      if(!r.ok){ $('d-msg').textContent = '上线失败: ' + (r.error||'?'); return; }
+      $('d-msg').textContent = '✅ 已上线为任务 ' + r.task_id;
+      toast('策略已上线: ' + r.task_id);
+    }).catch(function(e){ $('d-msg').textContent = '上线失败: ' + e.message; });
+  }
+
+  // ================= 因子实验室 =================
+  var SRC_CN = {builtin:'内置', preset:'预置', user:'自定义', mined:'挖掘'};
+
+  function renderFactors(d){
+    var groups = d.groups || [];
+    $('factor-hint').textContent = '(' + (d.total||0) + ' 个 · ' + (d.path||'') + ')';
+    if(!groups.length){
+      $('factor-groups').innerHTML = '<p class="muted">没有可用因子。</p>';
+      return;
+    }
+    $('factor-groups').innerHTML = groups.map(function(g){
+      if(!g.factors.length) return '';
+      var rows = g.factors.map(function(f){
+        var cls = (f.has_data === false) ? ' style="opacity:.45"' : '';
+        var tag = '';
+        if(f.has_data === false) tag = ' <span class="muted">（无数据）</span>';
+        var score = f.score != null ? ('<span class="num">' + f.score.toFixed(0) + '</span>') : '';
+        var right = f.expr
+          ? '<code>' + esc(f.expr.slice(0,52)) + '</code>'
+          : esc(f.description||'');
+        var del = (f.source === 'builtin') ? ''
+          : '<button class="mini danger" data-act="factor-del" data-name="' +
+            esc(f.name) + '">删除</button>';
+        return '<tr' + cls + '><td><b>' + esc(f.name) + '</b>' + tag + '</td>' +
+          '<td class="muted">' + esc(SRC_CN[f.source]||f.source||'') + '</td>' +
+          '<td>' + (f.sub ? esc(f.sub) : '') + '</td>' +
+          '<td>' + score + '</td>' +
+          '<td>' + right + '</td>' +
+          '<td>' + del + '</td></tr>';
+      }).join('');
+      return '<details open style="margin-bottom:8px">' +
+        '<summary><b>' + esc(g.key) + '</b> <span class="muted">' +
+        g.factors.length + ' 个 · ' + esc(g.doc||'') + '</span></summary>' +
+        '<div class="table-wrap" style="margin-top:6px"><table>' +
+        '<thead><tr><th>名称</th><th>来源</th><th>子分类</th>' +
+        '<th>分数</th><th>说明 / 表达式</th><th></th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></div></details>';
+    }).join('');
+  }
+
+  function renderCatalog(d){
+    var ops = (d.ops||[]).map(function(f){
+      return esc(f.name) + ' — ' + esc(f.doc);
+    }).join('<br>');
+    var vars = (d.vars||[]).map(function(v){
+      return esc(v.name) + ' — ' + esc(v.doc);
+    }).join('、');
+    $('f-catalog').innerHTML = '<b>变量：</b>' + vars + '<br><br><b>算子：</b><br>' + ops;
+  }
+
+  function loadFactors(){
+    api('/api/factors').then(function(d){ renderFactors(d); renderCatalog(d); })
+      .catch(function(e){ $('factor-hint').textContent = '(加载失败: ' + e.message + ')'; });
+  }
+
+  // ================= 数据采集（标的 + 时间窗口）=================
+  var SLOT_CN = {pre:'盘前', intraday:'盘中', post:'盘后定稿'};
+
+  function loadSchedule(){
+    api('/api/schedule').then(function(d){
+      var s = d.schedule || {};
+      $('sch-pre').value = s.pre_open_minutes != null ? s.pre_open_minutes : 30;
+      $('sch-post').value = s.post_close_minutes != null ? s.post_close_minutes : 30;
+      $('sch-grace').value = s.grace_minutes != null ? s.grace_minutes : 120;
+      $('sch-pre-on').checked = !!s.pre_open_enabled;
+      $('sch-intraday').checked = !!s.intraday_enabled;
+      var cur = d.current_slot;
+      $('sch-hint').textContent = '（当前窗口：' +
+        (cur ? (SLOT_CN[cur]||cur) : '不在采集窗口') + '｜盘前 ' +
+        (s.pre_open_time||'') + ' 起｜盘后 ' + (s.post_close_time||'') + ' 起）';
+    }).catch(function(e){ $('sch-hint').textContent = '(加载失败)'; });
+  }
+
+  function doSaveSchedule(){
+    post('/api/schedule/save', {
+      pre_open_minutes: Number($('sch-pre').value),
+      post_close_minutes: Number($('sch-post').value),
+      grace_minutes: Number($('sch-grace').value),
+      pre_open_enabled: $('sch-pre-on').checked,
+      intraday_enabled: $('sch-intraday').checked,
+    }).then(function(r){
+      $('sch-msg').textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || '');
+      if(r.ok){ toast('采集时间已保存'); loadSchedule(); }
+    }).catch(function(e){ $('sch-msg').textContent = '保存失败: ' + e.message; });
+  }
+
+  function doCollectNow(){
+    var raw = $('c-symbols').value.trim();
+    if(!raw){ $('c-msg').textContent = '请填标的'; return; }
+    var syms = raw.split(/[,，\s]+/).filter(Boolean);
+    $('c-msg').textContent = '采集中…（要跑十几个接口，可能几十秒）';
+    $('c-report').innerHTML = '';
+    $('btn-c-now').disabled = true;
+    post('/api/collect/now', {symbols: syms}).then(function(r){
+      $('btn-c-now').disabled = false;
+      if(!r.ok){ $('c-msg').textContent = '采集失败: ' + (r.error||'?'); return; }
+      $('c-msg').textContent = '✅ 采集完成：' + (r.symbols||[]).join('、');
+      var kv = [];
+      Object.keys(r.detail||{}).forEach(function(k){
+        var d = r.detail[k];
+        kv.push([k, '成功 ' + (d.ok||0) + (d.failed && d.failed.length
+          ? ('，失败 ' + d.failed.length) : '') + (d.error ? ('（' + d.error + '）') : '')]);
+      });
+      $('c-report').innerHTML = kv.map(function(x){
+        return '<div class="kv"><span class="k">' + esc(x[0]) +
+               '</span><span class="v">' + esc(String(x[1])) + '</span></div>';
+      }).join('');
+      loadFactors();   // 采完因子可用性标注会变，刷新一下
+    }).catch(function(e){
+      $('btn-c-now').disabled = false;
+      $('c-msg').textContent = '采集失败: ' + e.message;
+    });
+  }
+
+  function doValidate(){
+    var expr = $('f-expr').value.trim();
+    if(!expr){ $('f-valid').textContent = '（请先填表达式）'; return; }
+    post('/api/factors/validate', {expr: expr}).then(function(r){
+      if(r.ok){
+        $('f-valid').textContent = '✅ 合法 | 用到变量 ' + (r.variables||[]).join('、') +
+          ' | 最长窗口 ' + r.max_window;
+        $('f-valid').className = 'hint ok';
+      }else{
+        $('f-valid').textContent = '❌ ' + r.error;
+        $('f-valid').className = 'hint err';
+      }
+    });
+  }
+
+  function doCheck(){
+    var expr = ($('f-expr').value.trim()) || null;
+    var target = expr;
+    if(!target){ $('f-msg').textContent = '请先填表达式'; return; }
+    $('f-msg').textContent = '检验中…（要跑全历史，可能几秒）';
+    post('/api/factors/check', {expr: target, horizon: 5}).then(function(r){
+      if(!r.ok){ $('f-msg').textContent = '检验失败: ' + (r.error||'?'); return; }
+      $('f-msg').textContent = '检验完成';
+      renderReport(r.report);
+    }).catch(function(e){ $('f-msg').textContent = '检验失败: ' + e.message; });
+  }
+
+  function renderReport(r){
+    if(!r){ return; }
+    $('f-report-panel').classList.remove('hidden');
+    var kv = [];
+    if(r.score != null){
+      kv.push(['综合评分', r.score + ' 分']);
+      kv.push(['IC', (r.ic_mean>=0?'+':'') + r.ic_mean.toFixed(4)]);
+      kv.push(['ICIR', r.icir.toFixed(3)]);
+      kv.push(['IC t 值', r.ic_t.toFixed(2)]);
+      kv.push(['IC>0 占比', (r.ic_positive_rate*100).toFixed(1) + '%']);
+      kv.push(['样本', r.rows + ' 行 / ' + r.symbols + ' 个标的']);
+      kv.push(['检验口径', r.mode === 'cross_section' ? '截面（推荐）' : '时间序列（兜底）']);
+      if(r.quantile_returns){
+        Object.keys(r.quantile_returns).forEach(function(k){
+          kv.push(['第 ' + k + ' 组日均收益', r.quantile_returns[k].toFixed(3) + '%']);
+        });
+        kv.push(['多空', r.long_short + '%']);
+        kv.push(['分层单调', r.monotonic ? '是' : '否']);
+      }
+      kv.push(['结论', r.verdict]);
+    }else{
+      kv.push(['结论', r.verdict || '无法下结论']);
+    }
+    $('f-report').innerHTML = kv.map(function(x){
+      return '<div class="kv"><span class="k">' + esc(x[0]) +
+             '</span><span class="v">' + esc(String(x[1])) + '</span></div>';
+    }).join('');
+  }
+
+  function doSave(){
+    var name = $('f-name').value.trim();
+    var expr = $('f-expr').value.trim();
+    if(!name || !expr){ $('f-msg').textContent = '名称和表达式都要填'; return; }
+    post('/api/factors/add', {
+      name: name, expr: expr,
+      description: $('f-desc').value.trim(),
+      category: $('f-cat').value.trim() || '自定义',
+      overwrite: true,
+    }).then(function(r){
+      $('f-msg').textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || '');
+      if(r.ok){ loadFactors(); }
+    });
+  }
+
+  function doMine(){
+    $('m-msg').textContent = '挖掘中…（遗传算法，可能几十秒）';
+    $('btn-f-mine').disabled = true;
+    post('/api/factors/mine', {
+      horizon: 5,
+      generations: Number($('m-gen').value) || 10,
+      population: Number($('m-pop').value) || 50,
+      seconds: Number($('m-sec').value) || 60,
+      min_score: Number($('m-min').value) || 45,
+      save: $('m-save').checked,
+    }).then(function(r){
+      $('btn-f-mine').disabled = false;
+      if(!r.ok){ $('m-msg').textContent = '挖掘失败: ' + (r.error||'?'); return; }
+      $('m-msg').textContent = '评估了 ' + r.evaluated + ' 个表达式' +
+        (r.saved ? ('，已入库 ' + r.saved + ' 个') : '');
+      var rows = r.factors || [];
+      $('m-rows').innerHTML = rows.length ? rows.map(function(f, i){
+        return '<tr><td>' + (i+1) + '</td><td class="num">' + f.score.toFixed(1) +
+          '</td><td class="num">' + (f.ic>=0?'+':'') + f.ic.toFixed(3) +
+          '</td><td class="num">' + f.icir.toFixed(2) +
+          '</td><td><code>' + esc(f.expr) + '</code></td></tr>';
+      }).join('') : '<tr><td colspan="5" class="muted">没有满足门槛的因子，' +
+        '试着调低最低分数或增大代数</td></tr>';
+      if(r.saved){ loadFactors(); }
+    }).catch(function(e){
+      $('btn-f-mine').disabled = false;
+      $('m-msg').textContent = '挖掘失败: ' + e.message;
+    });
+  }
+
+  function loadCalendar(){
+    api('/api/calendar').then(function(c){
+      if(!c || !c.state) return;
+      var el = $('pool-market');
+      if(!el) return;
+      var txt = '市场：' + esc(c.state_name || c.state);
+      if(c.is_trading_day){
+        txt += ' · 最近交易日 ' + esc(c.last_trading_day || '-');
+      }else{
+        // 闭市是**正常行为**，必须说清楚下次什么时候开 ——
+        // 否则用户看到"采集 0 次"只会以为程序坏了
+        txt += ' · 非交易日，不采集（下次开盘 ' + esc(c.next_open || '-') + '）';
+      }
+      el.textContent = txt;
+      el.className = c.is_open ? 'hint ok' : 'hint muted';
+    }).catch(function(){});
+  }
+
+  function loadPoolDetail(sym){
+    api('/api/pool/score/' + encodeURIComponent(sym)).then(function(d){
+      if(!d || d.ok === false){ toast((d && d.error) || '加载失败', true); return; }
+      $('pool-detail').classList.remove('hidden');
+      $('pool-d-title').textContent = d.symbol + ' 评分明细';
+      $('pool-d-hint').textContent = (d.date || '') + ' · ' +
+        (d.total == null ? '无法评分' : (d.total + ' 分（' + d.grade + '）'));
+      var kv = [];
+      DIM_KEYS.forEach(function(k){
+        var v = (d.dims || {})[k];
+        kv.push([DIM_CN[k] + (d.available && d.available[k] ? '' : '（无数据）'),
+                 v == null ? '—' : v.toFixed(1)]);
+      });
+      kv.push(['风险扣分', ((d.penalties||[]).reduce(function(a,p){ return a + p[1]; }, 0)).toFixed(1)]);
+      $('pool-d-kv').innerHTML = kv.map(function(r){
+        return '<div class="kv"><span class="k">' + esc(r[0]) + '</span>' +
+               '<span class="v">' + esc(r[1]) + '</span></div>';
+      }).join('');
+      var lines = (d.reasons || []).map(function(t){ return '· ' + t; }).join('\n');
+      $('pool-d-reasons').textContent = lines || '（无）';
+      $('pool-detail').scrollIntoView({behavior:'smooth', block:'start'});
+    }).catch(function(e){ toast('加载评分明细失败: ' + e.message, true); });
+  }
+
   // ==================== 回测页面 ====================
   function loadStrategies(){
     // 从后端能力清单取，不硬编码 —— 否则新增策略后下拉框里看不到，
@@ -1199,6 +1989,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   function switchPage(page){
     PAGE = page;
     $('page-live').classList.toggle('hidden', page !== 'live');
+    $('page-factor').classList.toggle('hidden', page !== 'factor');
+    $('page-strategy').classList.toggle('hidden', page !== 'strategy');
+    $('page-pool').classList.toggle('hidden', page !== 'pool');
     $('page-backtest').classList.toggle('hidden', page !== 'backtest');
     Array.prototype.forEach.call($('tabs').children, function(b){
       b.classList.toggle('on', b.getAttribute('data-page') === page);
@@ -1208,6 +2001,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       loadBacktest();
       // 回测页 3 秒刷一次足够：作业是分钟级的
       btTimer = setInterval(loadBacktest, 3000);
+    }
+    if(page === 'pool'){ loadPool(); loadCalendar(); }
+    if(page === 'factor'){ loadFactors(); loadSchedule(); }
+    if(page === 'strategy'){
+      loadStrategies(); syncKindForm();
+      // 首次进入给两条空规则行，别让用户面对一个空表单不知道从哪开始
+      if(!$('s-in-rules').children.length){ addRuleRow('s-in-rules'); }
+      if(!$('s-out-rules').children.length){ addRuleRow('s-out-rules'); }
     }
   }
 
@@ -1222,6 +2023,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       return;
     }
     if(el.id === 'bt-strategy'){ toggleSpecBox(); return; }
+    if(el.id === 's-kind'){ syncKindForm(); return; }
     if(!el.classList || !el.classList.contains('ci')) return;
     var sym = el.getAttribute('data-sym'), per = el.getAttribute('data-per');
     var val = el.value.trim();

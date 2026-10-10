@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "股票池配置。",
+    "",
+    "source  候选池来源：limitup(涨停池) / hot(人气榜) / theme(热门题材成分) /",
+    "        flow(资金流排名) / watch(自选) / all(全市场，慎用)",
+    "sync    刷新时是否先联网同步数据。false = 只用库里已有的数据打分（快，离线可用）",
+    "watch   自选股列表（source=watch 时使用，也会被其它来源合并关注）",
+    "theme_top  source=theme 时取最热的多少个题材",
+    "min_score  低于该分数的不进结果（留空=不过滤）",
+    "sync_fundamental  刷新时是否同步基本面（季频数据，每只票 2 次请求；",
+    "                  候选池很大时设 false 会快很多）"
+  ],
+
+  "source": "limitup",
+  "limit": 30,
+  "sync": true,
+  "sync_fundamental": true,
+  "theme_top": 10,
+  "min_score": null,
+
+  "watch": [
+    "000001",
+    "600519"
+  ]
+}

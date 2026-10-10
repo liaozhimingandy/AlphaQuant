@@ -137,6 +137,118 @@ class NewsConfidenceRisk(IBaseRiskRule):
 
 
 @register_risk
+class MinScoreRisk(IBaseRiskRule):
+    """综合评分门槛：低于阈值的买入信号不放行。
+
+    这是"实盘要考虑多维度信息"最直接的落地 ——
+    技术面金叉只是**一个**维度，而钱是自己的。
+    加上这道闸之后，一个票必须先在资金链/题材/筹码/基本面各维度上
+    整体站得住，才允许建仓。
+
+    两个必须守住的细节：
+      1. **只管买入**。卖出不该被评分挡住 ——
+         一只票评分掉下来正是该卖的理由，挡住卖出等于逼人扛着。
+      2. **没评分数据时放行并说明理由**，而不是一律拒绝。
+         评分依赖日频截面数据，数据没采到的日子如果一律拒绝，
+         策略会莫名其妙一整天不下单；反过来如果一律放行，
+         这道闸就形同虚设。所以"放行但要说清楚为什么放行"。
+    """
+    name = "min_score"
+    description = "买入信号要求的最低综合评分（多维度）"
+
+    def __init__(self, min_score: float = 60.0, allow_unknown: bool = True,
+                 **kw) -> None:
+        super().__init__(min_score=min_score, allow_unknown=allow_unknown, **kw)
+        self.min_score = float(min_score)
+        self.allow_unknown = bool(allow_unknown)
+
+    def check(self, signal, state, ctx=None, account=None) -> RiskVerdict:
+        if signal.side != Side.BUY:
+            return self._pass("非买入信号")
+        score = None
+        if ctx is not None:
+            try:
+                score = ctx.feature("composite_score")
+            except Exception:
+                score = None
+        if score is None:
+            if self.allow_unknown:
+                return self._pass("无综合评分数据（放行，但未做多维度校验）")
+            return self._block("无综合评分数据，且配置为不允许未知")
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            return self._pass("综合评分格式异常（放行）")
+        if score < self.min_score:
+            return self._block(
+                f"综合评分 {score:.1f} 低于门槛 {self.min_score:.1f}"
+            )
+        return self._pass(f"综合评分 {score:.1f}")
+
+
+@register_risk
+class FundamentalRisk(IBaseRiskRule):
+    """基本面排雷：亏损股、超高负债、基本面综合分过低的票不让买。
+
+    这是"只看技术面"最容易踩的坑：一只票技术形态再漂亮，
+    如果它连续亏损且负债率 90%，那是在买一个随时可能暴雷的壳。
+    基本面是**慢变量**，不适合择时，但非常适合当排雷闸门。
+    """
+    name = "fundamental"
+    description = "基本面排雷：PE/ROE/负债率/基本面综合分"
+
+    def __init__(self, min_fundamental_score: float = 0.0,
+                 max_debt_ratio: float = 0.0, reject_loss: bool = False,
+                 **kw) -> None:
+        super().__init__(min_fundamental_score=min_fundamental_score,
+                         max_debt_ratio=max_debt_ratio,
+                         reject_loss=reject_loss, **kw)
+        self.min_fundamental_score = float(min_fundamental_score)
+        self.max_debt_ratio = float(max_debt_ratio)
+        self.reject_loss = bool(reject_loss)
+
+    def check(self, signal, state, ctx=None, account=None) -> RiskVerdict:
+        if signal.side != Side.BUY:
+            return self._pass("非买入信号")
+        if ctx is None:
+            return self._pass("无因子上下文")
+        pe = ctx.feature("pe")
+        # PE 为负 = 亏损。这是**确定的坏消息**，不是"没数据"，所以可以拦。
+        if self.reject_loss and pe is not None:
+            try:
+                if float(pe) <= 0:
+                    return self._block(f"PE {float(pe):.1f} 为负（亏损股）")
+            except (TypeError, ValueError):
+                pass
+        if self.max_debt_ratio > 0:
+            debt = ctx.feature("debt_ratio")
+            if debt is not None:
+                try:
+                    if float(debt) > self.max_debt_ratio:
+                        return self._block(
+                            f"资产负债率 {float(debt):.1f}% 超过上限 "
+                            f"{self.max_debt_ratio:.1f}%"
+                        )
+                except (TypeError, ValueError):
+                    pass
+        if self.min_fundamental_score > 0:
+            fs = ctx.feature("fundamental_score")
+            if fs is None:
+                # 基本面分由因子层合成，这里再算一次太重，交给配置决定：
+                # 阈值 > 0 表示"必须做基本面校验"，没数据时放行但说明
+                return self._pass("无基本面综合分（放行）")
+            try:
+                if float(fs) < self.min_fundamental_score:
+                    return self._block(
+                        f"基本面综合分 {float(fs):.1f} 低于门槛 "
+                        f"{self.min_fundamental_score:.1f}"
+                    )
+            except (TypeError, ValueError):
+                pass
+        return self._pass("基本面检查通过")
+
+
+@register_risk
 class MaxHoldBarsRisk(IBaseRiskRule):
     """最长持股周期：超过 N 根K线还没出场则强制允许卖出（防止出场规则失效）。"""
     name = "max_hold_bars"

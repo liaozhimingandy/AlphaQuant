@@ -265,3 +265,367 @@ class SystemEvent(Base):
     symbol = Column(String(20), index=True)
     message = Column(Text)
     detail_json = Column(Text)
+
+
+# ===========================================================================
+# 资金流 / 筹码 / 涨停 / 题材 / 综合评分
+# ===========================================================================
+# 为什么要单独一组表：
+#   传统量价（开高低收量）只回答"价格走到哪了"，回答不了
+#   "谁在买、买得急不急、套牢盘多不多、是不是当天热点"。
+#   这几类数据**不是逐根K线**的，而是日频的截面数据 ——
+#   它们天然该按 (symbol, date) 存，而不是塞进 BarSeries。
+#
+#   取不到数据时的约定：**表里没数据 = 该维度不可用**，
+#   打分引擎会把它按"中性/不参与"处理并**明确标出来**，
+#   绝不能用 0 顶替（0 分会被当成"很差"，那是假信号）。
+# ===========================================================================
+
+
+class FundFlow(Base):
+    """个股资金流（日频）。
+
+    ``main_net`` 主力净流入 = 超大单 + 大单净额。这是"大资金在往哪走"
+    最直接的刻画。``main_net_pct`` 是它占成交额的比例 ——
+    比绝对值好用得多：一只万亿成交的票净流入 1 亿和一只小票净流入 1 亿
+    完全不是一回事。
+    """
+
+    __tablename__ = "fund_flow"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    date = Column(Date, index=True, nullable=False)
+    close = Column(Float)
+    pct_change = Column(Float)
+    turnover = Column(Float)                 # 换手率
+    amount = Column(Float)                   # 成交额
+    main_net = Column(Float)                 # 主力净流入（超大单+大单）
+    main_net_pct = Column(Float)             # 主力净流入 / 成交额
+    super_large_net = Column(Float)          # 超大单净额
+    large_net = Column(Float)                # 大单净额
+    medium_net = Column(Float)               # 中单净额
+    small_net = Column(Float)                # 小单净额
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "date", name="uk_fundflow_symbol_date"),
+        Index("ix_fundflow_date_main", "date", "main_net"),
+    )
+
+
+class ChipDistribution(Base):
+    """筹码分布（日频）。
+
+    ``profit_ratio`` 获利盘比例：当前价之下的筹码占比。
+      高（>90%）意味着几乎人人浮盈 → **抛压重**；
+      低（<10%）意味着普遍套牢 → 上方套牢盘密集，反弹压力大。
+    ``concentration_*`` 筹码集中度：值越小越集中（主力控盘度高）。
+    ``peak_price`` 主筹码峰价格：现价与它的距离刻画"是否处在密集成交区"。
+    """
+
+    __tablename__ = "chip_distribution"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    date = Column(Date, index=True, nullable=False)
+    avg_cost = Column(Float)                 # 平均成本
+    profit_ratio = Column(Float)             # 获利盘比例 0~1
+    cost_90_low = Column(Float)
+    cost_90_high = Column(Float)
+    cost_70_low = Column(Float)
+    cost_70_high = Column(Float)
+    concentration_90 = Column(Float)         # 90% 筹码集中度（越小越集中）
+    concentration_70 = Column(Float)
+    peak_price = Column(Float)               # 主筹码峰对应价格
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "date", name="uk_chip_symbol_date"),
+    )
+
+
+class LimitUpPool(Base):
+    """涨停池（日频快照）。
+
+    ``continuous`` 连板数、``seal_amount`` 封板资金、``broken_times`` 炸板次数
+    是判断"涨停质量"的三个关键：封单越大越硬、炸板越少越稳、连板越多越有辨识度。
+    """
+
+    __tablename__ = "limitup_pool"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, nullable=False)
+    symbol = Column(String(20), index=True, nullable=False)
+    name = Column(String(64))
+    pct_change = Column(Float)
+    close = Column(Float)
+    amount = Column(Float)
+    seal_amount = Column(Float)              # 封板资金
+    first_seal_at = Column(String(32))       # 首次封板时间
+    last_seal_at = Column(String(32))
+    broken_times = Column(Integer)           # 炸板次数
+    limit_stat = Column(String(16))          # 如 "3/5"：5 天里涨停 3 次
+    continuous = Column(Integer)             # 连板数
+    industry = Column(String(64))            # 所属行业（题材线索）
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("date", "symbol", name="uk_limitup_date_symbol"),
+        Index("ix_limitup_date_continuous", "date", "continuous"),
+    )
+
+
+class ThemeFlow(Base):
+    """题材/板块表现与资金流（日频）。
+
+    题材热度看的是"整个板块今天如何"，而不是单只票 ——
+    一只票再强，如果它所在的板块整体在退潮，持续性通常不好。
+    """
+
+    __tablename__ = "theme_flow"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, nullable=False)
+    board = Column(String(64), index=True, nullable=False)   # 板块/题材名
+    kind = Column(String(16), index=True)                    # concept / industry
+    pct_change = Column(Float)
+    turnover = Column(Float)
+    main_net = Column(Float)
+    up_count = Column(Integer)
+    down_count = Column(Integer)
+    leading_stock = Column(String(64))       # 领涨股（题材龙头）
+    rank = Column(Integer)                   # 当日涨幅排名（越小越热）
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("date", "kind", "board", name="uk_theme_date_kind_board"),
+    )
+
+
+class StockTheme(Base):
+    """个股 ↔ 题材 的映射。
+
+    单独一张表而不是每次现查：题材归属变化很慢，
+    而打分是高频动作 —— 每次打分都去问一遍接口既不现实也容易被限流。
+    """
+
+    __tablename__ = "stock_theme"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    board = Column(String(64), index=True, nullable=False)
+    kind = Column(String(16), index=True)
+    source = Column(String(32))              # 数据来源：concept_cons / limitup / manual
+    date = Column(Date, index=True)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "board", name="uk_stocktheme_symbol_board"),
+    )
+
+
+class StockFundamental(Base):
+    """个股基本面（估值 + 成长 + 质量）。
+
+    为什么和资金流分开存：两者的**更新节奏完全不同**。
+      资金流/筹码：日频，盘中就在变；
+      估值：日频（随价格变），但一天一次足够；
+      财务：季频，一份三季报要用到下一个报告期。
+    硬塞一张表会导致"每次采都要把所有字段填一遍"，
+    而季频字段九成时间都是空的。
+
+    ``report_date`` 必须单独记：
+      用"采集日"去标记一份三季报，回看时会误以为当时就知道了这个数据 ——
+      那是最隐蔽的一类未来函数。
+    """
+
+    __tablename__ = "stock_fundamental"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    date = Column(Date, index=True, nullable=False)          # 数据对应日期
+    report_date = Column(Date)                                # 财报报告期（季频）
+
+    # ---- 估值 ----
+    pe = Column(Float)                    # 市盈率（TTM）
+    pb = Column(Float)                    # 市净率
+    ps = Column(Float)                    # 市销率
+    dividend_yield = Column(Float)        # 股息率 %
+    market_cap = Column(Float)            # 总市值（元）
+    float_market_cap = Column(Float)      # 流通市值（元）
+
+    # ---- 成长 ----
+    revenue_yoy = Column(Float)           # 营收同比 %
+    profit_yoy = Column(Float)            # 净利同比 %
+
+    # ---- 质量 ----
+    roe = Column(Float)                   # 净资产收益率 %
+    gross_margin = Column(Float)          # 毛利率 %
+    net_margin = Column(Float)            # 净利率 %
+    debt_ratio = Column(Float)            # 资产负债率 %
+    bps = Column(Float)                   # 每股净资产
+
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "date", name="uk_fundamental_symbol_date"),
+        Index("ix_fundamental_date", "date"),
+    )
+
+
+class StockScore(Base):
+    """综合评分结果（日频，可回放）。
+
+    存**各维度明细**而不只是总分：用户一定会问"为什么给它这么高分"，
+    只留一个总分没法解释，也没法调权重。
+    """
+
+    __tablename__ = "stock_score"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, nullable=False)
+    symbol = Column(String(20), index=True, nullable=False)
+    total_score = Column(Float, index=True)
+    rank = Column(Integer)
+    grade = Column(String(8))                # A/B/C/D
+    dims_json = Column(Text)                 # 各维度得分
+    reasons_json = Column(Text)              # 人话解释（加分/扣分原因）
+    available_json = Column(Text)            # 哪些维度有数据（没数据的明确标出）
+    source = Column(String(32))              # 候选池来源
+    created_at = Column(DateTime, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("date", "symbol", name="uk_score_date_symbol"),
+        Index("ix_score_date_total", "date", "total_score"),
+    )
+
+
+class StockFactorValue(Base):
+    """通用因子值（个股 × 日期 × 类别 × 指标名）。
+
+    ============================================================
+    为什么用"通用表"而不是每类数据一张表
+    ============================================================
+    要接的数据类别会不断加：龙虎榜、融资融券、业绩预告、股东户数、
+    机构评级、研报、大宗交易、北向持股……
+    每加一类就加一张表 + 一个仓储 + 一组查询方法，
+    三个月后就是十几张表、十几套几乎一样的代码 —— 而它们的
+    结构完全相同：**(标的, 日期, 指标名, 数值)**。
+
+    所以统一成一张表，用 ``category`` 区分来源：
+      - 新增一类数据 = 加一个获取函数，**不动表结构、不动仓储**
+      - 查询是同一个入口，特征层能一次性把所有类别装配起来
+      - 指标名是数据驱动的，界面上列得出"现在有哪些指标"
+
+    代价是数值只能是 float（放不下的进 ``extra_json``），
+    以及没有列级约束。对截面因子数据来说这是划算的交换。
+
+    ``category`` 取值见 :data:`app.data.marketx.CATEGORIES`。
+    """
+
+    __tablename__ = "stock_factor_value"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    date = Column(Date, index=True, nullable=False)
+    #: 数据类别：lhb / margin / forecast / holders / rating / theme / flow …
+    category = Column(String(32), index=True, nullable=False)
+    #: 指标名：如 "lhb_net_buy"、"margin_balance"、"forecast_yoy"
+    name = Column(String(64), index=True, nullable=False)
+    value = Column(Float)
+    #: 放不进单个 float 的补充信息（如机构名称、公告标题）
+    extra_json = Column(Text)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "date", "category", "name",
+                         name="uk_fvalue_sym_date_cat_name"),
+        Index("ix_fvalue_date_cat", "date", "category"),
+        Index("ix_fvalue_cat_name", "category", "name"),
+    )
+
+
+class MarketNews(Base):
+    """舆情：新闻 / 公告 / 研报（带情感分）。
+
+    与新闻中心（RSS 实时流）的分工：
+      新闻中心负责"实时触发交易事件"，
+      这里负责"沉淀成可回看、可回测的**特征**"。
+    两者不是一回事 —— 实时那条链路不需要存三个月前的新闻，
+    但因子研究需要。
+
+    ``sentiment`` 由关键词规则或 LLM 产出，落在 -1~1。
+    没有情感分的新闻也会存（value 为 None），因为"出现了多少条"
+    本身就是关注度信号。
+    """
+
+    __tablename__ = "market_news"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), index=True)      # 空 = 市场级
+    date = Column(Date, index=True, nullable=False)
+    title = Column(Text)
+    #: news / notice / report / research
+    kind = Column(String(16), index=True, default="news")
+    source = Column(String(64))
+    sentiment = Column(Float)                     # -1 ~ 1，None=未分析
+    #: 热度/阅读/评论数（有则记，用于加权）
+    heat = Column(Float)
+    url = Column(Text)
+    created_at = Column(DateTime)
+
+    __table_args__ = (
+        # 同一天同一标题只留一条（重复采集是幂等的前提）
+        UniqueConstraint("symbol", "date", "kind", "title", name="uk_news_dedup"),
+        Index("ix_news_date_kind", "date", "kind"),
+    )
+
+
+class MacroIndicator(Base):
+    """宏观指标（市场级，非个股）。
+
+    宏观不决定明天涨跌，但它决定**什么类型的策略在这个环境下能活**：
+    利率上行周期里高估值成长股系统性承压，PMI 拐点往往领先周期股。
+    所以它作为"环境开关"参与打分，而不是当择时信号。
+    """
+
+    __tablename__ = "macro_indicator"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, nullable=False)
+    #: 指标代码：cpi / ppi / pmi / m2 / shibor / usdcny / gdp …
+    name = Column(String(32), index=True, nullable=False)
+    value = Column(Float)
+    #: 同比或环比（%），口径不统一就留空
+    yoy = Column(Float)
+    period = Column(String(16))                  # month / quarter
+    source = Column(String(32))
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("date", "name", name="uk_macro_date_name"),
+        Index("ix_macro_name_date", "name", "date"),
+    )
+
+
+class MarketBreadth(Base):
+    """市场宽度/情绪（市场级，非个股）。
+
+    "今天全市场是涨多还是跌多、有多少涨停、成交量多少" ——
+    这是所有个股策略的**共同背景**。同一只票在普涨日和普跌日里
+    同样的技术形态，胜率完全不同。
+    """
+
+    __tablename__ = "market_breadth"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, unique=True, nullable=False)
+    up_count = Column(Integer)                   # 上涨家数
+    down_count = Column(Integer)                 # 下跌家数
+    limit_up_count = Column(Integer)             # 涨停家数
+    limit_down_count = Column(Integer)           # 跌停家数
+    total_amount = Column(Float)                 # 两市成交额（元）
+    #: -100 ~ 100，正=偏乐观
+    sentiment = Column(Float)
+    updated_at = Column(DateTime)

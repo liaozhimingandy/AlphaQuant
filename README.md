@@ -61,7 +61,7 @@ python main.py hub status --tasks              # hub + 各服务状态 + 所有�
 ## 网页监控面板
 
 引擎自带一个**零依赖的网页面板**（Twisted Web 挂在引擎自己的 reactor 上），
-浏览器打开 `http://127.0.0.1:8787/` 即可。面板分成**两个页面**：
+浏览器打开 `http://127.0.0.1:8787/` 即可。面板分成**三个页面**：
 
 ### 实盘监控页
 
@@ -79,6 +79,13 @@ python main.py hub status --tasks              # hub + 各服务状态 + 所有�
 
 顶栏有**快照策略下拉框**（有操作才存 / 内容变了才存 / 定时存 / 关闭），
 改完立即生效。注意：顶栏的 1s/2s/5s 控制的是**本页刷新频率**，与快照落盘无关。
+
+### 选股 · 股票池页
+
+- **推荐列表**：排名 / 代码 / 总分 / 等级 + 资金·题材·筹码·技术·涨停 五个维度的分
+- **权重提示**：直接显示当前 `config/score.json` 的权重与默认候选池来源
+- **刷新**：就地触发一次"拉候选 → 同步 → 打分 → 落库"，带来源与条数上限
+- **明细**：点任一行的「明细」看该票逐维度得分与扣分理由（无数据的维度会标出来）
 
 ### 回测监控页
 
@@ -300,6 +307,58 @@ python main.py ctl endpoints list            # 运行中的服务也能看
 python main.py ctl endpoints check real
 ```
 
+### 通用 HTTP 网关：不写代码接一家券商
+
+每家券商的字段命名、鉴权方式、URL 形状都不一样。如果每接一家都要写一个
+Python 类，"接券商"就永远是排期开发的事。所以内置了**配置驱动**的
+`http` 网关（标准库 urllib，零新依赖）：把路径、字段名、返回值取值路径
+写进接入点配置即可。
+
+```json
+{
+  "id": "mybroker",
+  "gateway": "http",
+  "account": "你的账号",
+  "params": {
+    "base_url": "http://127.0.0.1:8080",
+    "token_env": "BROKER_HTTP_TOKEN",
+    "endpoints": {
+      "place":      {"path": "/orders", "method": "POST"},
+      "cancel":     {"path": "/orders/{broker_order_id}", "method": "DELETE"},
+      "orders":     {"path": "/orders", "method": "GET"},
+      "positions":  {"path": "/positions", "method": "GET"},
+      "account":    {"path": "/account", "method": "GET"},
+      "fills":      {"path": "/fills", "method": "GET"},
+      "instrument": {"path": "/instruments/{symbol}", "method": "GET"}
+    },
+    "req_fields": { "size": "quantity", "order_type": "orderType" },
+    "resp_fields": { "list": "data", "order_id": "orderId" },
+    "status_map": { "new": "SUBMITTED", "dealt": "FILLED" }
+  }
+}
+```
+
+字段对不上就改 `req_fields` / `resp_fields` / `status_map` 三张映射表，不用碰代码。
+返回 `{"data": {...}}` 嵌套和平铺两种形状都认。完整示例见
+`config/brokers.json` 的 `http-demo` 接入点。
+
+端到端验证（用本地迷你券商跑通下单→回报→持仓→撤单→拒绝→断网）：
+
+```bash
+python scripts/smoke_http_gateway.py        # 20 项
+```
+
+### 网关接口补齐
+
+`IBrokerGateway` 在"下单/撤单/查/收回报"之外补齐了实盘必需的能力：
+
+| 方法 | 用途 | 缺失时的后果 |
+| --- | --- | --- |
+| `query_trades(since)` | 查成交明细 | 轮询式网关丢了回报就再也拿不回来，重启对不上账 |
+| `query_instrument(sym)` | 交易所口径的涨跌停价/最小价差/停牌 | 用"昨收×1.1"估算会在 ST(5%)、创业板(20%) 上判错 |
+| `ensure_connected()` | 断线重连 | 连接静默断开后策略照跑，但一笔单都发不出去 |
+| `capabilities()` / `health()` | 能力声明与连通性自检 | 面板只能猜这家券商能做什么 |
+
 配置里的额外字段会被**按网关签名过滤**，不会因为"多配了一个字段"就报 TypeError
 （那是接新券商时最容易踩的坑）。显式指定的接入点找不到会**直接报错**，
 不会静默降级到别的账户 —— 静默降级是实盘里最危险的行为。
@@ -410,6 +469,34 @@ python main.py hub stop               # 停 hub 并带走所有服务
 聚合面板在 `http://127.0.0.1:8899/`：服务卡片（健康灯 + 启停重启）、
 跨服务任务总表、总线主题浏览器，点进卡片可直接跳到该服务自己的详细面板。
 
+## 交易日历：闭市就不再请求数据
+
+闭市时还在按定时器请求数据是最典型的浪费：请求发出去了、限流风险占了、
+日志刷了一屏，拿回来的还是和上一交易日一模一样的数据。更糟的是它掩盖真问题 ——
+日志里"一切正常"，实际一天里绝大多数请求都是无意义的重复。
+
+交易日历（`app/core/market/calendar.py`）分三层兜底：
+
+1. **内置表** —— 已公布的交易所休市安排（2025 / 2026 精确到日，如 2026 国庆 10/1–10/7）
+2. **配置文件** —— `config/trade_calendar.json`（联网校准后写这里，之后离线可用）
+3. **联网刷新** —— `python main.py calendar refresh`
+
+刷新失败时**不动现有日历**：日历缺失会导致"该采的时候不采"，那比多采几次严重得多。
+
+判断交易日**不能只看是不是周末** —— 国庆七天里有五个工作日，
+按"周一到周五"判断会白采五天。
+
+```bash
+python main.py calendar status      # 当前市场状态、最近交易日、下次开盘
+python main.py calendar refresh     # 联网校准（写 config/trade_calendar.json）
+```
+
+受它约束的：K线采集（只在交易时段 + 收盘缓冲内）、扩展数据采集
+（资金流/筹码/基本面/涨停池/题材，**非交易日一次都不请求**）。
+
+日频截面数据还有一条额外约束：**一天只采一次**（盘中一次 + 收盘定稿一次）。
+这类数据一天只有"盘中波动"和"收盘定稿"两种状态，10 分钟采一次纯属浪费。
+
 ## 行情采集服务：数据自己长出来
 
 策略要高频数据，就不能靠"需要了再手动跑一次 `collect`"。
@@ -507,6 +594,358 @@ python main.py ctl collector reload              # 改了 json 后热加载
 既不等到周五（`ffill` 口径会整周滞后），也不会偷看周五的收盘（`bfill` 口径是未来函数，
 回测用它赚到的钱实盘一分都拿不到）。交叉因此在周内就能被捕捉到。
 
+## 资金流因子：不只看价格，还看谁在推动它
+
+同样是涨 5%，**主力持续净流入**和**散户情绪拉抬**后续的持续性完全不是一回事。
+K线只告诉你价格怎么走的，资金流告诉你谁在推动它。
+
+数据链路：`akshare 日频截面` → `app/data/marketx.py`（封装+降级）→ SQLite
+→ `FeatureProvider`（注入因子上下文，TTL 缓存）→ `Factor` → `ScoreEngine` → `StockPool`。
+
+**新增的因子**（都可直接在规则/策略里引用）：
+
+| 因子 | 含义 |
+| --- | --- |
+| `main_net_pct` | 主力净流入占成交额比例 |
+| `capital_accel` | 资金流入加速度（今天比昨天更猛吗） |
+| `capital_pulse` | 资金脉冲（单日异动强度） |
+| `net_inflow_days` | 连续净流入天数 |
+| `chip_profit_ratio` | 获利盘比例（上方套牢盘重不重） |
+| `chip_concentration` | 筹码集中度 |
+| `chip_peak_gap` | 现价与筹码峰的距离 |
+| `theme_rank` / `theme_pct` | 所属题材的排名与涨幅（站没站在主线上） |
+| `limitup_effect` | 涨停效应（连板数+封单额−炸板次数合成，"硬板"还是"烂板"） |
+| `composite_score` | 六维综合分（资金/题材/筹码/技术/涨停/基本面） |
+
+### 基本面因子
+
+| 因子 | 含义 |
+| --- | --- |
+| `pe` / `pb` / `ps` | 市盈率 TTM / 市净率 / 市销率 |
+| `dividend_yield` | 股息率 % |
+| `market_cap` / `float_market_cap` | 总市值 / 流通市值（元） |
+| `roe` | 净资产收益率 % |
+| `gross_margin` / `net_margin` | 毛利率 / 净利率 % |
+| `revenue_yoy` / `profit_yoy` | 营收同比 / 净利同比 % |
+| `debt_ratio` | 资产负债率 % |
+| `fundamental_score` | 基本面综合分：估值 30% + 成长 40% + 质量 30% |
+
+营收同比和净利同比要**一起看**：营收涨、净利跌是靠降价换量；
+营收平、净利涨可能是卖资产或降本 —— 质地完全不同。
+
+数据缺失时因子返回 `None` 而不是 `0` —— "没数据"和"资金持平"必须能区分开，
+否则打分会被一堆假 0 拉平。
+
+## 多维度数据：题材 / 基本面 / 资金 / 舆情 / 宏观 / 板块
+
+因子要有效，前提是**数据维度够全**。只靠K线能算的因子是有限的，
+真正区分度高的信息往往在K线之外。
+
+```bash
+### 采集时间窗口（默认盘前 30 分钟 + 闭市后 30 分钟）
+
+```json
+"schedule": {
+  "pre_open_minutes": 30,      // 开盘前多少分钟开始采（→ 9:00）
+  "post_close_minutes": 30,    // 闭市后延迟多少分钟采定稿（→ 15:30）
+  "grace_minutes": 120,        // 盘后窗口宽限时长
+  "intraday_enabled": false    // 盘中是否也采日频截面数据
+}
+```
+
+写在 `config/collector.json`，也可以在**监控看板「因子实验室 → 采集时间窗口」**里直接改。
+
+为什么是这两个点：
+
+- **盘前 30 分钟**：数据源已整理完上一交易日数据，且还没进竞价 ——
+  网络不挤、接口不限流，适合补齐昨日漏采
+- **闭市后 30 分钟**：交易所与数据源需要结算时间。15:00 整去拉拿到的
+  是**未定稿**数据（当天资金流、涨停池都还在变），早了拿到脏数据
+- **盘中默认不采日频截面**：一天一条的东西盘中拉十次是纯浪费，
+  还会把自己送进限流名单（分钟级数据仍正常采）
+
+### 选了标的马上就能看
+
+面板「因子实验室 → 数据采集」填标的 → **立即采集（全类别）**，
+会跑：日线 → 资金流 → 筹码 → 基本面 → 龙虎榜 → 两融 → 业绩预告 →
+股东户数 → 机构评级 → 新闻 → 宏观 → 市场宽度。单类别失败不影响其它。
+
+### 因子总目录（按类别，含数据可用性）
+
+面板因子表列出**全部 63 个因子**并分组：量价技术 / 表达式因子 / 题材概念 /
+筹码结构 / 资金类 / 基本面 / 舆情 / 宏观市场。
+灰色的表示库里还没有对应数据 —— 用了会得到空值，先去采一次。
+
+```bash
+python main.py pool categories          # 看支持哪些类别 + 库里已有什么
+python main.py pool sync lhb --symbol 000001
+python main.py pool sync macro           # 市场级，不需要标的
+python main.py pool sync all
+```
+
+| 类别 | 内容 | 频率 | 说明 |
+| --- | --- | --- | --- |
+| `lhb` | 龙虎榜 | 日频 | **唯一能看到"谁在买"的公开数据**：机构席位 vs 游资营业部 |
+| `margin` | 融资融券 | 日频 | 杠杆资金温度计，反映风险偏好 |
+| `forecast` | 业绩预告 | 季频 | 财报之前唯一的业绩前瞻，领先财报 1~2 个月 |
+| `holders` | 股东户数 | 季频 | 户数减少 = 筹码集中（有人悄悄收集） |
+| `rating` | 机构评级 | 不定期 | 单一评级不可信，**评级变化密度**才有价值 |
+| `news` | 新闻舆情 | 日频 | 带情感分（-1~1）；条数本身也是关注度信号 |
+| `macro` | 宏观指标 | 月/季 | CPI / PPI / PMI / M2 / LPR |
+| `breadth` | 市场宽度 | 日频 | 涨跌家数、涨停家数、市场情绪 |
+
+### 为什么用"通用因子值表"而不是每类一张表
+
+```
+stock_factor_value(symbol, date, category, name, value, extra_json)
+```
+
+要接的类别会不断加。每加一类就建表 + 写仓储 + 写查询，
+三个月后就是十几张结构完全相同的表、十几套几乎一样的代码 ——
+而它们都是 **(标的, 日期, 指标名, 数值)**。
+
+统一成一张表后：**新增一类数据 = 加一个获取函数**，
+不动表结构、不动仓储、不动查询。放不进 float 的信息进 `extra_json`。
+
+### 宏观与市场宽度是"环境开关"，不是选股维度
+
+这两类对**所有票同值**，所以它衡量的是"现在该不该出手"：
+
+- PMI < 50 收缩区间，个股策略胜率系统性下降
+- 全市场普跌时（breadth_sentiment < -30），再好的票也该降仓
+- LPR 上行周期，高估值成长股系统性承压
+
+所以它们在打分里权重**刻意压到 0.06** —— 给高了会稀释掉真正的选股信息。
+
+## 策略库：界面上自定义策略并一键上线
+
+面板 **策略库** 页可以不写代码地建策略、保存、上线为实盘任务。
+
+三种类型：
+
+| 类型 | 用途 | 关键参数 |
+| --- | --- | --- |
+| `declarative` 规则 | **多因子组合**：多条条件用 全部满足/任一满足 组合 | 入场/出场各可加多条规则 |
+| `score` 综合评分 | 按八维综合分决策 | entry_score / exit_score |
+| `multi_factor` 多因子加权 | 因子库里的因子标准化后加权 | factors / entry / exit |
+
+规则策略的因子是**分组下拉**（量价/题材/筹码/资金/基本面/舆情/宏观），
+可以加多条并选"全部满足 / 任一满足"，生成的结构是：
+
+```json
+{"combine": "any", "rules": [
+  {"factor": "main_net_pct", "op": "gt", "value": 0.05},
+  {"combine": "all", "rules": [
+    {"factor": "theme_rank", "op": "lt", "value": 20},
+    {"factor": "limitup_effect", "op": "gt", "value": 2}]}]}
+```
+
+即"资金流好 **或者**（题材热 **且** 涨停）"，嵌套组合也支持。
+
+策略存在 `config/strategies.json`（**声明式配置，不是代码**）——
+为了把阈值从 30 改成 35 去改 .py 文件再热加载，摩擦太大，
+最后的结果就是大家都不去调。需要写复杂逻辑时仍然去 `strategies/` 写 Python，
+两条路并存。
+
+保存时做结构校验（例如 `exit_score ≥ entry_score` 会被拒绝并说明"否则刚买就卖"），
+上线时若没配风控会自动补一条 `max_drawdown` 兜底。
+
+```bash
+python main.py ctl strategies --reload      # 重新扫描 strategies/ 目录
+```
+
+## 因子实验室：写公式加因子、检验、机器学习挖因子
+
+> 策略是量化的核心，**因子是策略的核心**。
+
+这个闭环解决的是"想到一个因子 → 变成验证过的因子"之间的摩擦。
+
+### ① 界面上写一句公式 = 一个因子
+
+面板 **因子实验室** 页（或命令行 `main.py factor add`）直接写表达式：
+
+```
+close / MA(close, 20) - 1                 乖离率
+-(close / REF(close, 20) - 1) * 100       20 日反转
+RANK(TS_RANK(volume, 10))                 量能位置
+CORR(close, volume, 10)                   量价相关性
+```
+
+29 个算子（`MA` `EMA` `STD` `REF` `DELTA` `RANK` `ZSCORE` `TS_RANK` `CORR` `TS_MAX` …）
++ 6 个变量（`open` `high` `low` `close` `volume` `amount`）。
+`main.py factor ops` / `factor vars` 可以列出全部，面板里也能点开速查。
+
+**不用 eval**：表达式来自输入框，所以是自己写的 tokenizer + 白名单函数表。
+`__import__` / `exec` 之类一律拒绝。写错变量名会提示"是不是想写 close"。
+
+**所有算子都是因果的** —— `RANK` 是截至当前的扩展窗口百分位，
+不是全样本排名（后者用未来数据给历史打分，是最隐蔽的一类未来函数）。
+
+### ② 存进因子库，`config/factors.json`
+
+启动即注册：规则、策略、回测、面板下拉框都能直接引用，不用改代码。
+
+```bash
+python main.py factor list                 # 列出因子库
+python main.py factor presets              # 装 8 个预置经典因子
+python main.py factor add my_mom "close / MA(close, 20) - 1" --desc "均线乖离"
+python main.py factor remove my_mom
+```
+
+### ③ 检验：这个因子到底有没有预测力
+
+```bash
+python main.py factor check --horizon 5 -- "-(close / REF(close, 20) - 1) * 100"
+```
+
+```
+样本 2315 行 / 2 个标的（口径：时间序列）
+IC     +0.2371（标准差 0.2151）
+ICIR   +1.102       t 值 +51.67
+IC>0 占比 86.3%
+综合 97.4 分 → 可用
+```
+
+判据：**IC**（相关系数）、**RankIC**（秩相关，抗极值）、**ICIR**（稳定性，
+衡量"是不是稳定有效"而不是"偶尔很准"）、**分层收益单调性**、**t 值**。
+
+刻意把**稳定性**放在强度前面：IC 高但 IR 低的因子，实盘表现是
+"偶尔大赚、长期磨损"，比没有更危险。
+
+截面口径至少要 3 个标的（2 个点的相关系数恒为 ±1）。标的不足时退到
+时间序列口径，并**在结论里写明口径更弱**。
+
+### ④ 机器学习找因子
+
+**遗传算法挖掘**（`main.py factor mine`）：在语法树上做交叉变异，
+所以生成的每个候选都保证合法。
+
+```bash
+python main.py factor mine --generations 12 --seconds 120 --min-score 45
+python main.py factor mine --save          # 显式才会入库（source=mined）
+```
+
+实测：约 4 秒评估 230 个表达式，能挖到 IC 0.66 / ICIR 2.58 的因子。
+
+⚠️ **挖出来的因子绝大多数是过拟合的**：在有限样本上搜几千个表达式，
+总能找到几个历史表现极好的。所以默认不入库，入库也标 `mined` 并带上检验指标。
+
+**线性模型筛因子与配权重**（`main.py factor fit`）：零依赖 numpy 实现，
+岭回归（闭式解）+ Lasso（坐标下降）。
+
+```bash
+python main.py factor fit --method lasso   # lasso=会筛因子 / ridge=只缩不放零
+```
+
+```
+lasso | alpha=0.001 | 训练 1620 / 测试 695
+  样本内 R² 0.0141   样本外 R² -0.0128   样本外 IC +0.0284
+   ✓ ma_bias_20  -1.0434    ✓ price_pos_20  +0.3581    ...
+```
+
+三个刻意的设计：
+- **先去共线再拟合** —— 高度相关的因子 Lasso 会随机留一个，不先剔除
+  你以为是模型选的，其实只是它先撞上了哪个；
+- **惩罚强度用验证集选**（训练段里再切最后 20%），不用测试集调参；
+- **按时间切分**不打乱，否则训练集里会混进未来。
+
+### ⑤ 因子直接用进策略
+
+新增 **多因子策略** `multi_factor`：把因子库里的因子各自标准化后加权求和，
+按阈值开平仓。
+
+```json
+"strategy": {
+  "type": "multi_factor",
+  "params": {
+    "factors": [{"name": "mom_20", "weight": 1.0},
+                {"name": "vol_ratio", "weight": 0.5}],
+    "entry": 0.55, "exit": -0.30
+  }
+}
+```
+
+`factors` 省略时用因子库里全部启用的因子（等权）；
+权重可以直接把 `factor fit` 的结果拷进来。
+每个因子**先各自标准化再加权** —— 动量是百分比、量能比是倍数，
+直接相加等于让量纲大的那个独占话语权。
+算不出的因子跳过并重分配权重，而不是当 0 分（那会凭空造出看空信号）。
+
+回测侧：因子注册后，`declarative` 声明式策略的 JSON 规则可以直接引用它，
+例如 `{"factor": "mom_20", "op": "gt", "value": 0}`。
+
+## 多维度打分与股票池
+
+`ScoreEngine` 把六个维度加权成总分 + 等级（A/B/C/D），权重在 `config/score.json`：
+
+```json
+{ "weights": { "capital": 0.28, "theme": 0.22, "chip": 0.16,
+               "technical": 0.14, "limitup": 0.08, "fundamental": 0.12 } }
+```
+
+基本面只给 12% 是刻意的：它是**过滤器不是择时器**，一份财报要用一个季度，
+权重给高了打分结果会被几个月前的数据主导。它的作用是把垃圾股挡在池子外面。
+
+**缺维度时权重会在可用维度之间重新归一化**，而不是按 0 分算 ——
+一只票没有题材归属，只说明数据缺失，不说明它差。
+
+全市场 5000 多只票逐只拉数据既慢又必被限流，所以是两段式：
+先用候选池收窄到几十~几百只，再精细打分。候选池拉失败时**返回空列表**，
+绝不静默退化成全市场（那会把几十秒变成几十分钟）。
+
+```bash
+python main.py score 600519                # 单只票的逐维度评分明细
+python main.py flow 600519 --days 10       # 资金流与筹码原始值
+python main.py pool refresh --source limitup --limit 30   # 刷新股票池
+python main.py pool top --limit 20         # 看推荐（离线读库，不联网）
+python main.py pool sync fundflow --symbol 600519         # 只同步某一类数据
+python main.py pool sync fundamental --symbol 600519      # 只同步基本面
+python main.py pool demo                   # 无网络时用合成数据验证打分链路
+```
+
+候选池来源：`limitup`（涨停池）/ `hot`（人气榜）/ `theme`（热门题材成分）/
+`flow`（资金流排名）/ `watch`（自选，配在 `config/pool.json`）/ `all`（全市场，慎用）。
+
+`score` 策略同时注册在实盘与回测两条链路上，共用同一套打分口径，
+按 `entry_score` / `exit_score` 阈值开平仓。
+
+### 实盘里的多维度闸门
+
+光是"选出来"不够，下单那一刻也要过一遍多维度。两条新风控规则：
+
+| 规则 | 作用 |
+| --- | --- |
+| `min_score` | 综合评分低于阈值不放行买入 |
+| `fundamental` | 基本面排雷：亏损股 / 超高负债 / 基本面分过低 |
+
+```json
+"risk": [
+  { "type": "min_score", "min_score": 60, "allow_unknown": true },
+  { "type": "fundamental", "reject_loss": true, "max_debt_ratio": 70 }
+]
+```
+
+两条都**只拦买入** —— 卖出不能被评分挡住，评分掉下来正是该卖的理由。
+没数据时默认放行但会在理由里写明"未做多维度校验"：
+一律拒绝会让策略莫名其妙一整天不下单，一律放行则闸门形同虚设。
+
+### 常驻采集
+
+由 `ext_data` 组件承担，**非交易日一次都不请求**，日频数据一天只采一次：
+
+| 数据 | 节奏 |
+| --- | --- |
+| 资金流 / 筹码 | 盘中一次 + 收盘定稿一次 |
+| 基本面（估值+财务） | 收盘后一天一次 |
+| 涨停池 / 题材 | 一天一次 |
+
+回测模式默认不装 —— 那段行情是死的，去抓"今天的涨停池"对回放没有意义。
+
+```bash
+python main.py serve --no-ext-data         # 不采扩展数据
+python main.py serve --ext-interval 300    # 资金流/筹码改成 5 分钟
+```
+
 ## 后台服务：一个引擎，多个任务
 
 任务全部声明在 `config/tasks.json`，改配置即可增删策略，**不需要改代码**：
@@ -570,7 +1009,10 @@ app/
     config.py       全局配置（路径/数据库/日志/行情/新闻/大模型/监控，支持环境变量覆盖）
     market/         领域模型 Bar/Tick/Signal/Order/Position/Account/News + BarSeries + clean（数据清洗）
     indicator/      指标层（可插拔注册表、参数化、共享缓存，含周均线 wma）
-    factor/         因子层（含 wma_cross_up / wma_trend_up 等周线因子）
+    factor/         因子层（含 wma_cross_up / wma_trend_up 等周线因子，flow.py 资金流因子）
+    data/           特征提供层：features.py（把截面数据注入因子上下文）
+    score/          多维度打分引擎（资金/题材/筹码/技术/涨停 → 总分+等级）
+    pool/           股票池：候选池 → 打分 → 排序 → 推荐（pool/sync/demo）
     rule/           规则层（All/Any/Not 组合器 + 声明式构造）
     strategy/       策略层（双通道：行情 + 事件）
     risk/           风控层（闸门链 + A股实盘特有规则 T+1/涨跌停/限额）
@@ -583,7 +1025,7 @@ app/
     bus/            跨进程文件消息总线 + 发布/订阅组件
     hub/            多服务编排：supervisor / worker / panel / spec
     engine/         Twisted 引擎 + 业务组件 + 装配器 + 守护进程 + 控制中心
-      components/   data_collector / market_center / live_gateway /
+      components/   data_collector / ext_data / market_center / live_gateway /
                     strategy_manager / trading_store / news_center
   strategy/         backtrader 策略（单次回测链路）
   utils/            jsonio（原子写 JSON）/ logger（分级 + 重复节流）
@@ -594,6 +1036,8 @@ config/services.json 多服务编排配置（hub 拉起哪些服务、怎么互�
 config/collector.json 采集编排配置（每个标的采什么粒度、多久采一次）
 config/brokers.json 券商接入点（网关 + 资金账号 + 连接参数，凭据走环境变量）
 config/backtest.json 回测默认参数（资金/手续费/滑点/区间，CLI 与面板共用）
+config/pool.json    股票池配置（默认候选池来源 / 保留前几名 / 自选股）
+config/score.json   打分权重（资金/题材/筹码/技术/涨停）
 scripts/            集成演示、冒烟脚本、算法自检
 data/alphaquant.db  SQLite：行情 + 订单/成交/权益/事件/回测结果
 output/
@@ -665,6 +1109,13 @@ output/
 | `LIVE_STRICT_RECONCILE` | `true` | 对账不一致时是否阻断交易 |
 | `CLEAN_MAX_MOVE_PCT` | `0.21` | 异常跳变阈值（≈一个主板涨跌停） |
 | `CLEAN_ACTION` | `mark` | 清洗策略：`mark` 只标记 / `drop` 丢掉不可用数据 |
+| `EXT_DATA_ENABLED` | `true` | 扩展数据采集总开关（资金流/筹码/基本面/涨停池/题材） |
+| `EXT_DATA_FUNDAMENTAL` | `true` | 是否采集基本面（估值 + 财务） |
+| `EXT_DATA_INTERVAL` | `600` | 资金流/筹码采集间隔（秒） |
+| `EXT_DATA_DAILY_INTERVAL` | `3600` | 涨停池/题材等市场级数据的同步间隔（秒） |
+| `EXT_DATA_THEME_TOP` | `20` | 题材映射最多建多少个热门板块的成分（全建必触发限流） |
+| `EXT_FEATURES_ENABLED` | `true` | 是否把截面特征注入因子上下文（关掉就是纯量价策略） |
+| `EXT_FEATURE_TTL` | `300` | 特征缓存时间（秒），打分要遍历候选池，不缓存会打爆数据库 |
 
 ## 测试
 
@@ -683,6 +1134,7 @@ python scripts/weekly_factor_check.py    # 金叉/死叉/趋势 vs 因果参照�
 python scripts/smoke_engine_monitor.py   # 端到端：引擎 + 面板 + 落库 + 采集 + 接入点（55 项）
 python scripts/smoke_collector.py        # 采集服务集成冒烟
 python scripts/smoke_live_loop.py        # 实盘闭环冒烟（39 项，用内置网关，不碰真钱）
+python scripts/smoke_http_gateway.py     # HTTP 券商网关冒烟（20 项，本地迷你券商）
 ```
 
 ## 已知约定
@@ -695,6 +1147,10 @@ python scripts/smoke_live_loop.py        # 实盘闭环冒烟（39 项，用内�
 - 新闻分析拿不到结论时返回 `confidence=0`，由 `news_confidence` 风控拦掉，不静默丢弃
 - 控制指令要么真生效、要么明确报错：暂停一个没在跑的任务会返回失败并说明原因，
   绝不假装成功（面板上会显示"已暂停"但任务照旧下单，那比报错危险得多）
+- 截面数据（资金流/筹码/题材）只能按天对齐，不能 ffill 到分钟级 ——
+  那是拿未来一天的信息解释当天的分钟K线
+- 缺数据的因子返回 `None` 而不是 `0`；打分时缺维度会重新分配权重而不是按 0 分算
+- 从库里读出的评分字典同时带 `total` 与 `total_score`（库列名 vs 消费端用名）
 - 停服务走**停止标记文件**而不是信号：Windows 没有 SIGTERM，信号方案跨平台不可靠
 - 所有阻塞 IO（新闻抓取、文件总线读取、快照落盘）都丢线程池，绝不占 reactor 线程
 

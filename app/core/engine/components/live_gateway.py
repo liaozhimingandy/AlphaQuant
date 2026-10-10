@@ -99,6 +99,10 @@ class LiveGatewayComponent(IBaseComponent):
             "reconciles": 0, "mismatches": 0, "errors": 0, "account_refreshes": 0,
         }
         self.last_reconcile: Dict[str, Any] = {}
+        #: 已经把本金计入券商账本的任务（按 task_id 去重，防止挂两次算两遍）
+        self._seeded_tasks: set = set()
+        #: 券商账本是否已切换到"以任务本金为准"（见 attach 里的说明）
+        self._capital_taken_over = False
 
     # ============================================================
     # 生命周期
@@ -240,13 +244,29 @@ class LiveGatewayComponent(IBaseComponent):
 
         # 模拟网关自己也要有一本账，否则对账永远报"本地有、券商无"。
         # 券商账户是**一个**，所以本金要累加所有任务，不能各算各的。
+        #
+        # 两个坑，都踩过：
+        #  1) 接入点配置里也有 initial_cash（给"单独用网关"的场景兜底）。
+        #     直接往上加会算两遍 —— 本地 28 万、券商 38 万，对账必然不一致，
+        #     而且严格模式会直接阻断交易。所以**第一个任务挂上来时清零**，
+        #     任务本金才是权威来源。
+        #  2) 同一个任务可能被挂两次（装载阶段 + 启动阶段各一次），
+        #     本金就会被计两遍。按 task_id 去重，只有第一次计入。
         try:
             if getattr(self.gateway, "name", "") == "simulated":
-                cash = float(getattr(task.portfolio.account, "initial_cash", 0.0) or 0.0)
+                tid = str(getattr(task, "task_id", "") or "")
+                cash = 0.0 if (tid and tid in self._seeded_tasks) else float(
+                    getattr(task.portfolio.account, "initial_cash", 0.0) or 0.0
+                )
                 if cash:
+                    if not self._capital_taken_over:
+                        self.gateway._cash = 0.0
+                        self._capital_taken_over = True
                     self.gateway._cash = float(
                         getattr(self.gateway, "_cash", 0.0) or 0.0
                     ) + cash
+                if tid:
+                    self._seeded_tasks.add(tid)
         except Exception:
             pass
         logger.debug(f"任务 {getattr(task, 'task_id', '?')} 已挂到实盘网关")

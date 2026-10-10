@@ -1,0 +1,100 @@
+{
+  "_comment": [
+    "因子库。界面/CLI 上写的因子存在这里，启动即注册，策略可直接引用。",
+    "",
+    "expr 支持的算子见 `python main.py factor ops`，变量见 `python main.py factor vars`。",
+    "所有算子都是**因果**的（只用过去的数据），RANK 也是截至当前的百分位。",
+    "",
+    "source: builtin=框架自带 / user=手写的 / mined=机器学习挖的 / preset=预置经典"
+  ],
+  "factors": [
+    {
+      "name": "price_pos_20",
+      "expr": "(close - TS_MIN(low, 20)) / (TS_MAX(high, 20) - TS_MIN(low, 20))",
+      "description": "20 日区间位置 0~1",
+      "category": "位置",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "mom_20",
+      "expr": "(close / REF(close, 20) - 1) * 100",
+      "description": "20 日动量（%）",
+      "category": "动量",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "rev_5",
+      "expr": "-(close / REF(close, 5) - 1) * 100",
+      "description": "5 日反转（取负号：跌得多分数高）",
+      "category": "反转",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "ma_bias_20",
+      "expr": "close / MA(close, 20) - 1",
+      "description": "相对 20 日均线的乖离",
+      "category": "均线",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "amplitude_10",
+      "expr": "(TS_MAX(high, 10) - TS_MIN(low, 10)) / MA(close, 10)",
+      "description": "10 日振幅/均价",
+      "category": "波动",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "turnover_mom",
+      "expr": "amount / MA(amount, 20)",
+      "description": "成交额放量倍数",
+      "category": "量能",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "vol_ratio",
+      "expr": "MA(volume, 5) / MA(volume, 20)",
+      "description": "量能比：短期量 / 长期量",
+      "category": "量能",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    },
+    {
+      "name": "volatility_20",
+      "expr": "STD(close / REF(close, 1) - 1, 20) * 100",
+      "description": "20 日波动率（%）",
+      "category": "风险",
+      "source": "preset",
+      "enabled": true,
+      "metrics": {},
+      "created_at": "2026-10-10T21:10:51",
+      "updated_at": "2026-10-10T21:10:51"
+    }
+  ]
+}

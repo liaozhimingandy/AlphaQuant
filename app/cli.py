@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
@@ -535,11 +535,16 @@ def tasks_cmd(config) -> None:
               help="实盘券商网关名（LIVE 模式必填），如 simulated")
 @click.option("--broker-endpoint", default=None,
               help="券商接入点 id（见 config/brokers.json），比 --broker-gateway 更具体")
+@click.option("--ext-data/--no-ext-data", "ext_data", default=None,
+              help="扩展数据采集（资金流/筹码/涨停池/题材）开关（默认取 EXT_DATA_ENABLED）")
+@click.option("--ext-interval", default=None, type=float,
+              help="资金流/筹码采集间隔（秒），默认 600")
 def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_source,
               no_news, monitor, port, monitor_host, snapshot_interval, namespace,
               no_runtime_tasks, collector, collect_interval, collect_period,
               collect_symbol, collector_config, snapshot, snapshot_mode,
-              snapshot_min_gap, store, broker_gateway, broker_endpoint) -> None:
+              snapshot_min_gap, store, broker_gateway, broker_endpoint,
+              ext_data, ext_interval) -> None:
     """前台运行后台服务（Ctrl+C 退出）。要放到后台跑请用 `start`。
 
     一个进程 = 一个引擎 = N 个任务。任务之间状态完全隔离，
@@ -581,6 +586,8 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
             snapshot_min_gap=snapshot_min_gap,
             broker_gateway=broker_gateway or "",
             broker_endpoint=broker_endpoint or "",
+            with_ext_data=ext_data,
+            ext_interval=ext_interval,
         )
     except Exception as exc:
         click.secho(f"❌ 引擎装配失败: {exc}", fg="red")
@@ -621,6 +628,16 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
         click.secho(
             f"🗄️  交易落库: {'开' if store_comp.enabled else '关'}"
             + (f" | {_settings.DATABASE_URL}" if store_comp.enabled else ""),
+            fg="cyan",
+        )
+    ext_comp = engine.get_component("ext_data")
+    if ext_comp is not None:
+        click.secho(
+            "💰 扩展数据: "
+            + ("开" if ext_comp.enabled else "关")
+            + (f" | 个股 {len(ext_comp.symbols)} 只 @ {ext_comp.interval:.0f}s"
+               f" | 市场级(涨停池/题材) @ {ext_comp.daily_interval:.0f}s"
+               if ext_comp.enabled else ""),
             fg="cyan",
         )
     gw_comp = engine.get_component("live_gateway")
@@ -671,11 +688,22 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
 @click.option("--broker-gateway", default=None, help="实盘券商网关名（LIVE 模式用）")
 @click.option("--broker-endpoint", default=None,
               help="券商接入点 id（见 config/brokers.json），比 --broker-gateway 更具体")
+@click.option("--no-ext-data", is_flag=True,
+              help="关闭扩展数据采集（资金流/筹码/涨停池/题材）")
+@click.option("--ext-interval", default=None, type=float,
+              help="资金流/筹码采集间隔（秒），默认 600")
+@click.option("--show-window", is_flag=True,
+              help="调试用：让后台进程带控制台窗口（默认完全隐藏，不弹黑框）")
 def start_cmd(config, mode, market_mode, interval, start_date, end_date, data_source,
               symbol, port, snapshot_interval, namespace, no_news, no_monitor,
               no_collector, collect_interval, collect_period, collect_symbol,
-              collector_config, broker_gateway, broker_endpoint) -> None:
-    """后台启动：脱离终端运行，日志写入 logs/service.out.log。"""
+              collector_config, broker_gateway, broker_endpoint, no_ext_data,
+              ext_interval, show_window) -> None:
+    """后台启动：脱离终端运行，日志写入 logs/service.out.log。
+
+    Windows 上默认用 ``pythonw.exe`` 启动，**不会弹出控制台黑框**。
+    要看窗口（调试）加 ``--show-window``。
+    """
     from app.core.engine import daemon
     from app.core.config import settings as _settings
 
@@ -700,8 +728,10 @@ def start_cmd(config, mode, market_mode, interval, start_date, end_date, data_so
         collector_config=collector_config or "",
         broker_gateway=broker_gateway or "",
         broker_endpoint=broker_endpoint or "",
+        no_ext_data=no_ext_data,
+        ext_interval=ext_interval,
     )
-    result = daemon.start(cmd)
+    result = daemon.start(cmd, show_window=show_window)
     if not result.get("ok"):
         click.secho(f"❌ 启动失败: {result.get('error')}", fg="red")
         sys.exit(1)
@@ -709,6 +739,12 @@ def start_cmd(config, mode, market_mode, interval, start_date, end_date, data_so
     click.echo(f"   日志: {result['log_file']}")
     click.echo(f"   面板: http://{_settings.MONITOR_HOST}:{port or _settings.MONITOR_PORT}/")
     click.echo("   停止: python main.py stop   |  状态: python main.py status")
+    if not show_window and not result.get("no_window"):
+        click.secho(
+            "   ⚠ 未找到 pythonw.exe，后台进程可能仍会弹控制台窗口。"
+            "装完整版 Python 或改用 scripts/windows/start_hidden.vbs 启动。",
+            fg="yellow",
+        )
 
 
 @cli.command(name="stop", help="停止后台服务（优雅退出）")
@@ -1578,6 +1614,563 @@ def brokers_gateways() -> None:
         click.secho(f"- {n}", fg="cyan", bold=True)
         for k, v in (gateway_signature(n) or {}).items():
             click.echo(f"    {k:18s} 默认 {v!r}")
+
+
+# ============================== 交易日历 ==============================
+@cli.group(name="calendar", help="交易日历：判断今天开不开市、什么时候开")
+def calendar_group() -> None:
+    """闭市时不该还在请求数据 —— 这是"什么时候能采"的唯一判据。"""
+
+
+@calendar_group.command(name="status", help="当前市场状态与最近交易日")
+def calendar_status() -> None:
+    from app.core.market.calendar import STATE_NAMES, get_calendar
+
+    cal = get_calendar()
+    info = cal.to_dict()
+    click.secho(
+        f"市场状态：{info['state_name']}（{info['state']}）", fg="cyan", bold=True
+    )
+    click.echo(f"  日历来源     {info['source']}")
+    click.echo(f"  是否交易日   {'是' if info['is_trading_day'] else '否'}")
+    click.echo(f"  是否可采集   {'是' if info['is_open'] else '否'}")
+    click.echo(f"  最近交易日   {info['last_trading_day']}")
+    click.echo(f"  下次开盘     {info['next_open']}")
+    click.echo(f"  休市日数量   {info['holiday_count']}")
+    days = cal.recent_trading_days(5)
+    click.echo(f"  近 5 个交易日 {'、'.join(str(d) for d in days)}")
+    if not info["is_trading_day"]:
+        click.secho("  → 非交易日，采集服务不会请求数据", fg="yellow")
+
+
+@calendar_group.command(name="refresh", help="联网校准交易日历（写到 config/trade_calendar.json）")
+def calendar_refresh() -> None:
+    """节假日每年官方公告一次，靠内置表迟早会过期。
+
+    刷新**失败时不动现有日历** —— 日历缺失会导致该采的时候不采，
+    那比多采几次严重得多。
+    """
+    from app.core.market.calendar import refresh_from_network
+
+    r = refresh_from_network()
+    if not r.get("ok"):
+        click.secho(f"❌ 日历刷新失败（沿用现有日历）: {r.get('error')}", fg="red")
+        click.echo("   内置表已含 2025/2026 年交易所公告的休市安排，可正常使用。")
+        click.echo("   也可以手工编辑 config/trade_calendar.json。")
+        sys.exit(1)
+    click.secho(f"✅ 交易日历已更新 | 交易日 {r['trading_days']} 天 | "
+                f"休市 {r['holidays']} 天", fg="green", bold=True)
+    click.echo(f"   范围 {r['range'][0]} ~ {r['range'][1]}")
+    click.echo(f"   文件 {r['path']}")
+
+
+# ============================== 资金流 / 筹码 ==============================
+@cli.command(name="flow", help="查看个股资金流与筹码（主力净流入、加速度、获利盘…）")
+@click.argument("symbol")
+@click.option("--days", default=10, show_default=True, help="看最近几天资金流")
+def flow_cmd(symbol, days) -> None:
+    from app.core.data.features import get_provider
+    from app.data.datasource import normalize_symbol
+
+    sym = normalize_symbol(symbol)
+    f = get_provider(ttl=0).get(sym)
+    click.secho(f"资金流 / 筹码 · {sym}", fg="cyan", bold=True)
+    rows = [
+        ("主力净流入", f.main_net, lambda v: f"{v/1e8:+.2f} 亿" if v is not None else "无数据"),
+        ("占成交额比", f.main_net_pct, lambda v: f"{v:+.2%}" if v is not None else "无数据"),
+        ("连续净流入", float(f.net_days), lambda v: f"{int(v)} 天"),
+        ("流入加速度", f.accel, lambda v: f"{v:.2f}×" if v is not None else "无数据"),
+        ("资金脉冲", f.pulse, lambda v: f"{v:.2f}×" if v is not None else "无数据"),
+        ("获利盘比例", f.profit_ratio, lambda v: f"{v:.0%}" if v is not None else "无数据"),
+        ("筹码集中度", f.chip_concentration, lambda v: f"{v:.3f}" if v is not None else "无数据"),
+        ("现价距筹码峰", f.peak_gap, lambda v: f"{v:+.1%}" if v is not None else "无数据"),
+        ("题材", "、".join(f.themes) or "无", str),
+        ("题材排名", f.theme_rank, lambda v: f"第 {int(v)} 名" if v is not None else "无数据"),
+    ]
+    for name, value, fmt in rows:
+        click.echo(f"  {name:<12} {fmt(value)}")
+    if f.is_limitup:
+        click.echo(f"  今日涨停      {f.continuous} 连板，封板 {f.seal_amount or 0}"
+                   f"，炸板 {f.broken_times} 次")
+    missing = [k for k, v in f.available.items() if not v]
+    if missing:
+        click.secho(
+            f"  ⚠ 以下维度无数据（打分时会排除，不按 0 算）: {', '.join(missing)}"
+            " —— 先跑 `main.py pool sync` 同步",
+            fg="yellow",
+        )
+
+
+# ============================== 综合评分 ==============================
+@cli.command(name="score", help="看某只票的多维度综合评分明细")
+@click.argument("symbol")
+@click.option("--date", "day", default=None, help="评分日期，默认最新")
+def score_cmd(symbol, day) -> None:
+    from app.core.data.features import get_provider
+    from app.core.score.engine import ScoreEngine
+    from app.data.datasource import normalize_symbol
+
+    sym = normalize_symbol(symbol)
+    r = ScoreEngine(provider=get_provider(ttl=0)).score(sym, day)
+    if r.total is None:
+        click.secho(f"{sym}: 无法评分", fg="yellow")
+        for w in r.reasons:
+            click.echo(f"  · {w}")
+        return
+    click.secho(f"{sym} → {r.total} 分（{r.grade}）", fg="cyan", bold=True)
+    names = ScoreEngine.DIM_NAMES
+    for k, v in (r.dims or {}).items():
+        w = (r.weights or {}).get(k)
+        tag = "" if r.available.get(k) else "  [无数据]"
+        if v is None:
+            click.echo(f"  {names.get(k,k):<6} {'—':>6}{tag}")
+        else:
+            click.echo(f"  {names.get(k,k):<6} {v:>6.1f}"
+                       f"   × 权重 {w:.2f}{tag}" if w else
+                       f"  {names.get(k,k):<6} {v:>6.1f}{tag}")
+    click.echo("  ---")
+    for w in r.reasons:
+        click.echo(f"  · {w}")
+
+
+# ============================== 因子实验室 ==============================
+@cli.group(name="factor", help="因子实验室：写公式加因子、检验有效性、机器学习挖因子")
+def factor_group() -> None:
+    """因子是策略的核心。这里是把"想到一个因子"变成"验证过的因子"的地方。"""
+
+
+def _default_symbols(symbols) -> list:
+    """没指定标的时，用库里已有的（截面检验至少要 3 个才有意义）。"""
+    syms = [str(s) for s in (symbols or ())]
+    if syms:
+        return syms
+    from app.db.database import SessionLocal
+    from app.repository.stock_repository import StockRepository
+
+    with SessionLocal() as db:
+        return [r["symbol"] for r in StockRepository.list_symbols(db)]
+
+
+@factor_group.command(name="list", help="列出因子库里的因子")
+@click.option("--category", default="", help="按分类过滤")
+@click.option("--source", default="", help="按来源过滤：user/mined/preset")
+def factor_list(category, source) -> None:
+    from app.core.factor.library import get_library
+
+    lib = get_library()
+    rows = lib.list(category=category, source=source)
+    if not rows:
+        click.secho("因子库是空的。用 `factor add` 加一条，或 `factor presets` 装预置的。",
+                    fg="yellow")
+        return
+    click.secho(f"{'名称':<20}{'分类':<8}{'来源':<8}{'分数':>6}  表达式", fg="cyan")
+    for s in rows:
+        score = s.metrics.get("score")
+        click.echo(
+            f"{s.name:<20}{s.category:<8}{s.source:<8}"
+            f"{(f'{score:.0f}' if score is not None else '—'):>6}  {s.expr[:44]}"
+        )
+
+
+@factor_group.command(name="ops", help="列出表达式可用算子")
+def factor_ops() -> None:
+    from app.core.factor.expr import func_catalog
+
+    for f in func_catalog():
+        arity = (f"{f['min_args']}" if f["min_args"] == f["max_args"]
+                 else f"{f['min_args']}~{f['max_args']}")
+        click.secho(f"  {f['name']:<12}", fg="cyan", nl=False)
+        click.echo(f"({arity} 参数)  {f['doc']}")
+
+
+@factor_group.command(name="vars", help="列出表达式可用变量")
+def factor_vars() -> None:
+    from app.core.factor.expr import variable_catalog
+
+    for v in variable_catalog():
+        click.secho(f"  {v['name']:<10}", fg="cyan", nl=False)
+        click.echo(v["doc"])
+
+
+@factor_group.command(name="add", help="新增一条因子（表达式）")
+@click.argument("name")
+@click.argument("expr")
+@click.option("--desc", default="", help="说明")
+@click.option("--category", default="自定义", help="分类")
+@click.option("--overwrite", is_flag=True, help="已存在时覆盖")
+def factor_add(name, expr, desc, category, overwrite) -> None:
+    from app.core.factor.library import get_library
+
+    ok, msg, spec = get_library().add(
+        name, expr, description=desc, category=category, overwrite=overwrite)
+    if not ok:
+        click.secho(f"❌ {msg}", fg="red")
+        sys.exit(1)
+    click.secho(f"✅ {msg} | {spec.name} = {spec.expr}", fg="green")
+
+
+@factor_group.command(name="remove", help="删除一条因子")
+@click.argument("name")
+def factor_remove(name) -> None:
+    from app.core.factor.library import get_library
+
+    ok, msg = get_library().remove(name)
+    click.secho(("✅ " if ok else "❌ ") + msg, fg="green" if ok else "red")
+    if not ok:
+        sys.exit(1)
+
+
+@factor_group.command(name="presets", help="装入预置经典因子（只补不覆盖）")
+@click.option("--overwrite", is_flag=True, help="覆盖已存在的同名因子")
+def factor_presets(overwrite) -> None:
+    from app.core.factor.library import install_presets
+
+    n = install_presets(overwrite=overwrite)
+    click.secho(f"✅ 已写入 {n} 个预置因子", fg="green")
+
+
+@factor_group.command(name="check", help="检验一个表达式因子有没有预测力")
+@click.argument("expr")
+@click.option("--symbol", multiple=True, help="标的，可重复；默认用库里全部")
+@click.option("--start", default=None, help="起始日期")
+@click.option("--end", default=None, help="结束日期")
+@click.option("--horizon", default=5, show_default=True, help="未来多少天收益作为标签")
+@click.option("--groups", default=5, show_default=True, help="分层组数")
+def factor_check(expr, symbol, start, end, horizon, groups) -> None:
+    from app.core.factor.evaluate import evaluate_factor
+
+    syms = _default_symbols(symbol)
+    if len(syms) < 3:
+        click.secho("⚠ 截面检验至少需要 3 个标的才有意义（2 个点的相关系数恒为 ±1）",
+                    fg="yellow")
+    r = evaluate_factor(expr, syms, start, end, horizon=int(horizon),
+                        groups=int(groups))
+    click.secho(f"因子 {expr}", fg="cyan", bold=True)
+    if r.score is None:
+        click.secho(f"  {r.verdict}", fg="yellow")
+        return
+    click.echo(f"  样本 {r.rows} 行 / {r.dates} 天 / {r.symbols} 个标的"
+               f"（口径：{'截面' if r.mode == 'cross_section' else '时间序列'}）")
+    click.echo(f"  IC     {r.ic_mean:+.4f}（标准差 {r.ic_std:.4f}）")
+    click.echo(f"  ICIR   {r.icir:+.3f}       t 值 {r.ic_t:+.2f}")
+    if r.rank_ic_mean is not None:
+        click.echo(f"  RankIC {r.rank_ic_mean:+.4f}（IR {r.rank_ic_ir:+.3f}）")
+    click.echo(f"  IC>0 占比 {r.ic_positive_rate:.1%}")
+    if r.quantile_returns:
+        cells = "  ".join(f"Q{k}:{v:+.3f}" for k, v in r.quantile_returns.items())
+        click.echo(f"  分层收益(%)  {cells}")
+        click.echo(f"  多空(Q{groups}-Q1) {r.long_short:+.3f}%   单调: {'是' if r.monotonic else '否'}")
+    click.secho(f"  综合 {r.score} 分 → {r.verdict}", fg="green" if r.score >= 70 else "yellow")
+
+
+@factor_group.command(name="mine", help="遗传算法自动挖掘因子")
+@click.option("--symbol", multiple=True, help="标的，可重复；默认用库里全部")
+@click.option("--start", default=None)
+@click.option("--end", default=None)
+@click.option("--horizon", default=5, show_default=True, help="未来多少天收益")
+@click.option("--generations", default=12, show_default=True, help="迭代代数")
+@click.option("--population", default=60, show_default=True, help="每代候选数")
+@click.option("--top", default=10, show_default=True, help="返回前几名")
+@click.option("--seconds", default=120, show_default=True, help="时间预算（秒）")
+@click.option("--min-score", default=45.0, show_default=True, help="低于此分不返回")
+@click.option("--save", is_flag=True, help="把挖到的因子存入因子库（source=mined）")
+def factor_mine(symbol, start, end, horizon, generations, population, top,
+                seconds, min_score, save) -> None:
+    """挖出来的因子**绝大多数是过拟合的** —— 所以默认只打印不入库存。
+
+    要入库请显式加 `--save`，并且先用 `--min-score` 把门槛调高。
+    """
+    from app.core.factor.evaluate import load_panel
+    from app.core.factor.library import SOURCE_MINED, get_library
+    from app.core.factor.mining import FactorMiner
+
+    syms = _default_symbols(symbol)
+    panel = load_panel(syms, start, end)
+    if len(panel) < 3:
+        click.secho("❌ 可用标的少于 3 个，做不了截面检验（先采集更多标的）", fg="red")
+        sys.exit(1)
+
+    click.secho(f"开始挖掘 | {len(panel)} 个标的 | 预算 {seconds}s", fg="cyan")
+    miner = FactorMiner(panel, horizon=int(horizon), seed=None)
+    found = miner.run(generations=int(generations), population=int(population),
+                      top=int(top), max_seconds=float(seconds),
+                      min_score=float(min_score),
+                      progress=lambda g, tot, best: click.echo(
+                          f"  第 {g}/{tot} 代，当前最优 {best:.1f} 分"))
+    click.secho(f"\n评估了 {miner.evaluated} 个表达式，命中 {len(found)} 个",
+                fg="green" if found else "yellow")
+    for i, f in enumerate(found, 1):
+        click.echo(f"  {i}. {f.score:5.1f}分 IC={f.ic:+.3f} ICIR={f.icir:+.2f}")
+        click.echo(f"     {f.expr}")
+    if save and found:
+        lib = get_library()
+        n = 0
+        for f in found:
+            ok, _, _ = lib.add(f"mined_{n + 1}_{abs(hash(f.expr)) % 10000:04d}",
+                               f.expr, description=f"自动挖掘（{f.score}分）",
+                               category="挖掘", source=SOURCE_MINED,
+                               metrics={"ic": f.ic, "icir": f.icir,
+                                        "score": f.score}, overwrite=True)
+            n += bool(ok)
+        click.secho(f"✅ 已入库 {n} 个挖掘因子", fg="green")
+
+
+@factor_group.command(name="fit", help="用机器学习给因子库里的因子配权重（Lasso 会筛）")
+@click.option("--symbol", multiple=True, help="标的，可重复；默认用库里全部")
+@click.option("--start", default=None)
+@click.option("--end", default=None)
+@click.option("--horizon", default=5, show_default=True)
+@click.option("--method", type=click.Choice(["lasso", "ridge"]), default="lasso",
+              show_default=True, help="lasso=会筛因子 / ridge=只缩不放零")
+@click.option("--source", default="preset,user,mined",
+              help="用哪些来源的因子，逗号分隔")
+def factor_fit(symbol, start, end, horizon, method, source) -> None:
+    """把因子库里的因子一起喂给线性模型，看谁能活下来。"""
+    from app.core.factor.evaluate import load_panel
+    from app.core.factor.library import get_library
+    from app.core.factor.ml import fit_factors
+
+    syms = _default_symbols(symbol)
+    panel = load_panel(syms, start, end)
+    if not panel:
+        click.secho("❌ 没有可用行情数据", fg="red")
+        sys.exit(1)
+    wanted = {s.strip() for s in str(source).split(",") if s.strip()}
+    specs = [s for s in get_library().list() if s.source in wanted] or \
+        get_library().list()
+    if not specs:
+        click.secho("❌ 因子库是空的（先 `factor presets` 或 `factor add`）", fg="red")
+        sys.exit(1)
+
+    # 把每只票的因子序列首尾相接：目标是"因子值 → 未来收益"的映射
+    import numpy as np
+
+    from app.core.factor.evaluate import compute_factor
+
+    cols: Dict[str, list] = {}
+    ys: list = []
+    for sym, df in panel.items():
+        try:
+            fwd = df["close"].pct_change(int(horizon)).shift(-int(horizon)).to_numpy()
+        except Exception:
+            continue
+        for spec in specs:
+            try:
+                fv = compute_factor(spec.expr, df)
+            except Exception:
+                continue
+            cols.setdefault(spec.name, []).append(
+                np.asarray(fv, dtype=float)[:len(fwd)])
+        ys.append(np.asarray(fwd, dtype=float))
+
+    features = {k: np.concatenate(v) for k, v in cols.items() if v}
+    target = np.concatenate(ys) if ys else np.zeros(0)
+    if not features or len(target) < 50:
+        click.secho("❌ 样本不足（至少需要 50 行）", fg="red")
+        sys.exit(1)
+
+    r = fit_factors(features, target * 100.0, method=method)
+    if r.r2_test is None:
+        click.secho("样本不足，无法拟合", fg="yellow")
+        return
+    click.secho(f"{method} | alpha={r.alpha} | 训练 {r.n_train} / 测试 {r.n_test}",
+                fg="cyan", bold=True)
+    click.echo(f"  样本内 R² {r.r2_train:.4f}   样本外 R² {r.r2_test:.4f}   样本外 IC {r.ic_test:+.4f}")
+    if r.collinear:
+        click.secho("  共线剔除: " + ", ".join(
+            f"{c[0]}≈{c[1]}({c[2]})" for c in r.collinear), fg="yellow")
+    click.secho(f"  保留 {len(r.selected)}/{len(r.weights)} 个因子:", fg="green")
+    for n, w in r.weights.items():
+        mark = "✓" if n in r.selected else " "
+        click.echo(f"   {mark} {n:<20} {w:+.4f}")
+
+
+# ============================== 股票池 ==============================
+@cli.group(name="pool", help="股票池：涨停池/题材/资金流 → 综合评分 → 推荐")
+def pool_group() -> None:
+    """先用一个小候选池收窄范围，再精细打分 —— 全市场逐只拉数据既慢又必被限流。"""
+
+
+@pool_group.command(name="refresh", help="刷新股票池（拉候选 → 同步数据 → 打分 → 落库）")
+# 刻意写成字面量而不是 import SOURCES：CLI 启动不该为了一个选项列表
+# 就把 akshare 那一串依赖拉起来（app.core.pool 会间接导入它）。
+@click.option("--source", default=None,
+              type=click.Choice(["limitup", "hot", "theme", "flow", "watch", "all"]),
+              help="候选池来源，默认取 config/pool.json")
+@click.option("--limit", default=None, type=int, help="保留前几名")
+@click.option("--date", "day", default=None, help="评分日期，默认今天")
+@click.option("--sync/--no-sync", "do_sync", default=None,
+              help="是否联网同步（--no-sync 只用库里已有数据，离线可用）")
+def pool_refresh(source, limit, day, do_sync) -> None:
+    from app.core.pool import StockPool
+
+    pool = StockPool()
+    report = pool.refresh(source=source, day=day, limit=limit, do_sync=do_sync)
+    if report.get("error"):
+        click.secho(f"❌ {report['error']}", fg="red")
+        sys.exit(1)
+    info = report.get("candidates") or {}
+    click.secho(
+        f"候选池 {report['source']}（{info.get('note','')}）→ 打了 {report['count']} 只",
+        fg="cyan", bold=True,
+    )
+    _print_pool(report.get("results") or [])
+
+
+@pool_group.command(name="top", help="查看已保存的推荐（从库里读，离线可用）")
+@click.option("--limit", default=30, show_default=True, type=int)
+@click.option("--date", "day", default=None, help="默认最新一天")
+@click.option("--min-score", default=None, type=float)
+def pool_top(limit, day, min_score) -> None:
+    from app.core.pool import StockPool
+
+    rows = StockPool.top(day=day, limit=limit, min_score=min_score)
+    if not rows:
+        click.secho("库里还没有评分。先跑 `python main.py pool refresh`。", fg="yellow")
+        return
+    _print_pool(rows)
+
+
+@pool_group.command(name="sync", help="单独同步扩展数据（资金流/筹码/基本面/舆情/宏观…）")
+@click.argument("what", required=False,
+                type=click.Choice(["fundflow", "chip", "fundamental", "limitup",
+                                   "boards", "concepts",
+                                   "lhb", "margin", "forecast", "holders",
+                                   "rating", "news", "macro", "breadth",
+                                   "all"]),
+                default="all")
+@click.option("--symbol", multiple=True, help="标的，可重复；不传则用 config/pool.json 的 watch")
+def pool_sync(what, symbol) -> None:
+    from app.core.pool import (
+        sync_boards,
+        sync_category,
+        sync_chip,
+        sync_concept_members,
+        sync_fund_flow,
+        sync_fundamentals,
+        sync_limitup,
+    )
+
+    #: 个股级类别（macro/breadth 是市场级，不需要标的）
+    STOCK_LEVEL = ("fundflow", "chip", "fundamental", "lhb", "margin",
+                   "forecast", "holders", "rating", "news")
+    syms = [str(s) for s in symbol]
+    if not syms:
+        from app.core.pool import PoolConfig
+
+        syms = PoolConfig.load().watch
+    if not syms and what in STOCK_LEVEL + ("all",):
+        click.secho("❌ 没有标的：用 --symbol 指定，或在 config/pool.json 的 watch 里配", fg="red")
+        sys.exit(1)
+
+    done = False
+    if what in ("fundflow", "all"):
+        r = sync_fund_flow(syms)
+        _echo_sync("资金流", r)
+        done = True
+    if what in ("chip", "all"):
+        _echo_sync("筹码", sync_chip(syms))
+        done = True
+    if what in ("fundamental", "all"):
+        _echo_sync("基本面", sync_fundamentals(syms))
+        done = True
+    if what in ("limitup", "all"):
+        _echo_sync("涨停池", sync_limitup())
+        done = True
+    if what in ("boards", "all"):
+        _echo_sync("概念板块", sync_boards("concept"))
+        _echo_sync("行业板块", sync_boards("industry"))
+        done = True
+    if what in ("concepts", "all"):
+        _echo_sync("题材成分映射", sync_concept_members())
+        done = True
+    # ---- 多类别截面数据（通用因子值表）----
+    for cat, label in (("lhb", "龙虎榜"), ("margin", "融资融券"),
+                       ("forecast", "业绩预告"), ("holders", "股东户数"),
+                       ("rating", "机构评级"), ("news", "新闻舆情")):
+        if what in (cat, "all"):
+            _echo_sync(label, sync_category(cat, syms))
+            done = True
+    # ---- 市场级 ----
+    if what in ("macro", "all"):
+        _echo_sync("宏观指标", sync_category("macro"))
+        done = True
+    if what in ("breadth", "all"):
+        _echo_sync("市场宽度", sync_category("breadth"))
+        done = True
+    if not done:
+        click.secho(f"未知项: {what}", fg="red")
+
+
+@pool_group.command(name="categories", help="列出可采集的数据类别与库里已有指标")
+def pool_categories() -> None:
+    from app.data.marketx import CATEGORIES
+    from app.repository import marketx_repository as R
+
+    click.secho("可采集类别：", fg="cyan", bold=True)
+    for key, info in CATEGORIES.items():
+        click.echo(f"  {key:<10} {info['name']:<8} {info['freq']:<6} {info['doc']}")
+    rows = R.factor_categories()
+    if rows:
+        click.secho("\n库里已有指标：", fg="cyan", bold=True)
+        for r in rows:
+            click.echo(f"  {r['category']:<10} {r['name']:<24} {r['rows']} 行")
+
+
+@pool_group.command(name="demo", help="生成合成数据做演示（本机无网络时也能看到效果）")
+@click.option("--symbols", default=12, show_default=True, help="造多少只票")
+@click.option("--date", "day", default=None, help="数据日期，默认今天")
+def pool_demo(symbols, day) -> None:
+    """离线演示：造一批仿真数据 → 打分 → 排名。
+
+    这不是"假数据糊弄" —— 它验证的是**打分与排序链路本身**，
+    数据获取那一段（marketx）在联网后单独用 `pool sync` 验证。
+    """
+    from app.core.pool.demo import seed_demo
+
+    d = seed_demo(int(symbols), day)
+    click.secho(f"已生成 {d['symbols']} 只票的合成数据（日期 {d['date']}）", fg="green")
+    from app.core.pool import StockPool
+
+    # 直接指定标的，不走候选池 —— 候选池要联网拉名单，而这里就是要验证离线链路
+    report = StockPool().refresh(symbols=d["all"], day=d["date"],
+                                 do_sync=False, limit=20, source="demo")
+    _print_pool(report.get("results") or [])
+    click.echo("   （强票带 ★：持续净流入+加速+涨停+热门题材；弱票带 ☆）")
+
+
+def _echo_sync(label: str, r: Dict[str, Any]) -> None:
+    if not r:
+        return
+    failed = r.get("failed") or []
+    click.secho(f"  {label}: 成功 {r.get('ok', 0)} 项", fg="green" if not failed else "yellow")
+    for name, reason in failed[:5]:
+        click.echo(f"    ✗ {name}: {reason[:100]}")
+    if len(failed) > 5:
+        click.echo(f"    … 还有 {len(failed) - 5} 项失败")
+
+
+def _print_pool(results: List[Dict[str, Any]]) -> None:
+    if not results:
+        click.secho("没有结果", fg="yellow")
+        return
+    click.secho(
+        f"{'#':<4}{'代码':<9}{'评分':>7} {'等级':<5} "
+        "资金 题材 筹码 技术 涨停 基本面 舆情 宏观",
+        fg="cyan",
+    )
+    for r in results:
+        dims = r.get("dims") or {}
+        cells = []
+        for k in ("capital", "theme", "chip", "technical", "limitup",
+                  "fundamental", "sentiment", "macro"):
+            v = dims.get(k)
+            cells.append(f"{v:>5.0f}" if v is not None else "    —")
+        click.echo(
+            f"{r.get('rank') or '-':<4}{r.get('symbol'):<9}"
+            f"{(r.get('total') if r.get('total') is not None else 0):>7.1f} "
+            f"{r.get('grade') or '-':<5} " + " ".join(cells)
+        )
 
 
 # ============================== 多服务编排 ==============================

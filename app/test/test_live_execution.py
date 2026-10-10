@@ -283,6 +283,59 @@ class TestReconcile(unittest.TestCase):
         self.assertTrue(report["position_diffs"])
 
 
+class TestGatewayCapitalSeeding(unittest.TestCase):
+    """券商账本的本金必须以任务为准，且每个任务只计一次。
+
+    踩过两次坑：接入点配置自带 initial_cash 被叠加（本金算两遍），
+    和同一个任务被挂两次（又算一遍）。两次都表现为"对账不一致 → 严格模式阻断交易"。
+    """
+
+    class _FakeTask:
+        """只提供 attach 真正读到的三样东西：task_id / broker.gateway / 本金。"""
+
+        def __init__(self, task_id: str, cash: float) -> None:
+            self.task_id = task_id
+            self.broker = type("B", (), {"gateway": None})()
+            self.portfolio = type("P", (), {
+                "account": type("A", (), {"initial_cash": cash})()
+            })()
+
+    def _component(self, gateway):
+        from app.core.engine.components.live_gateway import LiveGatewayComponent
+
+        comp = LiveGatewayComponent(gateway=gateway)
+        return comp
+
+    def test_endpoint_cash_not_counted_twice(self):
+        from app.core.execution.gateway import SimulatedGateway
+
+        # 接入点配置里的 initial_cash 只是"单独用网关"的兜底值
+        gw = SimulatedGateway(initial_cash=100_000)
+        comp = self._component(gw)
+        comp.attach(self._FakeTask("a", 100_000))
+        comp.attach(self._FakeTask("b", 80_000))
+        self.assertEqual(gw._cash, 180_000)
+
+    def test_same_task_attached_twice_seeds_once(self):
+        from app.core.execution.gateway import SimulatedGateway
+
+        gw = SimulatedGateway(initial_cash=100_000)
+        comp = self._component(gw)
+        comp.attach(self._FakeTask("a", 100_000))
+        comp.attach(self._FakeTask("a", 100_000))   # 装载 + 启动各挂一次
+        self.assertEqual(gw._cash, 100_000)
+
+    def test_non_simulated_gateway_untouched(self):
+        """真实券商的资金以券商为准，绝不能被本地任务本金覆盖。"""
+        from app.core.execution.gateway import SimulatedGateway
+
+        gw = SimulatedGateway(initial_cash=500_000)
+        gw.name = "real_broker"
+        comp = self._component(gw)
+        comp.attach(self._FakeTask("a", 100_000))
+        self.assertEqual(gw._cash, 500_000)
+
+
 class TestLiveRiskRules(unittest.TestCase):
     """A 股实盘特有的前置风控。回测里无所谓，一上实盘就致命。"""
 

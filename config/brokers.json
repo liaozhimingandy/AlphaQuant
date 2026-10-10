@@ -42,6 +42,51 @@
         "host": "127.0.0.1",
         "port": 0
       }
+    },
+    "http-demo": {
+      "name": "HTTP 券商/自建中台（通用适配）",
+      "gateway": "http",
+      "account": "HTTP-ACCOUNT",
+      "enabled": false,
+      "readonly": true,
+      "note": "零依赖的通用 HTTP 网关：把下面 params 改成你的接口即可，不用写代码。凭据只写环境变量名。",
+      "params": {
+        "base_url": "http://127.0.0.1:8080",
+        "timeout": 10,
+        "token_env": "BROKER_HTTP_TOKEN",
+        "endpoints": {
+          "place": {"path": "/orders", "method": "POST"},
+          "cancel": {"path": "/orders/{broker_order_id}", "method": "DELETE"},
+          "orders": {"path": "/orders", "method": "GET"},
+          "positions": {"path": "/positions", "method": "GET"},
+          "account": {"path": "/account", "method": "GET"},
+          "fills": {"path": "/fills", "method": "GET"},
+          "instrument": {"path": "/instruments/{symbol}", "method": "GET"}
+        },
+        "req_fields": {
+          "symbol": "symbol",
+          "side": "side",
+          "size": "quantity",
+          "price": "price",
+          "order_type": "orderType",
+          "client_order_id": "clientOrderId"
+        },
+        "resp_fields": {
+          "list": "data",
+          "order_id": "orderId",
+          "size": "quantity",
+          "filled_size": "filledQuantity",
+          "avg_price": "avgPrice"
+        },
+        "status_map": {
+          "new": "SUBMITTED",
+          "partially_filled": "PARTIAL",
+          "dealt": "FILLED"
+        }
+      },
+      "credential_env": {
+        "token": "BROKER_HTTP_TOKEN"
+      }
     }
   }
 }

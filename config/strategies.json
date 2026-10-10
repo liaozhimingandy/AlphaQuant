@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "用户自定义策略库。界面「策略」页编辑的内容存在这里。",
+    "",
+    "kind: declarative=规则 / score=综合评分 / multi_factor=多因子加权",
+    "risk: 上线为任务时默认带的风控链，可留空。",
+    "",
+    "需要写复杂逻辑时，仍然去 strategies/ 写 Python 文件 —— 两条路并存。"
+  ],
+  "strategies": []
+}

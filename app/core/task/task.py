@@ -84,6 +84,20 @@ class QuantTask:
         self.series = BarSeries(symbol)
         self.news_features: Dict[str, Any] = {}
         self.recent_news: List[NewsAnalysis] = []
+        #: 是否把资金流/筹码/题材/评分注入因子上下文。
+        #: 关掉它就是纯量价策略（离线回放、无扩展数据时的正确选择）。
+        #
+        # 这里必须**局部 import 并换名**：本函数下面（LIVE 分支里）有一句
+        # `from app.core.config import settings`，它会让 `settings` 成为整个
+        # `__init__` 的局部变量 —— 上面直接用就会 UnboundLocalError。
+        # 这类"同一个名字在函数里既是全局又是局部"的坑，报出来的错
+        # （cannot access local variable）跟真正的原因八竿子打不着。
+        from app.core.config import settings as _cfg
+
+        self.ext_features_enabled = bool(
+            self.meta.get("ext_features", _cfg.EXT_FEATURES_ENABLED)
+        )
+        self._ext_error_logged = False
 
         self.portfolio = Portfolio(
             task_id=task_id,
@@ -509,11 +523,33 @@ class QuantTask:
         )
 
     def _build_ctx(self, dt: Optional[datetime]) -> FactorContext:
+        features = dict(self.news_features)
+        # 把资金流/筹码/题材/评分这些**日频截面数据**一起喂进去。
+        # 它们不在 BarSeries 里（不是逐根K线的量价），
+        # 但没有它们，多维度打分就成了无米之炊。
+        # provider 自带 TTL 缓存，所以逐根K线调用也只是字典查找，不查库。
+        if self.ext_features_enabled:
+            try:
+                from app.core.data.features import get_provider
+
+                ext = get_provider().get(
+                    self.symbol,
+                    dt.date() if dt is not None else None,
+                    self.state.last_price or None,
+                ).as_features()
+                # 新闻特征优先：它是这次决策的即时输入，
+                # 扩展特征是日频的，不该覆盖掉即时的事件信息。
+                for k, v in ext.items():
+                    features.setdefault(k, v)
+            except Exception as exc:
+                # 装配失败不该让任务停摆 —— 降级成"只有量价"，继续按原逻辑跑
+                self._ext_error_logged = True
+                logger.debug(f"[{self.task_id}] 扩展特征装配失败（已降级）: {exc}")
         return FactorContext(
             symbol=self.symbol,
             series=self.series,
             params=dict(self.strategy.params),
-            features=dict(self.news_features),
+            features=features,
             now=dt,
         )
 

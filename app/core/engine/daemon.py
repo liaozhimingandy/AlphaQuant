@@ -92,18 +92,80 @@ def process_info(pid: int) -> Dict[str, Any]:
 # ============================================================
 # 启动
 # ============================================================
-def _popen_kwargs() -> Dict[str, Any]:
-    """跨平台"脱离终端"参数。
+def _popen_kwargs(show_window: bool = False) -> Dict[str, Any]:
+    """跨平台"脱离终端 + 不弹控制台窗口"的启动参数。
 
-    Windows: DETACHED_PROCESS 让子进程不带控制台，关掉终端也不受影响；
-    POSIX:   start_new_session 让它成为新会话首进程，脱离父进程的进程组。
+    Windows 上这件事比看起来麻烦，踩过的坑：
+
+    1. 只加 ``DETACHED_PROCESS`` 是不够的。它确实让**第一层**子进程不带控制台，
+       但本项目在 Windows 上用的是 venv 里的 ``Scripts/python.exe`` ——
+       那不是真的解释器，而是一个 launcher 壳，它会**再拉起一次**真实解释器。
+       壳拉起孙子进程时用的创建标志我们控制不了，孙子进程又是控制台子系统程序，
+       于是系统给它分配一个新的控制台 —— 用户看到的就是"一闪而过的黑框"。
+    2. ``CREATE_NO_WINDOW`` 与 ``DETACHED_PROCESS`` 同时传会被系统忽略
+       （MSDN 明确写了这点），所以它救不了上面那种情况。
+
+    真正可靠的办法是**换解释器**：用 ``pythonw.exe``（GUI 子系统）。
+    它从根上不会分配控制台，无论被拉多少次都一样。见 :func:`resolve_python`。
+
+    这里仍然把 ``CREATE_NO_WINDOW`` 一起加上，作为"退回 python.exe 时的兜底"。
+
+    POSIX: ``start_new_session`` 让它成为新会话首进程，脱离父进程的进程组。
     """
-    if os.name == "nt":
-        flags = 0
-        for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
-            flags |= int(getattr(subprocess, name, 0))
-        return {"creationflags": flags}
-    return {"start_new_session": True}
+    if os.name != "nt":
+        return {"start_new_session": True}
+    if show_window:
+        # 调试用：继承父进程控制台，日志同时也能在终端看到
+        return {"creationflags": 0}
+    flags = 0
+    for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
+        flags |= int(getattr(subprocess, name, 0))
+    return {"creationflags": flags}
+
+
+def resolve_python(exe: Optional[str] = None, no_window: bool = True) -> str:
+    """挑一个合适的解释器来启动后台服务。
+
+    Windows 上优先同目录下的 ``pythonw.exe``：
+
+    - 它必须与 ``sys.executable`` **同目录**（即 venv 的 ``Scripts``），
+      这样 venv 仍然生效（它同样是个壳，会正确转发到带 venv 的真实解释器）。
+      换成系统或 base 解释器就会丢掉 venv 里的依赖。
+    - 它是 GUI 子系统程序，**不会**分配控制台窗口，
+      所以即使中间隔了 venv 的 launcher 壳，也不会闪出黑框。
+
+    ``no_window=False`` 时返回带控制台的 ``python.exe``（调试用，能直接看到输出）。
+    """
+    candidate = str(exe or sys.executable)
+    if os.name != "nt" or not no_window:
+        return candidate
+    p = Path(candidate)
+    pythonw = p.with_name("pythonw.exe")
+    if pythonw.exists():
+        return str(pythonw)
+    # 没有 pythonw（极少数环境）就退回原解释器：
+    # 黑框问题还在，但至少服务能起来。上层会记一条提示。
+    return candidate
+
+
+def service_python(no_window: bool = True) -> str:
+    return resolve_python(sys.executable, no_window=no_window)
+
+
+def _no_window_capable(cmd: Sequence[Any]) -> bool:
+    """判断这条启动命令在 Windows 上能不能做到"无控制台窗口"。
+
+    判据是**解释器是不是 GUI 子系统程序**（pythonw.exe）。
+    只加 `CREATE_NO_WINDOW` 是不够的 —— venv 的 launcher 壳会再拉一次
+    真实解释器，那一步我们控制不了，系统仍会给孙子进程分配控制台。
+    """
+    if os.name != "nt":
+        return True
+    try:
+        exe = Path(str(cmd[0]))
+    except Exception:
+        return False
+    return exe.name.lower() == "pythonw.exe" and exe.exists()
 
 
 def start(
@@ -114,6 +176,7 @@ def start(
     cwd: Optional[str | Path] = None,
     extra: Optional[Dict[str, Any]] = None,
     env: Optional[Dict[str, str]] = None,
+    show_window: bool = False,
 ) -> Dict[str, Any]:
     """把命令放到后台运行。返回 ``{"ok", "pid", "log_file", ...}``。"""
     settings.ensure_dirs()
@@ -176,6 +239,9 @@ def start(
         "cwd": str(cwd or settings.BASE_DIR),
         "log_file": str(log_file),
         "stop_file": str(stop_file),
+        # 让上层能判断"这次到底有没有真的无窗口"，而不是猜。
+        # 没有 pythonw 时弹窗问题是环境问题，得明确告诉用户而不是静默。
+        "no_window": bool(not show_window and _no_window_capable(cmd)),
     }
     payload.update(extra or {})
     write_pid(payload, pid_file)
@@ -340,9 +406,16 @@ def service_cmd(
     collector_config: str = "",
     broker_gateway: str = "",
     broker_endpoint: str = "",
+    no_ext_data: bool = False,
+    ext_interval: Optional[float] = None,
 ) -> List[str]:
-    """拼出 ``python -m app.core.engine.service_runner ...`` 的完整命令。"""
-    cmd: List[str] = [python or sys.executable, "-m", "app.core.engine.service_runner"]
+    """拼出 ``python -m app.core.engine.service_runner ...`` 的完整命令。
+
+    :param python: 解释器路径。留空时**自动选 pythonw.exe**（见
+        :func:`service_python`）—— 这是"启动不弹黑框"的关键一步：
+        后台服务不该有控制台窗口，日志一律写文件。
+    """
+    cmd: List[str] = [python or service_python(), "-m", "app.core.engine.service_runner"]
     if config:
         cmd += ["--config", str(config)]
     if mode:
@@ -385,6 +458,10 @@ def service_cmd(
         cmd += ["--broker-gateway", str(broker_gateway)]
     if broker_endpoint:
         cmd += ["--broker-endpoint", str(broker_endpoint)]
+    if no_ext_data:
+        cmd += ["--no-ext-data"]
+    if ext_interval is not None:
+        cmd += ["--ext-interval", str(ext_interval)]
     return cmd
 
 

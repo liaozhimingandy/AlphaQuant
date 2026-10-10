@@ -131,6 +131,34 @@ class PositionSnapshot:
 
 
 @dataclass
+class InstrumentInfo:
+    """标的信息（交易所口径）。
+
+    ``limit_up`` / ``limit_down`` 必须是**交易所给的**，不能自己估算：
+    ST 股 5%、主板 10%、创业板/科创板 20%、新股上市首日不设限。
+    用固定 10% 估算会在 ST 股上把"已涨停"判成"还能买"，
+    下单直接被柜台拒绝（还白白暴露了策略意图）。
+    """
+
+    symbol: str = ""
+    name: str = ""
+    limit_up: float = 0.0
+    limit_down: float = 0.0
+    tick_size: float = 0.01
+    lot_size: int = 100
+    is_suspended: bool = False
+    prev_close: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol, "name": self.name,
+            "limit_up": self.limit_up, "limit_down": self.limit_down,
+            "tick_size": self.tick_size, "lot_size": self.lot_size,
+            "is_suspended": self.is_suspended, "prev_close": self.prev_close,
+        }
+
+
+@dataclass
 class AccountSnapshot:
     cash: float = 0.0
     available: float = 0.0
@@ -222,6 +250,57 @@ class IBrokerGateway(abc.ABC):
     @abc.abstractmethod
     def query_account(self) -> AccountSnapshot:
         ...
+
+    # ---------------- 可选能力（有默认实现，不强制每家都实现）----------------
+    def query_trades(self, since: Any = None) -> List[FillEvent]:
+        """当日（或自 since 起）的成交明细。
+
+        与 ``poll_fills`` 的区别：这是**查**而不是**收** ——
+        重启恢复、对账补漏都靠它。轮询式网关丢了回报就再也拿不回来，
+        所以"能不能查历史成交"直接决定了这套接口能不能上实盘。
+        不支持就返回空列表（上层会自动退回只靠 poll_fills）。
+        """
+        return []
+
+    def query_instrument(self, symbol: str) -> Optional["InstrumentInfo"]:
+        """标的信息：名称、涨跌停价、最小价差、是否停牌。
+
+        价格笼子与涨跌停校验需要**交易所的**涨跌停价，
+        用"昨日收盘 × 1.1"估算会在 ST 股（5%）、新股、科创板（20%）上算错。
+        拿不到就返回 None，上层退回估算值并记一条警告。
+        """
+        return None
+
+    def ensure_connected(self) -> bool:
+        """确保连接可用；断开就重连一次。
+
+        券商连接会**静默断开**（网络抖动、柜台踢会话、隔夜重连）。
+        不检查的话，下单会一直抛"未连接"而没人知道该重连 ——
+        实盘上这表现为"策略在正常跑，但一笔单都发不出去"。
+        默认实现：没连上就连一次，返回最终状态。
+        """
+        if not self.is_connected():
+            try:
+                self.connect()
+            except Exception as exc:
+                logger.warning(f"网关重连失败: {exc}")
+                return False
+        return self.is_connected()
+
+    def capabilities(self) -> Dict[str, bool]:
+        """能力声明。面板据此显示"这家券商能做什么"，避免猜。"""
+        return {
+            "market_order": True,
+            "cancel": True,
+            "query_trades": False,
+            "query_instrument": False,
+            "reconnect": False,
+        }
+
+    def health(self) -> Dict[str, Any]:
+        """连通性自检（给面板/CLI 展示）。默认只报连接状态。"""
+        ok = self.is_connected()
+        return {"connected": ok, "detail": "" if ok else "未连接"}
 
     # ---------------- 回报 ----------------
     def poll_fills(self) -> List[FillEvent]:
@@ -411,6 +490,65 @@ class SimulatedGateway(IBrokerGateway):
         with self._lock:
             return sum(p.size * p.avg_price for p in self._positions.values())
 
+    def query_trades(self, since: Any = None) -> List[FillEvent]:
+        """模拟网关把成交留了一份，所以能查历史 —— 真实网关也应如此。"""
+        with self._lock:
+            out = list(self._fills)
+        if since is None:
+            return out
+        try:
+            if isinstance(since, str):
+                since = datetime.fromisoformat(since)
+            if isinstance(since, datetime):
+                out = [f for f in out if (f.dt or datetime.min) >= since]
+        except Exception:
+            pass
+        return out
+
+    def query_instrument(self, symbol: str) -> Optional[InstrumentInfo]:
+        """模拟网关没有交易所数据，按 ±10% 给一个可测的笼子。
+
+        真实网关**必须**覆盖这个方法返回交易所口径的涨跌停价，
+        否则 price_limit 风控会在 ST / 创业板 / 科创板上判错。
+        """
+        px = 0.0
+        if self.price_source is not None:
+            try:
+                px = float((self.price_source() or {}).get(symbol) or 0.0)
+            except Exception:
+                px = 0.0
+        if px <= 0:
+            with self._lock:
+                p = self._positions.get(symbol)
+            px = float(p.avg_price) if p else 10.0
+        return InstrumentInfo(
+            symbol=symbol, name=symbol,
+            limit_up=round(px * 1.1, 2), limit_down=round(px * 0.9, 2),
+            tick_size=0.01, lot_size=100, is_suspended=False, prev_close=px,
+        )
+
+    def ensure_connected(self) -> bool:
+        if not self._connected:
+            self.connect()
+        return self._connected
+
+    def capabilities(self) -> Dict[str, bool]:
+        return {
+            "market_order": True,
+            "cancel": True,
+            "query_trades": True,
+            "query_instrument": True,
+            "reconnect": True,
+        }
+
+    def health(self) -> Dict[str, Any]:
+        return {
+            "connected": self._connected,
+            "detail": "" if self._connected else "未连接",
+            "orders": len(self._orders),
+            "fills": len(self._fills),
+        }
+
     def _apply_to_book(self, f: FillEvent) -> None:
         """把成交记进网关自己的持仓与资金，模拟券商侧账本。"""
         with self._lock:
@@ -565,6 +703,7 @@ __all__ = [
     "GatewayError",
     "GatewayOrder",
     "IBrokerGateway",
+    "InstrumentInfo",
     "OrderRejected",
     "OrderRequest",
     "PositionSnapshot",

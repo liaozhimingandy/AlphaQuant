@@ -13,6 +13,7 @@ from .strategy import StrategyManagerComponent
 from .collector import DataCollectorComponent, parse_interval
 from .trading_store import TradingStoreComponent
 from .live_gateway import LiveGatewayComponent
+from .extdata import ExtDataComponent
 
 __all__ = [
     "IBaseComponent",
@@ -24,5 +25,6 @@ __all__ = [
     "DataCollectorComponent",
     "TradingStoreComponent",
     "LiveGatewayComponent",
+    "ExtDataComponent",
     "parse_interval",
 ]

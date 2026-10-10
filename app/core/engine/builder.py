@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.engine.component import TaskSchedulerComponent
 from app.core.engine.components import (
     DataCollectorComponent,
+    ExtDataComponent,
     LiveGatewayComponent,
     MarketCenterComponent,
     NewsCenterComponent,
@@ -133,6 +134,9 @@ def build_engine(
     with_store: Optional[bool] = None,
     broker_gateway: str = "",
     broker_endpoint: str = "",
+    with_ext_data: Optional[bool] = None,
+    ext_symbols: Optional[List[str]] = None,
+    ext_interval: Optional[float] = None,
     snapshot_enabled: Optional[bool] = None,
     snapshot_mode: str = "",
     snapshot_min_gap: Optional[float] = None,
@@ -201,6 +205,22 @@ def build_engine(
     )
     engine.register_component(collector)
     enable_collector = collector_enabled
+
+    # 1.5) 扩展行情采集（资金流 / 筹码 / 涨停池 / 题材）
+    #      和上面的 K 线采集是两类数据：那是逐根K线的量价，这是日频截面。
+    #      回测/回放模式默认不开 —— 那段行情是死的，
+    #      去抓"今天的涨停池"对回放没有任何意义，只会拖慢启动。
+    want_ext = settings.EXT_DATA_ENABLED if with_ext_data is None else bool(with_ext_data)
+    if run_mode == RunMode.BACKTEST and with_ext_data is None:
+        want_ext = False
+    ext_component = None
+    if want_ext:
+        ext_component = ExtDataComponent(
+            symbols=list(ext_symbols or settings.collector_symbol_list() or syms),
+            interval=ext_interval,
+        )
+        ext_component.set_engine(engine)
+        engine.register_component(ext_component)
 
     # 2) 行情中心
     #    with_market=False 用于"消费别的服务推过来的行情"的场景：
@@ -305,6 +325,13 @@ def build_engine(
     store_desc = ""
     if store is not None:
         store_desc = f" | 落库={'开' if store.enabled else '关'}"
+    ext_desc = ""
+    if ext_component is not None:
+        ext_desc = (
+            f" | 扩展数据=开({len(ext_component.symbols)} 只 @ "
+            f"{ext_component.interval:.0f}s)"
+            if ext_component.enabled else " | 扩展数据=关"
+        )
     monitor_desc = ""
     if enable_monitor:
         mmode = (snapshot_mode or settings.MONITOR_SNAPSHOT_MODE).lower()
@@ -325,6 +352,7 @@ def build_engine(
         f"行情模式={m_mode if with_market else 'off'} | 任务数={len(cfg.get('tasks') or [])}"
         + monitor_desc
         + collector_desc
+        + ext_desc
         + store_desc
     )
     return engine

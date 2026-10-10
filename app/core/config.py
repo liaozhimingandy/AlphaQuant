@@ -194,6 +194,26 @@ class Settings:
     TRADE_FLUSH_BATCH: int = _env_int("TRADE_FLUSH_BATCH", 50)
     TRADE_FLUSH_INTERVAL: float = _env_float("TRADE_FLUSH_INTERVAL", 2.0)
 
+    # ---------------- 扩展行情数据采集（资金流 / 筹码 / 涨停池 / 题材）----------------
+    # 这类数据是"日频截面"的，和逐根K线不是一回事，所以单独一个采集组件。
+    # 回测/回放模式默认不开：那段数据是死的，联网抓今天的截面数据没有意义。
+    EXT_DATA_ENABLED: bool = _env_bool("EXT_DATA_ENABLED", True)
+    #: 资金流/筹码的采集间隔（秒）。这类数据变化慢，5~10 分钟足够。
+    EXT_DATA_INTERVAL: float = _env_float("EXT_DATA_INTERVAL", 600.0)
+    #: 涨停池/题材这类"市场级"数据每天同步几次
+    EXT_DATA_DAILY_INTERVAL: float = _env_float("EXT_DATA_DAILY_INTERVAL", 3600.0)
+    #: 题材映射最多建多少个热门板块的成分（全建必然触发限流）
+    EXT_DATA_THEME_TOP: int = _env_int("EXT_DATA_THEME_TOP", 20)
+    #: 是否采集基本面（估值/财务）。季频数据，一天一次就够。
+    EXT_DATA_FUNDAMENTAL: bool = _env_bool("EXT_DATA_FUNDAMENTAL", True)
+
+    # ---------------- 扩展行情特征（资金流 / 筹码 / 题材 / 评分）----------------
+    # 是否把这类日频截面数据注入因子上下文。关掉就是纯量价策略。
+    # 离线回放（库里没有这些数据时）建议关掉，省掉每根K线一次装配尝试。
+    EXT_FEATURES_ENABLED: bool = _env_bool("EXT_FEATURES_ENABLED", True)
+    #: 特征缓存时间（秒）。打分要遍历候选池，不缓存会打爆数据库。
+    EXT_FEATURE_TTL: float = _env_float("EXT_FEATURE_TTL", 300.0)
+
     # ---------------- 实盘 ----------------
     # 默认撮合模式：simulated（本地模拟）/ live（真实券商网关）
     EXECUTION_MODE: str = os.getenv("EXECUTION_MODE", "simulated").lower()

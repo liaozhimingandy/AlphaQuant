@@ -152,6 +152,37 @@ class MonitorResource(Resource):
         if head == "db":
             return self._json(request, self._db_query(request, rest[1:]))
 
+        # ---- 股票池：推荐列表 ----
+        if head == "pool":
+            if len(rest) >= 2 and rest[1] == "score":
+                sym = rest[2] if len(rest) >= 3 else ""
+                if not sym:
+                    return self._json(request, {"error": "缺少 symbol"}, 400)
+                return self._json(request, c.stock_score(sym))
+            return self._json(request, {
+                "results": c.pool_top(int(self._q(request, "limit", 30) or 30)),
+                "dates": c.pool_dates(),
+                "config": c.pool_config_view(),
+            })
+
+        # ---- 交易日历 / 市场状态 ----
+        if head == "calendar":
+            return self._json(request, c.calendar_view())
+
+        # ---- 因子实验室 ----
+        if head == "factors":
+            return self._json(request, c.factors_view())
+
+        # ---- 采集时间窗口 ----
+        if head == "schedule":
+            return self._json(request, c.schedule_view())
+
+        # ---- 策略库（界面自定义策略）----
+        #      单独一个路径：/api/strategies 已被回测页当"能力清单"在用，
+        #      改它的返回会连带影响回测表单的下拉框。
+        if head == "strategy-library":
+            return self._json(request, c.strategies_view())
+
         # ---- 券商接入点（脱敏后的配置视图）----
         if head == "endpoints":
             return self._json(request, c.endpoints_view())
@@ -307,6 +338,76 @@ class MonitorResource(Resource):
         # POST /api/strategies/reload —— 重新扫描用户策略目录（热加载）
         if seg[1] == "strategies" and len(seg) >= 3 and seg[2] == "reload":
             return self._json(request, c.reload_strategies())
+
+        # ---- 标的即时采集（全类别）----
+        if seg[1] == "collect" and len(seg) >= 3 and seg[2] == "now":
+            # 要跑十几个接口，必须异步（否则把 reactor 连同面板一起堵死）
+            return self._async(request, threads.deferToThread(
+                c.collect_now,
+                body.get("symbols") or None,
+                body.get("categories") or None,
+            ))
+
+        # ---- 采集时间窗口设置 ----
+        if seg[1] == "schedule" and len(seg) >= 3 and seg[2] == "save":
+            return self._json(request, c.schedule_save(body))
+
+        # ---- 用户策略库（界面自定义策略）----
+        if seg[1] == "strategies" and len(seg) >= 3:
+            op = seg[2]
+            if op == "save":
+                return self._json(request, c.strategy_save(body))
+            if op == "remove":
+                return self._json(request,
+                                  c.strategy_remove(str(body.get("name") or "")))
+            if op == "deploy":
+                # 上线为实盘任务 —— 会真的开始下单，所以必须走审计
+                return self._json(request, c.strategy_deploy(body))
+            return self._json(request, {"ok": False, "error": f"未知操作: {op}"}, 400)
+
+        # ---- 因子实验室 ----
+        if seg[1] == "factors" and len(seg) >= 3:
+            op = seg[2]
+            if op == "add":
+                return self._json(request, c.factor_add(body))
+            if op == "remove":
+                return self._json(request, c.factor_remove(
+                    str(body.get("name") or "")))
+            if op == "validate":
+                # 纯静态校验，毫秒级，同步返回 —— 用户边写边看到错误
+                return self._json(request, c.factor_validate(
+                    str(body.get("expr") or "")))
+            if op == "check":
+                # 要跑全历史，必须异步（否则把 reactor 连同面板一起堵死）
+                return self._async(request, threads.deferToThread(
+                    c.factor_check,
+                    str(body.get("expr") or ""),
+                    body.get("symbols") or None,
+                    int(body.get("horizon") or 5),
+                ))
+            if op == "mine":
+                return self._async(request, threads.deferToThread(
+                    c.factor_mine,
+                    body.get("symbols") or None,
+                    int(body.get("horizon") or 5),
+                    int(body.get("generations") or 10),
+                    int(body.get("population") or 50),
+                    float(body.get("seconds") or 60),
+                    float(body.get("min_score") or 45),
+                    bool(body.get("save")),
+                ))
+            return self._json(request, {"ok": False, "error": f"未知操作: {op}"}, 400)
+
+        # POST /api/pool/refresh —— 刷新股票池。
+        # 联网 + 打分，秒级到分钟级，必须异步（否则把 reactor 连同面板一起堵死）
+        if seg[1] == "pool" and len(seg) >= 3 and seg[2] == "refresh":
+            return self._async(request, threads.deferToThread(
+                c.refresh_pool,
+                str(body.get("source") or ""),
+                body.get("limit"),
+                body.get("sync"),
+                body.get("symbols") or None,
+            ))
 
         # POST /api/collector/(now|interval|add|remove|reload)
         if seg[1] == "collector" and len(seg) >= 3:
@@ -1135,6 +1236,450 @@ class MonitorWebComponent(IBaseComponent):
         })
         logger.info(f"用户策略已重新扫描 | 回测 {out.get('backtest')} | 引擎 {out.get('engine')}")
         return out
+
+    # ============================================================
+    # 股票池 / 综合评分
+    # ============================================================
+    def pool_config_view(self) -> Dict[str, Any]:
+        try:
+            from app.core.pool import PoolConfig, SOURCES
+            from app.core.score.engine import ScoreConfig
+
+            return {
+                **PoolConfig.load().to_dict(),
+                "sources": list(SOURCES),
+                "weights": ScoreConfig.load().weights,
+            }
+        except Exception as exc:
+            logger.debug(f"股票池配置读取失败: {exc}")
+            return {}
+
+    def pool_top(self, limit: int = 30) -> List[Dict[str, Any]]:
+        try:
+            from app.core.pool import StockPool
+
+            return StockPool.top(limit=int(limit))
+        except Exception as exc:
+            logger.debug(f"读取股票池失败: {exc}")
+            return []
+
+    def pool_dates(self) -> List[str]:
+        try:
+            from app.core.pool import StockPool
+
+            return StockPool.dates()
+        except Exception:
+            return []
+
+    # ============================================================
+    # 因子实验室
+    # ============================================================
+    def factors_view(self) -> Dict[str, Any]:
+        """因子总目录（按类别分组）+ 算子/变量速查。
+
+        **必须是全量因子**，不只是因子库里的表达式因子 ——
+        只显示 8 条会给用户一个错觉：以为系统只有这几个因子可用，
+        于是题材/基本面/资金/舆情/宏观那几十个从来没被用过。
+        """
+        try:
+            from app.core.factor.catalog import CATEGORY_DOCS, factor_catalog
+            from app.core.factor.expr import func_catalog, variable_catalog
+            from app.core.factor.library import get_library
+
+            lib = get_library()
+            cat = factor_catalog()
+            return {
+                "factors": [s.to_dict() for s in lib.list()],
+                "groups": cat["categories"],
+                "group_docs": CATEGORY_DOCS,
+                "total": cat["total"],
+                "categories": lib.categories(),
+                "ops": func_catalog(),
+                "vars": variable_catalog(),
+                "path": str(lib.path),
+            }
+        except Exception as exc:
+            logger.debug(f"因子库读取失败: {exc}")
+            return {"factors": [], "groups": [], "ops": [], "vars": []}
+
+    def factor_validate(self, expr: str) -> Dict[str, Any]:
+        try:
+            from app.core.factor.expr import validate
+
+            return validate(expr)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def factor_add(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from app.core.factor.library import get_library
+
+            ok, msg, spec = get_library().add(
+                str(body.get("name") or ""),
+                str(body.get("expr") or ""),
+                description=str(body.get("description") or ""),
+                category=str(body.get("category") or "自定义"),
+                overwrite=bool(body.get("overwrite")),
+            )
+            out: Dict[str, Any] = {"ok": ok, "message": msg}
+            if spec is not None:
+                out["factor"] = spec.to_dict()
+            return out
+        except Exception as exc:
+            logger.error(f"新增因子失败: {exc}", exc_info=True)
+            return {"ok": False, "message": str(exc)}
+
+    # ============================================================
+    # 数据采集（标的即时采集 + 时间窗口设置）
+    # ============================================================
+    def collect_now(self, symbols: Any = None,
+                    categories: Any = None) -> Dict[str, Any]:
+        """立即采集一批标的的**全类别**数据（工作线程执行）。
+
+        用户选了一只新票，最想的是"马上看看它的因子长什么样"，
+        而不是等下一个采集窗口。所以这里把所有类别都跑一遍。
+        """
+        try:
+            from app.core.pool import sync_category
+
+            syms = self._factor_symbols(symbols)
+            if not syms:
+                return {"ok": False, "error": "没有指定标的"}
+            cats = [str(c) for c in (categories or [])] or [
+                "lhb", "margin", "forecast", "holders", "rating", "news",
+            ]
+            report: Dict[str, Any] = {"ok": True, "symbols": syms, "detail": {}}
+
+            # 先采量价类（有行情才能算技术/表达式因子）
+            try:
+                from app.data.service import MarketDataService
+
+                rows = 0
+                for s in syms:
+                    info = MarketDataService.collect_incremental(
+                        s, lookback_days=365, adjust="qfq")
+                    rows += int(info.get("rows") or 0)
+                report["detail"]["daily"] = {"ok": len(syms), "rows": rows}
+            except Exception as exc:
+                report["detail"]["daily"] = {"ok": 0, "error": str(exc)[:120]}
+
+            # 再采日频截面
+            from app.core.pool import sync_chip, sync_fund_flow, sync_fundamentals
+
+            for label, fn in (("fundflow", lambda: sync_fund_flow(syms)),
+                              ("chip", lambda: sync_chip(syms)),
+                              ("fundamental", lambda: sync_fundamentals(syms))):
+                try:
+                    r = fn()
+                    report["detail"][label] = {
+                        "ok": r.get("ok", 0),
+                        "failed": (r.get("failed") or [])[:5],
+                    }
+                except Exception as exc:
+                    report["detail"][label] = {"ok": 0, "error": str(exc)[:120]}
+
+            for cat in cats:
+                try:
+                    r = sync_category(cat, syms)
+                    report["detail"][cat] = {
+                        "ok": r.get("ok", 0),
+                        "failed": (r.get("failed") or [])[:5],
+                    }
+                except Exception as exc:
+                    report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
+
+            # 市场级
+            for cat in ("macro", "breadth"):
+                try:
+                    r = sync_category(cat)
+                    report["detail"][cat] = {"ok": r.get("ok", 0)}
+                except Exception as exc:
+                    report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
+
+            # 采完必须失效特征缓存，否则界面上看到的还是旧值
+            try:
+                from app.core.data.features import get_provider
+
+                get_provider().invalidate()
+            except Exception:
+                pass
+            return report
+        except Exception as exc:
+            logger.error(f"即时采集失败: {exc}", exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    def schedule_view(self) -> Dict[str, Any]:
+        """采集时间窗口 + 当前处在哪个窗口。"""
+        try:
+            from app.core.collect.schedule import get_schedule
+            from app.core.market.calendar import get_calendar
+
+            sch = get_schedule()
+            slot = sch.slot_of()
+            return {
+                "schedule": sch.to_dict(),
+                "current_slot": slot,
+                "slot_names": {"pre": "盘前", "intraday": "盘中",
+                               "post": "盘后定稿"},
+                "market": get_calendar().to_dict(),
+            }
+        except Exception as exc:
+            logger.debug(f"读取采集时间窗口失败: {exc}")
+            return {}
+
+    def schedule_save(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from app.core.collect.schedule import (
+                CollectionSchedule,
+                get_schedule,
+                set_schedule,
+            )
+
+            base = get_schedule()
+            fields = {f for f in CollectionSchedule.__dataclass_fields__}
+            raw = {k: v for k, v in body.items() if k in fields}
+            if not raw:
+                return {"ok": False, "message": "没有可识别的字段"}
+            merged = CollectionSchedule.from_dict({**base.to_dict(), **raw})
+            set_schedule(merged, persist=True)
+            # 审计：改采集时间会影响"什么时候有数据"，属于值得留痕的操作
+            audit = getattr(self, "audit", None)
+            if audit is not None:
+                audit.append({
+                    "at": datetime.now().isoformat(), "action": "save_schedule",
+                    "detail": {k: getattr(merged, k) for k in raw},
+                })
+            return {"ok": True, "message": "已保存", "schedule": merged.to_dict()}
+        except Exception as exc:
+            logger.error(f"保存采集时间窗口失败: {exc}", exc_info=True)
+            return {"ok": False, "message": str(exc)}
+
+    def factor_remove(self, name: str) -> Dict[str, Any]:
+        try:
+            from app.core.factor.library import get_library
+
+            ok, msg = get_library().remove(name)
+            return {"ok": ok, "message": msg}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    def factor_check(self, expr: str, symbols: Any = None,
+                     horizon: int = 5) -> Dict[str, Any]:
+        """检验一个因子（工作线程执行）。"""
+        try:
+            from app.core.factor.evaluate import evaluate_factor
+
+            rep = evaluate_factor(expr, self._factor_symbols(symbols),
+                                  horizon=int(horizon))
+            return {"ok": True, "report": rep.to_dict()}
+        except Exception as exc:
+            logger.error(f"因子检验失败: {exc}", exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    def factor_mine(self, symbols: Any = None, horizon: int = 5,
+                    generations: int = 10, population: int = 50,
+                    seconds: float = 60, min_score: float = 45,
+                    save: bool = False) -> Dict[str, Any]:
+        """遗传算法挖掘（工作线程执行）。"""
+        try:
+            from app.core.factor.evaluate import load_panel
+            from app.core.factor.library import SOURCE_MINED, get_library
+            from app.core.factor.mining import FactorMiner
+
+            syms = self._factor_symbols(symbols)
+            panel = load_panel(syms)
+            if len(panel) < 3:
+                return {"ok": False, "error":
+                        f"可用标的只有 {len(panel)} 个，截面检验至少需要 3 个"}
+            miner = FactorMiner(panel, horizon=int(horizon), seed=None)
+            found = miner.run(generations=int(generations),
+                              population=int(population), top=10,
+                              max_seconds=float(seconds),
+                              min_score=float(min_score))
+            saved = 0
+            if save and found:
+                lib = get_library()
+                for f in found:
+                    ok, _, _ = lib.add(
+                        f"mined_{abs(hash(f.expr)) % 100000:05d}", f.expr,
+                        description=f"自动挖掘（{f.score}分）",
+                        category="挖掘", source=SOURCE_MINED,
+                        metrics={"ic": f.ic, "icir": f.icir, "score": f.score},
+                        overwrite=True)
+                    saved += bool(ok)
+            return {
+                "ok": True, "evaluated": miner.evaluated, "saved": saved,
+                "factors": [f.to_dict() for f in found],
+            }
+        except Exception as exc:
+            logger.error(f"因子挖掘失败: {exc}", exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    # ============================================================
+    # 用户策略库（界面自定义策略）
+    # ============================================================
+    def strategies_view(self) -> Dict[str, Any]:
+        """已注册策略 + 用户自定义策略 + 可用因子/风控（界面要靠它渲染表单）。"""
+        from app.core.strategy.store import KINDS, get_store
+
+        store = get_store()
+        out: Dict[str, Any] = {
+            "kinds": KINDS,
+            "user": [s.to_dict() for s in store.list()],
+            "path": str(store.path),
+        }
+        try:
+            from app.core.factor import list_factors
+            from app.core.risk import list_risks
+            from app.core.strategy import list_strategies
+
+            out["factors"] = list_factors()
+            out["risk_rules"] = list_risks()
+            out["registered"] = list_strategies()
+        except Exception as exc:
+            logger.debug(f"策略清单读取失败: {exc}")
+        return out
+
+    def strategy_save(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from app.core.strategy.store import get_store
+
+            ok, msg, s = get_store().add(
+                name=str(body.get("name") or ""),
+                kind=str(body.get("kind") or ""),
+                spec=dict(body.get("spec") or {}),
+                description=str(body.get("description") or ""),
+                risk=list(body.get("risk") or []),
+                overwrite=bool(body.get("overwrite", True)),
+            )
+            out: Dict[str, Any] = {"ok": ok, "message": msg}
+            if s is not None:
+                out["strategy"] = s.to_dict()
+            return out
+        except Exception as exc:
+            logger.error(f"保存策略失败: {exc}", exc_info=True)
+            return {"ok": False, "message": str(exc)}
+
+    def strategy_remove(self, name: str) -> Dict[str, Any]:
+        try:
+            from app.core.strategy.store import get_store
+
+            ok, msg = get_store().remove(name)
+            return {"ok": ok, "message": msg}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    def strategy_deploy(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """把自定义策略上线为实盘任务。
+
+        这一步会**真的开始下单**，所以：
+          1. 必须走控制面（统一指令入口，带审计）；
+          2. 默认带一条 max_drawdown 风控兜底 —— 用户可能忘记配。
+        """
+        try:
+            from app.core.strategy.store import get_store
+
+            name = str(body.get("name") or "")
+            s = get_store().get(name)
+            if s is None:
+                return {"ok": False, "error": f"策略不存在: {name}"}
+            symbol = str(body.get("symbol") or "").strip()
+            if not symbol:
+                return {"ok": False, "error": "缺少标的 symbol"}
+
+            risk = [dict(r) for r in (s.risk or [])]
+            if not any(str(r.get("type")) == "max_drawdown" for r in risk):
+                risk.append({"type": "max_drawdown", "max_drawdown": 0.2})
+            spec = {
+                "task_id": str(body.get("task_id") or f"{name}-{symbol}"),
+                "name": s.description or name,
+                "symbol": symbol,
+                "enabled": True,
+                "initial_cash": float(body.get("initial_cash") or 100000),
+                "strategy": s.to_task_strategy(),
+                "risk": risk,
+            }
+            result = self.control.apply_command({"action": "add_task", "spec": spec})
+            self.audit.append({
+                "at": datetime.now().isoformat(), "action": "deploy_strategy",
+                "detail": {"strategy": name, "symbol": symbol,
+                           "task_id": spec["task_id"]},
+            })
+            return {"ok": True, "task_id": spec["task_id"], "result": result}
+        except Exception as exc:
+            logger.error(f"策略上线失败: {exc}", exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    def _factor_symbols(self, symbols: Any = None) -> List[str]:
+        if symbols:
+            return [str(s) for s in symbols]
+        from app.db.database import SessionLocal
+        from app.repository.stock_repository import StockRepository
+
+        try:
+            with SessionLocal() as db:
+                return [r["symbol"] for r in StockRepository.list_symbols(db)]
+        except Exception:
+            return []
+
+    def calendar_view(self) -> Dict[str, Any]:
+        """交易日历与市场状态。
+
+        面板要能回答"为什么它不采数据" —— 闭市是**正常行为**，
+        但如果不显示出来，用户看到"采集 0 次"只会以为坏了。
+        """
+        try:
+            from app.core.market.calendar import STATE_NAMES, get_calendar
+
+            cal = get_calendar()
+            info = cal.to_dict()
+            info["state_names"] = dict(STATE_NAMES)
+            return info
+        except Exception as exc:
+            logger.debug(f"交易日历读取失败: {exc}")
+            return {}
+
+    def refresh_pool(self, source: str = "", limit: Any = None,
+                     sync: Any = None, symbols: Any = None) -> Dict[str, Any]:
+        """刷新股票池（工作线程执行）。
+
+        面板点一下就可能触发几十只票的联网同步 + 打分，
+        同步阻塞会把行情、策略、撮合一起停摆。
+        """
+        try:
+            from app.core.pool import StockPool
+
+            pool = StockPool()
+            report = pool.refresh(
+                source=source or None,
+                limit=int(limit) if limit else None,
+                do_sync=None if sync is None else bool(sync),
+                symbols=list(symbols) if symbols else None,
+            )
+            if report.get("error"):
+                return {"ok": False, "error": report["error"]}
+            self.audit.append({
+                "at": datetime.now().isoformat(), "action": "pool_refresh",
+                "detail": {"source": report.get("source"),
+                           "count": report.get("count")},
+            })
+            return {"ok": True, **report}
+        except Exception as exc:
+            logger.error(f"股票池刷新失败: {exc}", exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    def stock_score(self, symbol: str) -> Dict[str, Any]:
+        """单只票的多维度评分明细。"""
+        try:
+            from app.core.data.features import get_provider
+            from app.core.score.engine import ScoreEngine
+            from app.data.datasource import normalize_symbol
+
+            sym = normalize_symbol(symbol)
+            r = ScoreEngine(provider=get_provider(ttl=0)).score(sym)
+            return {"ok": True, "symbol": sym, **r.to_dict()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def build_config_view(self) -> Dict[str, Any]:
         """当前生效的运行时配置。面板据此显示"我现在是什么档位"。"""

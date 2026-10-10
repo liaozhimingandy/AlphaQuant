@@ -18,8 +18,11 @@ from app.core.strategy.registry import (
 from app.core.strategy.spec import build_strategy
 
 from app.core.strategy.builtin import ComboStrategy, MaCrossStrategy, NewsDrivenStrategy
+from app.core.strategy.multi_factor_strategy import MultiFactorStrategy
+from app.core.strategy.score_strategy import ScoreStrategy
 
-for _cls in (ComboStrategy, MaCrossStrategy, NewsDrivenStrategy):
+for _cls in (ComboStrategy, MaCrossStrategy, NewsDrivenStrategy,
+             ScoreStrategy, MultiFactorStrategy):
     register_strategy(_cls)
 
 __all__ = [
@@ -27,7 +30,9 @@ __all__ = [
     "DecisionState",
     "ComboStrategy",
     "MaCrossStrategy",
+    "MultiFactorStrategy",
     "NewsDrivenStrategy",
+    "ScoreStrategy",
     "register_strategy",
     "create_strategy",
     "has_strategy",

@@ -13,12 +13,22 @@ from app.core.execution.endpoints import (
     load_endpoints,
     mask_secret,
 )
+# 导入即注册：网关靠装饰器进注册表，不 import 就永远搜不到它。
+# 放在这里而不是等谁用到再导 —— "这家券商能用"不该取决于
+# 某个模块碰巧被谁先 import 了。
+from app.core.execution import http_gateway as _http_gateway  # noqa: F401
+from app.core.execution.gateway import (  # noqa: F401
+    IBrokerGateway,
+    SimulatedGateway,
+)
 
 __all__ = [
     "BrokerEndpoint",
     "EndpointsConfig",
     "IBaseBroker",
+    "IBrokerGateway",
     "SimulatedBroker",
+    "SimulatedGateway",
     "describe_endpoints",
     "load_endpoints",
     "mask_secret",
