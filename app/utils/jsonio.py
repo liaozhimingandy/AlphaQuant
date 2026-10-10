@@ -117,6 +117,20 @@ def read_json(path: str | Path, default: Any = None) -> Any:
         return default
 
 
+def read_json_str(raw: str, default: Any = None) -> Any:
+    """解析一段 JSON 文本。空串/None/损坏都返回 ``default``。
+
+    用于数据库里的 TEXT 列（metrics_json / equity_json / spec_json 等）：
+    历史数据可能是旧版本格式，读的时候不该把调用方炸掉。
+    """
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
 def append_jsonl(path: str | Path, obj: Any) -> None:
     """追加一行 JSON（订单流等 append-only 场景）。"""
     p = Path(path)
@@ -178,6 +192,7 @@ __all__ = [
     "dumps",
     "write_json_atomic",
     "read_json",
+    "read_json_str",
     "append_jsonl",
     "read_jsonl",
     "tail_lines",

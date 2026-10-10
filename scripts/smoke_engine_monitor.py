@@ -143,6 +143,89 @@ def run_probes():
     st, ov2 = get("/api/overview")
     check("audit 有留痕", len(ov2.get("audit") or []) >= 4, f"n={len(ov2.get('audit') or [])}")
 
+    print("\n--- 采集服务（默认装配）---")
+    st, col = get("/api/collector")
+    check("collector 接口 200", st == 200, f"status={st}")
+    check("采集服务已装配（不再提示未装配）", col.get("available") is True,
+          f"available={col.get('available')} reason={col.get('reason')}")
+    check("装配/启用状态可分", "enabled" in col and "assembled" in col,
+          f"enabled={col.get('enabled')} assembled={col.get('assembled')}")
+
+    print("\n--- 交易数据落库（SQLite）---")
+    st, db = get("/api/db/stats")
+    check("落库统计 200", st == 200, f"status={st}")
+    check("落库线程在跑或已写完", isinstance((db.get("persist") or {}).get("written"), int),
+          f"{db.get('persist')}")
+
+    st, ev = get("/api/db/events?limit=20")
+    check("系统事件可查", st == 200 and "events" in ev, f"n={len(ev.get('events') or [])}")
+
+    st, runs_d = get("/api/db/runs?limit=5")
+    check("运行记录可查", st == 200 and len(runs_d.get("runs") or []) >= 1,
+          f"n={len(runs_d.get('runs') or [])}")
+
+    print("\n--- 配置视图与能力清单 ---")
+    st, cfg = get("/api/config")
+    check("配置视图 200", st == 200, f"status={st}")
+    log = cfg.get("log") or {}
+    snap = cfg.get("snapshot") or {}
+    check("日志策略可见", log.get("level") and "debug_mode" in log, f"{log.get('level')}")
+    check("快照策略可见", snap.get("mode") in ("on_event", "on_change", "interval", "off"),
+          f"mode={snap.get('mode')} enabled={snap.get('enabled')}")
+    check("快照默认按操作触发", snap.get("mode") == "on_event",
+          f"mode={snap.get('mode')}（面板每 2s 刷新 ≠ 每 2s 落盘）")
+    check("快照统计可见", "triggers" in snap and "last_trigger" in snap,
+          f"writes={snap.get('writes')} triggers={snap.get('triggers')}")
+
+    st, caps = get("/api/strategies")
+    check("能力清单 200", st == 200, f"status={st}")
+    check("回测策略非空", len(caps.get("backtest_strategies") or []) >= 1,
+          f"{caps.get('backtest_strategies')}")
+    check("指标带可配参数", all("params" in i for i in (caps.get("indicators") or [])),
+          f"n={len(caps.get('indicators') or [])}")
+    check("声明式策略可用", "declarative" in (caps.get("backtest_strategies") or []),
+          f"{caps.get('backtest_strategies')}")
+    check("回测默认参数可见",
+          (caps.get("backtest_defaults") or {}).get("cash") is not None,
+          f"cash={(caps.get('backtest_defaults') or {}).get('cash')}")
+    check("接入点视图可见", "endpoints" in (caps.get("endpoints") or {}),
+          f"{[e.get('id') for e in ((caps.get('endpoints') or {}).get('endpoints') or [])]}")
+
+    print("\n--- 券商接入点 ---")
+    st, eps = get("/api/endpoints")
+    check("接入点接口 200", st == 200 and "endpoints" in eps, f"status={st}")
+    if eps.get("endpoints"):
+        e0 = eps["endpoints"][0]
+        check("凭据已脱敏", "credentials" in e0 and "params" in e0, f"{list(e0)}")
+    st, chk = post("/api/endpoints/check", {"endpoint": (eps.get("active") or "")},
+                   timeout=60)
+    check("接入点试连接可用", chk.get("ok") is True,
+          f"err={chk.get('error')}")
+
+    print("\n--- 用户策略热加载 ---")
+    st, rl = post("/api/strategies/reload", {})
+    check("策略重扫 200", st == 200 and rl.get("ok") is True,
+          f"回测={rl.get('backtest')} 引擎={rl.get('engine')}")
+    check("双链路都扫到自定义策略",
+          len(rl.get("backtest") or []) >= 1 and len(rl.get("engine") or []) >= 1,
+          f"{rl}")
+
+    print("\n--- 回测监控 ---")
+    st, bt = get("/api/backtest?limit=5")
+    check("回测列表 200", st == 200 and "jobs" in bt and "results" in bt, f"status={st}")
+    st, live = get("/api/live")
+    check("实盘视图 200（未启用时给出原因）", st == 200,
+          f"available={live.get('available')} reason={live.get('reason')}")
+
+    print("\n--- 快照策略切换 ---")
+    st, r = post("/api/snapshot/mode", {"mode": "off"})
+    check("切到 off", r.get("ok") is True and r.get("mode") == "off", f"{r}")
+    st, cfg2 = get("/api/config")
+    check("策略已生效", (cfg2.get("snapshot") or {}).get("mode") == "off",
+          f"{(cfg2.get('snapshot') or {}).get('mode')}")
+    st, r = post("/api/snapshot/mode", {"mode": "on_change", "enabled": True})
+    check("切回 on_change", r.get("ok") is True and r.get("mode") == "on_change", f"{r}")
+
     print("\n--- 快照落盘 ---")
     from app.core.monitor.snapshot import SnapshotStore
 

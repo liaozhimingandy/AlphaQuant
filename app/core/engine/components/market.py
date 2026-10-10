@@ -16,6 +16,7 @@ from twisted.internet import defer, task, threads
 
 from app.core.engine.components.ibase import IBaseComponent
 from app.core.engine.event import StandardEvents
+from app.core.market.clean import clean_frame, default_cleaner
 from app.core.market.types import Bar
 from app.utils.logger import logger
 
@@ -126,6 +127,13 @@ class MarketCenterComponent(IBaseComponent):
             df = MarketDataService.load(
                 symbol, self.start_date, self.end_date, source=self.data_source
             )
+            # 清洗：数据源给的东西不等于能喂给策略的东西。
+            # 重复行、时间倒序、OHLC 自相矛盾、停牌/涨跌停标记都要在这里处理完，
+            # 否则脏数据会一路流到策略里，让它在错误的价格上做决定。
+            df, report = clean_frame(df, symbol)
+            if report.dirty:
+                self.stats["cleaned"] = self.stats.get("cleaned", 0) + 1
+                logger.warning(f"  {symbol} 历史数据清洗: {report.summary()}")
             bars = df_to_bars(normalize_symbol(symbol), df)
         except Exception as exc:
             self.stats["errors"] += 1

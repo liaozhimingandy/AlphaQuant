@@ -96,6 +96,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
   .seg button{border:0;border-radius:0}
   .seg button.on{background:var(--accent);color:#fff}
+  .tabs{display:flex;gap:4px;padding:8px 18px 0;border-bottom:1px solid var(--line);
+        background:var(--panel);position:sticky;top:0;z-index:5}
+  .tabs button{background:transparent;border:1px solid transparent;border-bottom:none;
+        border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;color:var(--muted);
+        font-size:13px;font-weight:600}
+  .tabs button:hover{color:var(--fg)}
+  .tabs button.on{background:var(--bg);border-color:var(--line);color:var(--accent)}
+  label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--muted)}
+  label input,label select{font-size:12px}
+  main.hidden,#page-backtest.hidden,#page-live.hidden{display:none}
+  h3{font-weight:600;color:var(--fg)}
 </style>
 </head>
 <body>
@@ -110,6 +121,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span>快照 <b id="snap-info">-</b></span>
   </div>
   <div class="spacer"></div>
+  <select id="snap-mode" title="快照策略（本页刷新与快照落盘是两件事）">
+    <option value="on_event">快照: 有操作才存</option>
+    <option value="on_change">快照: 内容变了才存</option>
+    <option value="interval">快照: 定时间隔存</option>
+    <option value="off">快照: 关闭</option>
+  </select>
   <div class="seg" id="freq">
     <button data-v="1000">1s</button>
     <button data-v="2000" class="on">2s</button>
@@ -120,8 +137,57 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="btn-stop" class="danger">停止引擎</button>
 </header>
 
-<main>
+<nav class="tabs" id="tabs">
+  <button data-page="live" class="on">实盘监控</button>
+  <button data-page="backtest">回测监控</button>
+</nav>
+
+<main id="page-live">
   <section id="kpis" class="kpis"></section>
+
+  <section class="panel" id="live-panel">
+    <h2>实盘账户 <span class="muted" id="live-hint"></span></h2>
+    <div class="body">
+      <div id="live-off" class="hint">本引擎未启用实盘网关（运行模式非 LIVE）。</div>
+      <div id="live-on" class="hidden">
+        <div class="grid2" id="live-kv"></div>
+        <h3 style="margin:14px 0 6px;font-size:13px">
+          券商账户 <span class="muted" id="live-acct-hint">（来自券商源，不是本地账本的推算）</span>
+        </h3>
+        <div class="grid2" id="live-acct"></div>
+        <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+          <button id="btn-reconcile" class="primary">立即对账</button>
+          <button id="btn-refresh-acct">刷新账户</button>
+          <button id="btn-cancel-all" class="danger">撤销全部未结订单</button>
+          <span class="hint" id="live-msg"></span>
+        </div>
+        <h3 style="margin:14px 0 6px;font-size:13px">券商持仓 <span class="muted" id="live-pos-hint"></span></h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>标的</th><th class="num">持仓</th><th class="num">可卖</th>
+              <th class="num">成本价</th>
+            </tr></thead>
+            <tbody id="live-pos-rows"><tr><td colspan="4" class="muted">无持仓</td></tr></tbody>
+          </table>
+        </div>
+        <h3 style="margin:14px 0 6px;font-size:13px">未结订单 <span class="muted" id="live-pending-hint"></span></h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>时间</th><th>任务</th><th>标的</th><th>方向</th>
+              <th class="num">委托量</th><th class="num">已成交</th>
+              <th>状态</th><th>委托价</th><th>原因</th>
+            </tr></thead>
+            <tbody id="live-pending-rows"><tr><td colspan="9" class="muted">无</td></tr></tbody>
+          </table>
+        </div>
+        <p class="hint">实盘下单只是"报单成功"，成交要靠券商的成交回报驱动。
+        对账是账户级的：一个券商账户对应 N 个策略，逐任务对账在账户里必然对不上。
+        <code>LIVE_STRICT_RECONCILE=true</code> 时对账不一致会直接阻断交易。</p>
+      </div>
+    </div>
+  </section>
 
   <section class="panel">
     <h2>组件 <span class="muted" id="comp-hint"></span></h2>
@@ -159,8 +225,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section class="panel">
     <h2>行情采集 <span class="muted" id="col-hint"></span></h2>
     <div class="body">
-      <div id="col-off" class="hint">本引擎未装配采集服务（回测模式或已关闭）。</div>
-      <div id="col-on" class="hidden">
+      <div id="col-status" style="margin-bottom:8px"><span class="muted">加载中…</span></div>
+      <div id="col-off" class="hint hidden">本引擎未装配采集服务。</div>
+      <div id="col-on">
         <div class="table-wrap">
           <table>
             <thead><tr>
@@ -188,7 +255,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span class="hint" id="col-msg"></span>
         </div>
         <p class="hint">频率支持 30s / 5m / 1h / 1d，受 <code>min_interval</code> 下限保护。
-        日内数据默认只在交易时段采集（含收盘后 30 分钟缓冲），日线不限时段。</p>
+        日内数据默认只在交易时段采集（含收盘后 30 分钟缓冲），日线不限时段。
+        采集服务默认装配；纯回测模式会装配但停用（只读历史，联网采集没有意义）。</p>
       </div>
     </div>
   </section>
@@ -204,6 +272,94 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section class="panel">
     <h2>运行日志 <span class="muted" id="log-hint"></span></h2>
     <div class="body"><pre id="logs">加载中…</pre></div>
+  </section>
+</main>
+
+<!-- ==================== 回测监控 ==================== -->
+<main id="page-backtest" class="hidden">
+  <section class="panel">
+    <h2>新建回测 <span class="muted">提交后台执行，不阻塞实盘</span></h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>标的<br><input id="bt-symbol" placeholder="000001" style="width:120px"></label>
+        <label>开始<br><input id="bt-start" type="date" style="width:150px"></label>
+        <label>结束<br><input id="bt-end" type="date" style="width:150px"></label>
+        <label>策略<br><select id="bt-strategy" style="width:180px"></select></label>
+        <label>初始资金<br><input id="bt-cash" type="number" style="width:110px"></label>
+        <label>策略参数<br><input id="bt-params" placeholder="fast=5 slow=20" style="width:170px"></label>
+        <label>数据源<br>
+          <select id="bt-source" style="width:110px">
+            <option value="auto">auto</option>
+            <option value="db">db</option>
+            <option value="csv">csv</option>
+            <option value="remote">remote</option>
+          </select>
+        </label>
+        <label>复权<br>
+          <select id="bt-adjust" style="width:90px">
+            <option value="qfq">qfq</option>
+            <option value="hfq">hfq</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <button id="btn-bt-run" class="primary">开始回测</button>
+        <span class="hint" id="bt-msg"></span>
+      </div>
+      <div class="row hidden" id="bt-spec-wrap" style="margin-top:10px">
+        <div style="flex:1;min-width:320px">
+          <label>规则定义(JSON) —— 策略选 <code>declarative</code> 时使用</label>
+          <textarea id="bt-spec" spellcheck="false" style="min-height:96px"></textarea>
+          <div class="row" style="margin-top:6px">
+            <button id="btn-bt-tpl">填入示例规则</button>
+            <span class="hint" id="bt-spec-msg"></span>
+          </div>
+        </div>
+      </div>
+      <p class="hint" id="bt-defaults-hint">回测在工作线程执行，不占用交易链路。完成后结果落 SQLite，
+      下面的列表和曲线都从库里读 —— 重启服务也不会丢。
+      表单里没填的字段用 <code>config/backtest.json</code> 里的默认值。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>回测作业 <span class="muted" id="bt-job-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>作业</th><th>状态</th><th>标的</th><th>策略</th>
+          <th>区间</th><th>耗时</th><th>错误</th>
+        </tr></thead>
+        <tbody id="bt-job-rows"><tr><td colspan="7" class="muted">暂无</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel">
+    <h2>历史回测结果 <span class="muted" id="bt-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>时间</th><th>标的</th><th>策略</th><th>区间</th>
+          <th class="num">收益</th><th class="num">回撤</th><th class="num">夏普</th>
+          <th class="num">成交</th><th class="num">胜率</th><th>操作</th>
+        </tr></thead>
+        <tbody id="bt-rows"><tr><td colspan="10" class="muted">暂无回测记录</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel hidden" id="bt-detail">
+    <h2><span id="bt-d-title">回测详情</span>
+      <span class="muted" id="bt-d-hint"></span></h2>
+    <div class="body">
+      <div class="grid2" id="bt-d-kv"></div>
+      <div class="panel" style="margin-top:12px">
+        <h2>权益曲线</h2><div class="body"><canvas id="bt-d-chart"></canvas></div>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h2>完整指标</h2><div class="body"><pre id="bt-d-metrics">-</pre></div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -238,6 +394,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <script>
 (function(){
   var REFRESH = 2000, timer = null, selected = null, lastOverview = null;
+  // 当前页面。实盘页按 REFRESH 轮询；回测页轮询更慢（回测是分钟级的事），
+  // 而且只在切过去的时候才轮询，避免白跑请求。
+  var PAGE = 'live', btTimer = null, btSelected = null;
+  // 回测默认参数（来自 config/backtest.json）与能力清单
+  var BT_DEFAULTS = {}, CAPS = {}, SNAP_MODE_READY = false;
 
   function $(id){ return document.getElementById(id); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(c){
@@ -285,11 +446,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     return '<span class="pill ' + (m[s]||'off') + '">' + esc(s||'-') + '</span>';
   }
 
+  // 同步"快照策略"下拉框。只在首次同步，避免用户正在选择时被轮询覆盖回去。
+  function syncSnapMode(mode){
+    var sel = $('snap-mode');
+    if(!sel || SNAP_MODE_READY || !mode) return;
+    sel.value = mode;
+    SNAP_MODE_READY = true;
+  }
+
   function renderKpis(o){
     var ts = o.tasks || [], eq = 0, pnl = 0, trades = 0, pos = 0, cash = 0;
     ts.forEach(function(t){ eq += t.equity||0; pnl += t.total_pnl||0;
       trades += t.trade_count||0; pos += t.position_size||0; cash += t.cash||0; });
     var m = o.monitor || {};
+    var modeTxt = {on_event:'有操作才存', on_change:'内容变了才存',
+                   interval:'定时存', off:'已关闭'}[m.snapshot_mode] || (m.snapshot_mode||'-');
     var cards = [
       ['运行状态', (o.engine||{}).status||'-', '空闲: ' + String((o.engine||{}).idle)],
       ['任务数', ts.length, '标的 ' + (o.symbol_count||0) + ' 个'],
@@ -297,8 +468,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       ['总盈亏', sgn(pnl), '含浮动盈亏'],
       ['成交笔数', trades, '持仓合计 ' + pos + ' 股'],
       ['订单流', (o.orders||0), '快照 ' + (m.writes||0) + ' 份'],
-      ['上次快照', m.last_snapshot_at ? m.last_snapshot_at.replace('T',' ').slice(11,19) : '-',
-       '间隔 ' + (m.snapshot_interval||'-') + 's']
+      ['快照策略', modeTxt,
+       '触发 ' + (m.triggers||0) + ' 次 · ' +
+       (m.last_snapshot_at ? ('上次 ' + m.last_snapshot_at.replace('T',' ').slice(11,19)) : '尚未落盘')]
     ];
     $('kpis').innerHTML = cards.map(function(c, i){
       var v = c[1];
@@ -359,18 +531,42 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   // ---------------- 行情采集 ----------------
   // 采集区块单独轮询 /api/collector：它是秒级循环的 IO 服务，
   // 状态变化比任务表快，跟 overview 一起刷的话间隔不合适。
+  //
+  // 三种状态要分开表达，否则用户看到"未启用"不知道该改哪里：
+  //   未装配  —— 只有老版本才会出现
+  //   已装配·停用 —— 说清原因（回测模式 / 显式关闭），并仍然允许手动补采
+  //   已装配·运行 —— 正常展示任务表
   function renderCollector(c){
-    var on = c && c.available;
-    $('col-off').classList.toggle('hidden', !!on);
-    $('col-on').classList.toggle('hidden', !on);
-    if(!on){ $('col-hint').textContent = '(未启用)'; return; }
+    var available = !!(c && c.available);
+    $('col-off').classList.toggle('hidden', available);
+    if(!available){
+      $('col-hint').textContent = '(未装配)';
+      return;
+    }
 
     var jobs = c.jobs || [], st = c.state || {};
-    $('col-hint').textContent = '(' + jobs.length + ' 个任务 · 交易时段限定: '
-      + String(c.trading_hours_only) + ' · 下限 ' + (c.min_interval||0) + 's)';
+    var enabled = !!c.enabled, running = !!c.running;
+    var reason = c.disabled_reason || '';
+
+    if(!enabled){
+      $('col-hint').textContent = '(已装配 · 已停用)';
+      $('col-status').innerHTML = '<span class="pill off">已停用</span>' +
+        (reason ? ' <span class="muted">' + esc(reason) + '</span>' : '');
+    } else if(!running){
+      $('col-hint').textContent = '(已装配 · 未调度)';
+      $('col-status').innerHTML = '<span class="pill warn">未调度</span>' +
+        ' <span class="muted">没有启用中的任务</span>';
+    } else {
+      $('col-hint').textContent = '(' + jobs.length + ' 个任务 · 交易时段限定: '
+        + String(c.trading_hours_only) + ' · 下限 ' + (c.min_interval||0) + 's)';
+      $('col-status').innerHTML = '<span class="pill run">运行中</span>' +
+        ' <span class="muted">' + esc((c.buckets||[]).length) + ' 档频率</span>';
+    }
+
     if(!jobs.length){
-      $('col-rows').innerHTML = '<tr><td colspan="9" class="muted">没有配置采集标的。'
-        + '配置见 ' + esc(c.config||'config/collector.json') + '</td></tr>'; return;
+      $('col-rows').innerHTML = '<tr><td colspan="9" class="muted">没有配置采集标的。' +
+        '在下面新增，或编辑 ' + esc(c.config||'config/collector.json') + '</td></tr>';
+      return;
     }
     $('col-rows').innerHTML = jobs.map(function(j){
       var s = st[j.symbol + ':' + j.period] || {};
@@ -530,8 +726,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       $('mode').textContent = e.mode || '-';
       $('uptime').textContent = ago(e.uptime_sec);
       $('addr').textContent = (m.host||'') + ':' + (m.port||'');
-      $('snap-info').textContent = (m.writes||0) + ' 份';
+      $('snap-info').textContent = (m.writes||0) + ' 份' +
+        (m.snapshot_pending ? ' (待写)' : '');
+      syncSnapMode(m.snapshot_mode);
       renderKpis(o); renderComponents(o); renderTasks(o); renderAudit(o);
+      if(PAGE === 'live') loadLive();
       if(selected){ loadDetail(selected, true); }
     }).catch(function(err){
       $('status').outerHTML = '<span id="status" class="pill err">离线</span>';
@@ -569,6 +768,82 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   document.addEventListener('click', function(ev){
     var b = ev.target.closest('button'); if(!b) return;
+
+    // ---- 页面切换 ----
+    var page = b.getAttribute('data-page');
+    if(page){ switchPage(page); return; }
+
+    // ---- 实盘操作 ----
+    if(b.id === 'btn-reconcile'){
+      post('/api/live/reconcile', {}).then(function(r){
+        if(r && r.ok){
+          toast(r.ok === false ? '对账发现不一致' : '对账一致', r.ok === false);
+        } else toast('对账失败: ' + ((r && r.error) || ''), true);
+        loadLive();
+      }).catch(function(e){ toast('对账失败: ' + e.message, true); });
+      return;
+    }
+    if(b.id === 'btn-cancel-all'){
+      if(!confirm('确认撤销所有未结订单？实盘上这会立即向券商发出撤单请求。')) return;
+      post('/api/live/cancel-all', {}).then(function(r){
+        toast(r && r.ok ? ('已请求撤销 ' + (r.cancelled||0) + ' 笔') : ('失败: ' + ((r&&r.error)||'')), !(r&&r.ok));
+        loadLive();
+      }).catch(function(e){ toast('撤单失败: ' + e.message, true); });
+      return;
+    }
+
+    // ---- 回测 ----
+    if(b.id === 'btn-bt-run'){
+      var strat = $('bt-strategy').value;
+      var body = {
+        symbol: $('bt-symbol').value.trim(),
+        start: $('bt-start').value || (BT_DEFAULTS.start || '2020-01-01'),
+        end: $('bt-end').value || new Date().toISOString().slice(0,10),
+        strategy: strat,
+        cash: Number($('bt-cash').value || BT_DEFAULTS.cash || 100000),
+        params: $('bt-params').value.trim(),
+        data_source: $('bt-source').value,
+        adjust: $('bt-adjust').value,
+      };
+      if(!body.symbol){ $('bt-msg').textContent = '请填写标的代码'; return; }
+      // 声明式策略：把规则 JSON 塞进 params.spec，后端会解析给 DeclarativeStrategy
+      if(strat === 'declarative'){
+        var raw = $('bt-spec').value.trim();
+        if(!raw){ $('bt-spec-msg').textContent = '请填写规则定义，或点「填入示例规则」'; return; }
+        var spec = null;
+        try { spec = JSON.parse(raw); }
+        catch(e){ $('bt-spec-msg').textContent = '规则不是合法 JSON: ' + e.message; return; }
+        $('bt-spec-msg').textContent = '';
+        body.spec = spec;
+      }
+      $('bt-msg').textContent = '提交中…';
+      post('/api/backtest/run', body).then(function(r){
+        if(r && r.ok){
+          $('bt-msg').textContent = '已提交 ' + r.job.job_id + '，正在后台执行…';
+          toast('回测已提交: ' + r.job.job_id);
+          loadBacktest();
+        } else {
+          $('bt-msg').textContent = '失败: ' + ((r && r.error) || '未知错误');
+          toast('回测提交失败', true);
+        }
+      }).catch(function(e){ $('bt-msg').textContent = '失败: ' + e.message; });
+      return;
+    }
+    if(b.id === 'btn-bt-tpl'){
+      $('bt-spec').value = JSON.stringify(SPEC_TEMPLATE, null, 2);
+      $('bt-spec-msg').textContent = '已填入示例：5/20 金叉买（需同时站上均线）、死叉卖';
+      return;
+    }
+    if(b.id === 'btn-refresh-acct'){
+      post('/api/live/refresh', {}).then(function(r){
+        toast(r && r.ok ? '已从券商刷新账户' : ('刷新失败: ' + ((r&&r.error)||'')), !(r&&r.ok));
+        loadLive();
+      }).catch(function(e){ toast('刷新失败: ' + e.message, true); });
+      return;
+    }
+    var btAct = b.getAttribute('data-act');
+    if(btAct === 'bt-detail'){ loadBacktestDetail(b.getAttribute('data-id')); return; }
+
     var act_ = b.getAttribute('data-act');
     if(act_ === 'detail'){ loadDetail(b.getAttribute('data-id')); return; }
     if(act_ === 'pause'){ act('/api/tasks/' + encodeURIComponent(b.getAttribute('data-id')) + '/pause', {}, '暂停任务'); return; }
@@ -675,9 +950,278 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
   });
 
+  // ==================== 实盘账户面板 ====================
+  function renderLive(d){
+    var on = d && d.available;
+    $('live-off').classList.toggle('hidden', !!on);
+    $('live-on').classList.toggle('hidden', !on);
+    if(!on){ $('live-hint').textContent = '(未启用)'; return; }
+
+    var st = d.stats || {}, rc = d.last_reconcile || {};
+    $('live-hint').textContent = '(' + (d.gateway||'-') +
+      (d.endpoint ? ' · 接入点 ' + d.endpoint : '') + ')';
+    var conn = d.connected;
+    var rcOk = rc.ok;
+    var kv = [
+      ['网关', (d.gateway||'-') + (conn ? '' : ' · 已断开'), conn ? 'ok' : 'down'],
+      ['接入点', d.endpoint || '(直接构造)', ''],
+      ['账号', d.account_id || '(未配置)', ''],
+      ['档位', d.readonly ? '只读（只查不下单）' : '可下单',
+        d.readonly ? 'warn' : ''],
+      ['接入任务', (d.tasks||0) + ' 个', ''],
+      ['回报轮询', (d.poll_interval||0) + 's', ''],
+      ['已成交', String(st.fills||0) + ' 笔', ''],
+      ['无法归属回报', String(st.unknown||0) + ' 笔', (st.unknown||0)>0 ? 'warn' : ''],
+      ['对账', rcOk === true ? '一致' : (rcOk === false ? '不一致' : '未对账'),
+        rcOk === true ? 'ok' : (rcOk === false ? 'down' : '')],
+    ];
+    $('live-kv').innerHTML = kv.map(function(r){
+      return '<div class="kv"><span class="k">' + esc(r[0]) + '</span>' +
+             '<span class="v ' + r[2] + '">' + esc(r[1]) + '</span></div>';
+    }).join('');
+
+    // ---- 券商账户（来自券商源）----
+    var acct = d.broker_account || {};
+    $('live-acct-hint').textContent = d.account_error
+      ? ('读取失败: ' + d.account_error)
+      : (d.account_at ? ('更新于 ' + d.account_at.replace('T',' ').slice(11,19) +
+          ' · 每 ' + (d.account_interval||0) + 's 刷新') : '尚未读到');
+    if(!Object.keys(acct).length){
+      $('live-acct').innerHTML = '<div class="kv"><span class="k">账户</span>' +
+        '<span class="v muted">尚无数据，可点「刷新账户」</span></div>';
+    } else {
+      var akv = [
+        ['总资产', money(acct.total_asset), ''],
+        ['可用资金', money(acct.available), ''],
+        ['冻结', money(acct.frozen), (acct.frozen||0)>0 ? 'warn' : ''],
+        ['持仓市值', money(acct.market_value), ''],
+      ];
+      $('live-acct').innerHTML = akv.map(function(r){
+        return '<div class="kv"><span class="k">' + esc(r[0]) + '</span>' +
+               '<span class="v ' + r[2] + '">' + esc(r[1]) + '</span></div>';
+      }).join('');
+    }
+    var poss = d.broker_positions || {};
+    var syms = Object.keys(poss);
+    $('live-pos-hint').textContent = '(' + syms.length + ' 个标的)';
+    if(!syms.length){
+      $('live-pos-rows').innerHTML = '<tr><td colspan="4" class="muted">无持仓</td></tr>';
+    } else {
+      $('live-pos-rows').innerHTML = syms.sort().map(function(s){
+        var p = poss[s] || {};
+        return '<tr><td><b>' + esc(s) + '</b></td>' +
+          '<td class="num">' + (p.size||0) + '</td>' +
+          '<td class="num ' + ((p.sellable||0) < (p.size||0) ? 'warn' : '') + '">' +
+            (p.sellable||0) + '</td>' +
+          '<td class="num">' + money(p.avg_price, 3) + '</td></tr>';
+      }).join('');
+    }
+
+    if(rcOk === false){
+      var parts = [];
+      if((rc.position_diffs||[]).length)
+        parts.push('持仓差异 ' + rc.position_diffs.map(function(x){
+          return x.symbol + ' 本地' + x.local + '/券商' + x.broker; }).join('，'));
+      if(rc.cash_diff) parts.push('资金差异 ' + money(rc.cash_diff.delta));
+      if((rc.open_order_diffs||[]).length) parts.push('挂单差异 ' + (rc.open_order_diffs||[]).length + ' 组');
+      $('live-msg').textContent = parts.join(' | ');
+      $('live-msg').className = 'hint down';
+    } else { $('live-msg').textContent = ''; $('live-msg').className = 'hint'; }
+
+    var po = d.pending_orders || [];
+    $('live-pending-hint').textContent = '(' + (d.pending_count||0) + ')';
+    if(!po.length){
+      $('live-pending-rows').innerHTML = '<tr><td colspan="9" class="muted">无未结订单</td></tr>';
+      return;
+    }
+    $('live-pending-rows').innerHTML = po.map(function(o){
+      return '<tr><td>' + esc((o.created_at||'').replace('T',' ').slice(11,19)) + '</td>' +
+        '<td>' + esc(o.task_id) + '</td><td>' + esc(o.symbol) + '</td>' +
+        '<td class="' + (o.side==='BUY'?'up':'down') + '">' + esc(o.side) + '</td>' +
+        '<td class="num">' + (o.size||0) + '</td>' +
+        '<td class="num">' + (o.filled_size||0) + '</td>' +
+        '<td>' + orderPill(o.status) + '</td>' +
+        '<td class="num">' + money(o.price) + '</td>' +
+        '<td class="muted">' + esc((o.reject_reason||o.reason||'').slice(0,30)) + '</td></tr>';
+    }).join('');
+  }
+
+  function orderPill(s){
+    var m = {FILLED:'run', SUBMITTED:'info', PARTIAL:'warn', PENDING:'info',
+             CANCELLED:'off', REJECTED:'err'};
+    return '<span class="pill ' + (m[s]||'off') + '">' + esc(s||'-') + '</span>';
+  }
+
+  function loadLive(){
+    api('/api/live').then(renderLive).catch(function(e){
+      $('live-hint').textContent = '(加载失败: ' + e.message + ')';
+    });
+  }
+
+  // ==================== 回测页面 ====================
+  function loadStrategies(){
+    // 从后端能力清单取，不硬编码 —— 否则新增策略后下拉框里看不到，
+    // 用户手填又会遇到"未注册的策略"。
+    api('/api/strategies').then(function(d){
+      CAPS = d || {};
+      var sel = $('bt-strategy');
+      var names = d.backtest_strategies || [], userSet = {};
+      (d.user_strategies || []).forEach(function(n){ userSet[n] = 1; });
+      if(names.length){
+        var keep = sel.value;
+        sel.innerHTML = '';
+        names.forEach(function(n){
+          var o = document.createElement('option');
+          o.value = n;
+          // 标注来源：用户自己写的策略和框架自带的，排错时得能一眼分清
+          o.textContent = n + (userSet[n] ? '  [自定义]' : '');
+          sel.appendChild(o);
+        });
+        if(keep && names.indexOf(keep) >= 0) sel.value = keep;
+      }
+      applyBtDefaults(d.backtest_defaults || {});
+      toggleSpecBox();
+      $('bt-params').placeholder = '如 fast=5 slow=20';
+    }).catch(function(){});
+  }
+
+  // 表单里没填的字段用 config/backtest.json 的默认值。
+  // 这样"面板跑的"和"命令行跑的"用的是同一份参数，结果可比。
+  function applyBtDefaults(dd){
+    BT_DEFAULTS = dd || {};
+    if(!$('bt-symbol').value) $('bt-symbol').value = BT_DEFAULTS.symbol || '000001';
+    if(!$('bt-start').value) $('bt-start').value = BT_DEFAULTS.start || '2020-01-01';
+    if(!$('bt-cash').value) $('bt-cash').value = BT_DEFAULTS.cash || 100000;
+    if(BT_DEFAULTS.data_source) $('bt-source').value = BT_DEFAULTS.data_source;
+    if(BT_DEFAULTS.adjust) $('bt-adjust').value = BT_DEFAULTS.adjust;
+    var sp = BT_DEFAULTS.strategy_params || {};
+    var keys = Object.keys(sp);
+    if(keys.length && !$('bt-params').value)
+      $('bt-params').value = keys.map(function(k){ return k + '=' + sp[k]; }).join(' ');
+    if(!BT_DEFAULTS.source) return;
+    $('bt-defaults-hint').innerHTML =
+      '默认参数来自 <code>' + esc(BT_DEFAULTS.source) + '</code>' +
+      '：资金 ' + money(BT_DEFAULTS.cash, 0) + ' · 手续费 ' + BT_DEFAULTS.commission +
+      ' · 滑点 ' + BT_DEFAULTS.slippage + ' · 默认策略 ' + esc(BT_DEFAULTS.strategy) +
+      '。表单里填了就以填的为准（改 <code>config/backtest.json</code> 可换默认值）。';
+  }
+
+  // 只有声明式策略需要"规则定义"输入框
+  function toggleSpecBox(){
+    var isSpec = $('bt-strategy').value === 'declarative';
+    $('bt-spec-wrap').classList.toggle('hidden', !isSpec);
+  }
+
+  var SPEC_TEMPLATE = {
+    entry: { all: [
+      { cross_up: { left: 'ma', right: 'ma',
+                    left_params: { period: 5 }, right_params: { period: 20 } } },
+      { factor: 'ma_spread', op: 'gt', value: 0,
+        params: { fast: 5, slow: 20 } }
+    ]},
+    exit: { cross_down: { left: 'ma', right: 'ma',
+                          left_params: { period: 5 }, right_params: { period: 20 } } }
+  };
+
+  function renderBacktest(d){
+    var jobs = d.jobs || [], results = d.results || [];
+    $('bt-job-hint').textContent = '(' + jobs.length + ' 个作业 · 并发上限 '
+      + ((d.stats||{}).max_concurrent || '-') + ')';
+    if(!jobs.length){
+      $('bt-job-rows').innerHTML = '<tr><td colspan="7" class="muted">暂无</td></tr>';
+    } else {
+      $('bt-job-rows').innerHTML = jobs.map(function(j){
+        var p = j.params || {};
+        var pill = {QUEUED:'info', RUNNING:'warn', DONE:'run', FAILED:'err'}[j.status] || 'off';
+        return '<tr><td><b>' + esc(j.job_id) + '</b></td>' +
+          '<td><span class="pill ' + pill + '">' + esc(j.status) + '</span></td>' +
+          '<td>' + esc(p.symbol) + '</td><td>' + esc(p.strategy) + '</td>' +
+          '<td class="muted">' + esc(p.start) + '~' + esc(p.end) + '</td>' +
+          '<td class="num">' + (j.elapsed != null ? j.elapsed.toFixed(1) + 's' : '-') + '</td>' +
+          '<td class="down">' + esc((j.error||'').slice(0,40)) + '</td></tr>';
+      }).join('');
+    }
+
+    $('bt-hint').textContent = '(' + results.length + ' 条)';
+    if(!results.length){
+      $('bt-rows').innerHTML = '<tr><td colspan="10" class="muted">暂无回测记录</td></tr>';
+      return;
+    }
+    $('bt-rows').innerHTML = results.map(function(r){
+      return '<tr>' +
+        '<td class="muted">' + esc(String(r.created_at||'').replace('T',' ').slice(0,19)) + '</td>' +
+        '<td><b>' + esc(r.symbol) + '</b></td>' +
+        '<td>' + esc(r.strategy) + '</td>' +
+        '<td class="muted">' + esc(r.start_date) + '~' + esc(r.end_date) + '</td>' +
+        '<td class="num ' + cls(r.total_return) + '">' + sgn((r.total_return||0)*100,2) + '%</td>' +
+        '<td class="num down">' + ((r.max_drawdown||0)*100).toFixed(2) + '%</td>' +
+        '<td class="num">' + (r.sharpe||0).toFixed(2) + '</td>' +
+        '<td class="num">' + (r.trade_count||0) + '</td>' +
+        '<td class="num">' + ((r.win_rate||0)*100).toFixed(1) + '%</td>' +
+        '<td><button class="mini" data-act="bt-detail" data-id="' + r.id + '">详情</button></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function loadBacktest(){
+    api('/api/backtest?limit=30').then(renderBacktest).catch(function(e){
+      $('bt-hint').textContent = '(加载失败: ' + e.message + ')';
+    });
+  }
+
+  function loadBacktestDetail(id){
+    api('/api/backtest/' + id).then(function(d){
+      if(!d || d.error){ toast(d && d.error || '加载失败', true); return; }
+      btSelected = id;
+      $('bt-detail').classList.remove('hidden');
+      $('bt-d-title').textContent = d.symbol + ' · ' + d.strategy;
+      $('bt-d-hint').textContent = d.start_date + '~' + d.end_date;
+      var kv = [
+        ['作业', d.task_id], ['初始资金', money(d.initial_cash)],
+        ['期末权益', money(d.final_equity)],
+        ['总收益', sgn((d.total_return||0)*100,2) + '%'],
+        ['最大回撤', ((d.max_drawdown||0)*100).toFixed(2) + '%'],
+        ['夏普', (d.sharpe||0).toFixed(3)],
+        ['成交笔数', d.trade_count], ['胜率', ((d.win_rate||0)*100).toFixed(1) + '%'],
+      ];
+      $('bt-d-kv').innerHTML = kv.map(function(r){
+        return '<div class="kv"><span class="k">' + esc(r[0]) + '</span>' +
+               '<span class="v">' + esc(r[1]) + '</span></div>';
+      }).join('');
+      var m = d.metrics || {};
+      $('bt-d-metrics').textContent = JSON.stringify(m, null, 2);
+      var pts = (d.equity_curve || []).map(function(p){ return [p[0], p[1]]; });
+      requestAnimationFrame(function(){ drawChart($('bt-d-chart'), pts); });
+      $('bt-detail').scrollIntoView({behavior:'smooth', block:'start'});
+    }).catch(function(e){ toast('加载回测详情失败: ' + e.message, true); });
+  }
+
+  function switchPage(page){
+    PAGE = page;
+    $('page-live').classList.toggle('hidden', page !== 'live');
+    $('page-backtest').classList.toggle('hidden', page !== 'backtest');
+    Array.prototype.forEach.call($('tabs').children, function(b){
+      b.classList.toggle('on', b.getAttribute('data-page') === page);
+    });
+    if(btTimer){ clearInterval(btTimer); btTimer = null; }
+    if(page === 'backtest'){
+      loadBacktest();
+      // 回测页 3 秒刷一次足够：作业是分钟级的
+      btTimer = setInterval(loadBacktest, 3000);
+    }
+  }
+
   // 表格里的频率输入框回车/失焦即生效——改频率不该还要点第二个按钮
   document.addEventListener('change', function(ev){
     var el = ev.target;
+    if(el.id === 'snap-mode'){
+      post('/api/snapshot/mode', {mode: el.value}).then(function(r){
+        if(r && r.ok){ toast('快照策略已切换: ' + el.value); refresh(); }
+        else { toast('切换失败: ' + ((r&&r.error)||''), true); SNAP_MODE_READY = false; }
+      }).catch(function(e){ toast('切换失败: ' + e.message, true); SNAP_MODE_READY = false; });
+      return;
+    }
+    if(el.id === 'bt-strategy'){ toggleSpecBox(); return; }
     if(!el.classList || !el.classList.contains('ci')) return;
     var sym = el.getAttribute('data-sym'), per = el.getAttribute('data-per');
     var val = el.value.trim();
@@ -695,7 +1239,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       .then(function(d){ drawChart($('d-chart'), d.equity_curve||[]); }).catch(function(){}); }
   });
 
-  refresh(); loadLogs(); loadCollector();
+  refresh(); loadLogs(); loadCollector(); loadLive(); loadStrategies();
+  $('bt-end').value = new Date().toISOString().slice(0,10);
   timer = setInterval(refresh, REFRESH);
   setInterval(loadLogs, 5000);
   setInterval(loadCollector, 5000);

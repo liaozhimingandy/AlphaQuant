@@ -60,6 +60,7 @@ class DataCollectorComponent(IBaseComponent):
         min_interval: Optional[float] = None,
         config_path: Optional[str] = None,
         enabled: Optional[bool] = None,
+        disabled_reason: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -72,6 +73,9 @@ class DataCollectorComponent(IBaseComponent):
         self._min_interval = min_interval
         self._config_path = config_path
         self._enabled = enabled
+        #: 被停用时的原因。装配但未启用时面板要能说清"为什么没在跑"，
+        #: 否则用户只会看到一个莫名其妙的"未启用"而不知道该改哪里。
+        self.disabled_reason = str(disabled_reason or "")
 
         # 构造时就把配置解析出来，而不是等到 on_initialize。
         # 理由：装配器要在启动前打印"采集服务=N 个任务"，CLI/面板也可能在
@@ -160,7 +164,11 @@ class DataCollectorComponent(IBaseComponent):
 
     def on_start(self) -> defer.Deferred:
         if not self.spec.enabled or not self.spec.jobs:
-            logger.info("行情采集服务未启用或无任务，跳过启动")
+            logger.info(
+                "行情采集服务未启用或无任务"
+                + (f" | 原因: {self.disabled_reason}" if self.disabled_reason else "")
+                + "（组件仍已装配，可在面板手动补采）"
+            )
             return defer.succeed(None)
         for interval in sorted({j.interval for j in self.spec.jobs}):
             self._start_bucket(interval)
@@ -457,6 +465,9 @@ class DataCollectorComponent(IBaseComponent):
     def snapshot(self) -> Dict[str, Any]:
         return {
             "enabled": self.spec.enabled,
+            "assembled": True,
+            "disabled_reason": self.disabled_reason,
+            "running": bool(self._loops),
             "jobs": [j.to_dict() for j in self.spec.jobs],
             "state": {k: dict(v) for k, v in self._job_state.items()},
             "stats": dict(self.stats),

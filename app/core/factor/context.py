@@ -13,7 +13,11 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from app.core.indicator.registry import create_indicator, has_indicator
+from app.core.indicator.registry import (
+    has_indicator,
+    indicator_series,
+    indicator_value,
+)
 from app.core.market.series import BarSeries
 from app.core.market.types import Bar
 
@@ -70,31 +74,29 @@ class FactorContext:
         return f"{name}({inner})"
 
     def ind(self, name: str, idx: int = 0, **params: Any) -> Optional[float]:
-        """取指标值。idx=0 为最新一根，idx=1 为上一根。"""
+        """取指标值。idx=0 为最新一根，idx=1 为上一根。
+
+        **周期是参数不是指标**：要 MA20 就 `ctx.ind("sma", period=20)`，
+        不需要存在一个叫 "sma20" 的指标。不同参数走不同的缓存槽，
+        互不干扰。
+        """
         if not has_indicator(name):
             return None
         key = f"{self._key(name, params)}@{idx}"
         if key not in self._ind_cache:
-            try:
-                indicator = create_indicator(name, **params)
-                self._ind_cache[key] = indicator.value(self.series, idx=idx)
-            except Exception:
-                # 因子层不该因为一个指标算不出来就让整个任务崩掉
-                self._ind_cache[key] = None
+            # 走注册表的共享缓存：同一根K线上多个因子要同一个指标只算一次。
+            # 以前这里是 create_indicator(...).value(...)，
+            # 每次调用都会把整条序列重算一遍 —— 一根K线上要 MA5/MA20 就是两遍。
+            self._ind_cache[key] = indicator_value(self.series, name, idx=idx, **params)
         return self._ind_cache[key]
 
     def ind_series(self, name: str, **params: Any) -> Optional[np.ndarray]:
-        """取整条指标序列（少数因子需要，例如斜率）"""
+        """取整条指标序列（少数因子需要，例如斜率）。同样走共享缓存。"""
         if not has_indicator(name):
             return None
         key = self._key(name, params)
         if key not in self._arr_cache:
-            try:
-                self._arr_cache[key] = create_indicator(name, **params).compute(
-                    self.series
-                )
-            except Exception:
-                self._arr_cache[key] = None
+            self._arr_cache[key] = indicator_series(self.series, name, **params)
         return self._arr_cache[key]
 
     # ---------------- 历史回看 ----------------

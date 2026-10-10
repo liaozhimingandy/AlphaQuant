@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--collect-symbol", action="append", default=[],
                    help="额外纳入采集的标的，可重复")
     p.add_argument("--collector-config", default="", help="采集编排配置文件")
+    p.add_argument("--broker-gateway", default="", help="实盘券商网关名（LIVE 模式用）")
+    p.add_argument("--broker-endpoint", default="", help="券商接入点 id（见 config/brokers.json）")
     p.add_argument("--pid-file", default="", help="PID 文件路径")
     p.add_argument("--stop-file", default="", help="停止标志文件路径")
     p.add_argument("--no-pid", action="store_true", help="不写 PID 文件（前台调试用）")
@@ -144,6 +146,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             collector_period=args.collect_period or None,
             collector_symbols=list(args.collect_symbol) or None,
             collector_config=args.collector_config or None,
+            broker_gateway=args.broker_gateway or "",
+            broker_endpoint=args.broker_endpoint or "",
         )
         if args.snapshot_dir:
             mon = engine.get_component("monitor")

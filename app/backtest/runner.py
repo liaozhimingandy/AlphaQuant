@@ -123,6 +123,10 @@ class BacktestRunner:
         if declared is not None:
             if hasattr(declared, "printlog"):
                 kwargs.setdefault("printlog", self.config.print_log)
+            if hasattr(declared, "symbol"):
+                # 策略需要知道自己在跑哪个标的（声明式策略要拿它建 BarSeries）。
+                # 由运行器统一注入，用户不必在 --param 里再写一遍 symbol。
+                kwargs.setdefault("symbol", self.config.symbol)
 
             # 过滤策略未声明的参数，否则 backtrader 只抛一句
             # "__init__() got an unexpected keyword argument"，排错成本很高

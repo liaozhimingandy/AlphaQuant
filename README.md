@@ -1,7 +1,14 @@
 # AlphaQuant
 
-A 股量化交易工具：行情采集 → 数据入库 → 策略回测 → **多任务事件驱动交易引擎** →
-**后台常驻 + 网页监控面板 + 多服务协作 + 常驻行情采集**。
+A 股量化交易工具：行情采集 → **数据清洗** → 数据库 / SQLite → 指标因子 → 策略 →
+**风控前置检查** → 订单执行 → 成交回报 → 持仓资金更新 → 回到采集，**完整闭环**。
+
+支持**回测 / 模拟盘 / 实盘**三种运行模式、**一个引擎跑 N 个隔离任务**、
+**后台常驻 + 网页监控面板（实盘页 + 回测页）+ 多进程协作 + 常驻行情采集**。
+
+> 📖 **想深入理解运行原理（架构、数据流向、为什么这么设计）请看
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。**
+> 本文只讲"怎么用"，那份讲"为什么"。
 
 ## 快速开始
 
@@ -54,14 +61,35 @@ python main.py hub status --tasks              # hub + 各服务状态 + 所有�
 ## 网页监控面板
 
 引擎自带一个**零依赖的网页面板**（Twisted Web 挂在引擎自己的 reactor 上），
-浏览器打开 `http://127.0.0.1:8787/` 即可：
+浏览器打开 `http://127.0.0.1:8787/` 即可。面板分成**两个页面**：
 
-- **概览**：run_id / 状态 / 模式 / 已运行时间 / 组件健康
+### 实盘监控页
+
+- **概览**：run_id / 状态 / 模式 / 已运行时间 / 组件健康 / **快照策略与落盘次数**
+- **实盘账户**：接入点、账号、档位（只读/可下单）、网关连接状态、回报轮询统计、
+  **券商源读到的资金与持仓**（总资产/可用/冻结/市值 + 每个标的的可卖数量）、
+  **对账结论**（持仓/资金差异）、**未结订单表**，
+  一键「立即对账」/「刷新账户」/「撤销全部未结订单」（LIVE 模式才有）
 - **任务表**：每个任务的权益、盈亏、持仓、状态，可直接 暂停 / 恢复 / 删除 / 看详情
 - **加任务**：页面上贴一段 JSON 就能新增任务，立刻纳入行情订阅并开始工作
+- **行情采集**：装配状态、每个标的跑了多少次/入库多少条、频率就地改、立即补采
 - **权益曲线**：canvas 手绘（红涨绿跌，跟随系统深浅色）
 - **订单与审计**：成交/被拒订单流水，以及谁在什么时候下过什么控制指令
 - **日志尾部**：不登服务器也能看日志
+
+顶栏有**快照策略下拉框**（有操作才存 / 内容变了才存 / 定时存 / 关闭），
+改完立即生效。注意：顶栏的 1s/2s/5s 控制的是**本页刷新频率**，与快照落盘无关。
+
+### 回测监控页
+
+- **新建回测**：填标的/区间/策略/资金/参数 → 提交到**后台线程**执行（不阻塞实盘）。
+  表单默认值来自 `config/backtest.json`，下面会写明"默认值来自哪、是多少"
+- **自定义策略**：下拉框自动包含 `strategies/` 里发现的策略（标 `[自定义]`）
+- **声明式规则**：策略选 `declarative` 时会出现「规则定义(JSON)」输入框，
+  点「填入示例规则」就有一份能跑的，不用写 Python
+- **作业列表**：每个回测作业的状态、耗时、失败原因
+- **历史结果**：从 SQLite 读，重启不丢。收益/回撤/夏普/成交/胜率一览
+- **回测详情**：权益曲线 + 完整指标 JSON
 
 面板读的是**引擎内存里的真状态**（不是二手副本），控制指令直接进 `ControlCenter`，
 与 CLI / hub 共用同一套语义，行为不会漂移。端口被占用时面板会降级为不可用，
@@ -76,9 +104,77 @@ python main.py serve --port 9000         # 换端口
 python main.py serve --monitor-host 0.0.0.0   # 允许远程访问（注意安全）
 ```
 
+## 数据清洗：脏数据不会流到策略里
+
+数据源给你的东西**不等于**能喂给策略的东西。`app/core/market/clean.py` 负责中间这道工序：
+
+| 检查 | 为什么必须有 |
+|---|---|
+| 时间升序 | 倒序数据会让所有"前一根"语义失效 |
+| 同时间戳去重 | 重试导致重复行；分钟线还会让成交量累计翻倍 |
+| 剔除无价格行 | 没有价格就没有一切（**唯一必须丢的**） |
+| OHLC 自相矛盾 | `high < close` 这类数据不会报错，只会让策略在错价格上决策 |
+| 停牌 / 涨跌停标记 | 实盘上这些状态根本买不进卖不出，标记出来让策略跳过 |
+| 异常跳变标记 | 但**不丢弃** —— "波动大"和"数据错"是两件事 |
+
+**默认只标记不丢弃**：丢弃不可逆，而且分不清"真异常"和"你没想到的合法情况"
+（新股首日涨幅本来就大）。带标记的 bar 上 `is_tradable()` 返回 False，策略可以据此跳过。
+
+清洗结果是一份 `CleanReport`（保留了多少、去重多少、各类标记几个），会记进日志与事件表。
+
+## 交易数据落 SQLite
+
+订单、成交、权益曲线、重要事件全部落库，可长期保留、可按条件查、可聚合：
+
+```bash
+python main.py ctl db orders --status REJECTED     # 所有被拒订单 + 状态聚合
+python main.py ctl db trades --task-id ma-000001   # 某任务的成交明细
+python main.py ctl db equity ma-000001             # 权益曲线采样点
+python main.py ctl db events --category risk       # 风控类事件
+python main.py ctl db backtests                    # 历史回测结果
+```
+
+**为什么不继续用 JSON**：「今天这个任务成交了几笔」「所有被风控否决的订单里哪种规则最多」
+—— 这些答案天然是"按条件查一批行 / 做聚合"，文件方案一旦要过滤和 join 就崩了。
+
+写入走**后台线程批量提交**：交易主链路绝不等 SQLite 的 fsync。
+
+连接层开了 **WAL 模式 + 30s busy timeout**。这不是可选项：
+本项目同时有"后台线程批量落库"和"面板/CLI 随时查询"两种访问，
+默认的 rollback-journal 会让读把写挡回去，而默认 5 秒的等待时间
+在磁盘慢的机器上根本不够 —— 表现就是 `database is locked`，
+看起来像代码 bug，其实只是等得太短。
+
 ## 运行快照：事后复盘靠它
 
-引擎按固定间隔把**完整运行状态**落盘，事故之后不用猜当时发生了什么：
+**先说一个容易搞混的点：面板每 2 秒刷新 ≠ 每 2 秒落一份快照。**
+刷新读的是引擎内存里的实时状态，不写磁盘。快照是另一件事，默认
+**只在"有操作"时才写**：
+
+| 模式 | 什么时候写 | 什么时候用 |
+| --- | --- | --- |
+| `on_event`（默认） | **有操作才写**：下单/成交/撤单/拒单、任务增删改暂停恢复、组件启停、控制指令、引擎启停 | 日常。没操作 = 状态没变 = 写出来也是同一份 |
+| `on_change` | 定期检查内容指纹，真变了才写 | 状态会自己漂移、又想留时间轴时 |
+| `interval` | 到点就写，不管有没有变化 | 回放复盘要完整时间轴 |
+| `off` | 不写历史快照 | 只要面板实时看 |
+
+```bash
+python main.py serve --snapshot-mode on_event    # 默认
+python main.py ctl snapshot-mode                 # 看当前策略与落盘统计
+python main.py ctl snapshot-mode interval        # 运行中切换，不用重启
+python main.py serve --no-snapshot               # 完全不要历史快照
+```
+
+**行情自己跳动、权益随行情浮动不算"操作"** —— 那是同一份状态。
+所以一个安静运行的服务不会往磁盘里堆一堆内容相同的快照。
+一次回放可能瞬间产生上百笔订单，这些操作会被合并成一份
+（`--snapshot-min-gap`，默认 2s；`on_event` 另有一个 1s 抖动窗口）。
+
+指纹计算时剔除时间戳/序号/内存这类易变字段，只比**状态本体**
+（权益/持仓/订单/组件状态）。不剔除的话"变了才写"永远成立，等于没做。
+
+一个真实的对照：冒烟里 15 次操作只落了 3 份快照。按时间写的话，
+同样的过程会在 30 秒里产生 15 份、其中大部分内容完全一样。
 
 ```
 output/snapshots/<run_id>/
@@ -89,7 +185,7 @@ output/snapshots/<run_id>/
 ```
 
 每份快照含：引擎状态、所有组件状态与健康度、每个任务的权益曲线 / 成交 / 订单 / 新闻 /
-风控规则 / 错误，以及监控自身的统计。
+风控规则 / 错误，以及监控自身的统计（含**本次是为什么写的**：`snapshot_reason`）。
 
 ```bash
 python main.py snapshot                  # 最近一次运行
@@ -100,6 +196,182 @@ python main.py snapshot --export out.json
 ```
 
 采集在 reactor 线程（保证不读到半截状态），落盘丢给线程池（不阻塞交易）。
+
+## 实盘：从"下单"到"确认成交"
+
+回测与实盘的分水岭只有一条：**回测里 submit 即成交，实盘里 submit 只是报单**。
+成交在之后的某个时刻以**回报**形式到达。这个差别会连锁影响所有下游，
+所以实盘用一套独立的撮合实现（`LiveBroker`），把生命周期管住：
+
+```
+submit() ──► 本地前置校验 ──► gateway.place_order() ──► SUBMITTED
+                │ 价格笼子                             （未结，可撤）
+                │ 单笔金额上限                              │
+                ▼                                          ▼
+            REJECTED                          poll_fills() → on_fill()
+                                                           │
+                                          ┌────────────────┴────────────────┐
+                                          ▼                                 ▼
+                                   幂等去重                          卖出不超持仓
+                                          │                                 │
+                                          └────────► Portfolio.apply_fill ◄─┘
+                                                            │
+                                                     持仓/资金更新
+```
+
+配套能力：
+
+- **券商网关抽象**：`IBrokerGateway` 只做三件事——下单撤单、查询、拉回报。
+  换券商 = 写一个网关类（7 个方法），撮合与策略代码一行不动。
+  内置 `simulated` 网关，**没接券商也能把整条实盘链路跑通**。
+- **账户级对账**：一个券商账户对应 N 个策略。把本地所有任务的持仓/资金汇总后
+  和券商比一次（逐任务对账在账户里必然对不上，全是噪音）。
+  `LIVE_STRICT_RECONCILE=true` 时对账不一致直接阻断交易。
+- **A 股实盘前置风控**：`t_plus_one`（当日买入不可卖）、`price_limit`（涨停不追买、
+  跌停不追杀）、`order_value_limit`、`daily_trade_limit`、`sellable_position`。
+  这些在回测里无所谓，一上实盘就致命。
+- **防堆单**：已有未结订单时不再下单。没有这道保护，策略会每根K线发一单，
+  13 根K线就是 13 笔委托。
+- **退出前先撤单**：不撤的话进程没了、单还在，第二天开盘才发现成交了。
+
+先不接券商，用内置网关把链路跑通：
+
+```bash
+python main.py serve --mode LIVE --market-mode poll \
+    --broker-endpoint sim --collect-interval 1m
+
+python main.py ctl live status        # 网关状态 + 回报统计 + 对账结论
+python main.py ctl live account       # 券商账户：资金 / 可用 / 持仓 / 可卖
+python main.py ctl live account --refresh   # 立刻去券商拉一次
+python main.py ctl live reconcile     # 立即对账
+python main.py ctl live cancel-all    # 撤销全部未结订单
+```
+
+面板的「实盘监控」页直接显示券商账户与持仓（**来自券商源**，不是本地账本的推算），
+还有一眼能确认"现在连的是哪个账号"的接入点与档位。
+
+上线清单与排查路径见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 第七节。
+
+## 券商接入点：接哪家、用哪个账号都是配置
+
+`BROKER_GATEWAY=simulated` 只回答了"用哪种网关实现"，没回答"连谁"。
+真实场景里会有模拟托盘、实盘主账户、实盘小号、另一家券商的备份通道 ——
+它们是**同一个网关类型、不同接入点**。写死在代码或环境变量里，切换成本高，
+而且容易连错账户（实盘里代价最高的错误之一）。
+
+`config/brokers.json`：
+
+```json
+{
+  "default_endpoint": "sim",
+  "endpoints": {
+    "sim": {
+      "name": "本地模拟托盘",
+      "gateway": "simulated",
+      "account": "SIMULATED",
+      "params": { "initial_cash": 100000 }
+    },
+    "real": {
+      "name": "实盘主账户",
+      "gateway": "你的网关名",
+      "account": "你的资金账号",
+      "readonly": true,
+      "credential_env": { "password": "AQ_BROKER_PASSWORD" },
+      "params": { "host": "127.0.0.1", "port": 0 }
+    }
+  }
+}
+```
+
+**凭据不写在配置里**，只写"从哪个环境变量取"（`credential_env`）——
+这样本文件可以安全入库，面板/CLI 里显示的也是打码后的值。
+
+`readonly: true` 是首次接入的推荐档位：能查账户/持仓/收回报，但**不下单**。
+先用它跑一两天确认账本与券商一致，再改成 `false` 放行交易。
+
+```bash
+python main.py brokers list                  # 列出接入点（凭据已脱敏）
+python main.py brokers check                 # 试连接默认接入点（只查询，不下单）
+python main.py brokers check real            # 试连接指定接入点
+python main.py brokers gateways              # 看每种网关能配哪些参数
+
+python main.py serve --mode LIVE --broker-endpoint real
+python main.py ctl endpoints list            # 运行中的服务也能看
+python main.py ctl endpoints check real
+```
+
+配置里的额外字段会被**按网关签名过滤**，不会因为"多配了一个字段"就报 TypeError
+（那是接新券商时最容易踩的坑）。显式指定的接入点找不到会**直接报错**，
+不会静默降级到别的账户 —— 静默降级是实盘里最危险的行为。
+
+## 自定义策略：写代码或只写配置，都能回测
+
+`strategies/` 目录下的 `.py` 会被**自动发现**，不需要注册、不需要改框架代码：
+
+```bash
+python main.py strategies                 # 列出全部（自定义的会标出来）
+python main.py strategies --reload        # 改完代码重新扫描
+python main.py strategy new my_idea       # 生成一个模板（回测版 + 实盘版）
+python main.py strategy dir              # 打印用户策略目录
+python main.py ctl strategies --reload    # 运行中的服务热重载
+```
+
+一个文件里可以同时写**回测策略**（继承 `backtrader.Strategy`）和
+**实盘策略**（继承 `IBaseStrategy`）——同一个想法用同一套参数，
+而不是"回测里用 5/20，实盘里手滑写成 5/30"。示例见 `strategies/dual_ma.py`。
+
+**不想写代码？** 用内置的声明式策略 `declarative`，把规则写成 JSON：
+
+```bash
+python main.py backtest -s 000001 --strategy declarative \
+  --param entry='{"cross_up":{"left":"ma","right":"ma","left_params":{"period":5},"right_params":{"period":20}}}' \
+  --param exit='{"cross_down":{"left":"ma","right":"ma","left_params":{"period":5},"right_params":{"period":20}}}'
+```
+
+面板的「回测监控」页选中 `declarative` 后会多出一个「规则定义(JSON)」输入框，
+点「填入示例规则」就有一份能跑的。用的是**和实盘同一套因子/规则**，
+所以回测口径不会和实盘漂移。
+
+一个写坏的策略文件**只会被跳过并记日志**，不会让程序起不来。
+
+## 回测参数：初始资金/手续费/滑点都是配置
+
+`config/backtest.json` 是回测默认值的唯一来源，CLI、网页面板、回测作业 API
+三处入口都读它 —— 否则"命令行跑的"和"面板跑的"结果不一样，还很难查。
+
+```json
+{
+  "symbol": "000001", "strategy": "ma_cross",
+  "start": "2020-01-01", "end": "",
+  "cash": 100000, "commission": 0.0003, "slippage": 0.001,
+  "adjust": "qfq", "data_source": "auto",
+  "risk_free_rate": 0.0, "trading_days_per_year": 252
+}
+```
+
+优先级：**命令行/面板显式传入 > 该配置文件 > 内置兜底值**。`end` 留空表示"到今天"。
+
+```bash
+python main.py backtest --show-defaults   # 看当前生效的默认参数
+python main.py backtest -s 000001         # 连 symbol 都可以不写
+```
+
+## 日志策略：默认只记重要的
+
+```bash
+python main.py serve                          # INFO：生命周期/成交/风控否决/异常
+LOG_LEVEL=DEBUG python main.py serve          # 调试：逐根K线决策、缓存命中全记
+LOG_FILE_LEVEL=WARNING python main.py serve   # 控制台看 DEBUG，文件只留 WARNING
+```
+
+| 级别 | 记什么 | 什么时候用 |
+|---|---|---|
+| INFO（默认） | 生命周期、成交、风控否决、采集结果、异常 | 生产常驻 |
+| DEBUG | 逐根K线决策、指标缓存命中、中间值 | 只在排查问题时开 |
+
+两条防膨胀措施：文件级别可单独设得更严（`LOG_FILE_LEVEL`）；
+同一位置的重复日志按时间窗**节流**，窗口结束时补一条"被压缩了多少次"——
+信息不丢，只是不重复。长跑服务里"每根K线告警一次"会让日志完全失去可读性。
 
 ## 多个服务互相配合
 
@@ -235,13 +507,6 @@ python main.py ctl collector reload              # 改了 json 后热加载
 既不等到周五（`ffill` 口径会整周滞后），也不会偷看周五的收盘（`bfill` 口径是未来函数，
 回测用它赚到的钱实盘一分都拿不到）。交叉因此在周内就能被捕捉到。
 
-两个自检脚本可以复算这一点：
-
-```bash
-python scripts/weekly_ma_check.py        # 周均线 vs pandas 逐点对齐（偏差 1e-14）
-python scripts/weekly_factor_check.py    # 金叉/死叉/趋势 vs 因果参照实现，位置完全吻合
-```
-
 ## 后台服务：一个引擎，多个任务
 
 任务全部声明在 `config/tasks.json`，改配置即可增删策略，**不需要改代码**：
@@ -275,7 +540,8 @@ python main.py ctl component disable news_center
 运行时新增的任务会落到 `output/runtime/<namespace>/tasks.json`，下次启动自动重放；
 新增任务的标的会自动纳入行情订阅（否则它永远等不到 K 线）。
 
-完整架构说明见 [`app/core/readme.md`](app/core/readme.md)。
+完整架构说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（推荐的深入阅读入口）
+与 [`app/core/readme.md`](app/core/readme.md)（核心层设计取舍）。
 
 ## 回测数据来源
 
@@ -302,29 +568,36 @@ app/
   db/               SQLAlchemy 模型与会话
   core/
     config.py       全局配置（路径/数据库/日志/行情/新闻/大模型/监控，支持环境变量覆盖）
-    market/         领域模型 Bar/Tick/Signal/Order/Position/Account/News + BarSeries
-    indicator/      指标层（可插拔注册表，含周均线 wma）
+    market/         领域模型 Bar/Tick/Signal/Order/Position/Account/News + BarSeries + clean（数据清洗）
+    indicator/      指标层（可插拔注册表、参数化、共享缓存，含周均线 wma）
     factor/         因子层（含 wma_cross_up / wma_trend_up 等周线因子）
     rule/           规则层（All/Any/Not 组合器 + 声明式构造）
     strategy/       策略层（双通道：行情 + 事件）
-    risk/           风控层（闸门链）
+    risk/           风控层（闸门链 + A股实盘特有规则 T+1/涨跌停/限额）
     portfolio/      组合层（账本 + 仓位计算）
-    execution/      执行层（模拟撮合）
+    execution/      执行层：broker（模拟撮合）/ gateway（券商网关）/ live_broker（实盘撮合）
     task/           QuantTask + TaskRuntime（多任务隔离）
     collect/        采集编排：频率解析 / 交易时段 / 任务定义（不依赖 Twisted）
     news/           新闻层（RSS 采集 → 去重 → 关键词/大模型分析）
-    monitor/        监控面板 + 运行快照：dashboard / web / snapshot
+    monitor/        可观测层：dashboard / web / snapshot / backtest_api（回测作业）
     bus/            跨进程文件消息总线 + 发布/订阅组件
     hub/            多服务编排：supervisor / worker / panel / spec
     engine/         Twisted 引擎 + 业务组件 + 装配器 + 守护进程 + 控制中心
+      components/   data_collector / market_center / live_gateway /
+                    strategy_manager / trading_store / news_center
   strategy/         backtrader 策略（单次回测链路）
-  utils/            jsonio（原子写 JSON）/ logger
+  utils/            jsonio（原子写 JSON）/ logger（分级 + 重复节流）
+docs/ARCHITECTURE.md 架构与数据流（深入理解运行原理看这份）
+strategies/        用户自定义策略（自动发现，升级框架不会覆盖这里）
 config/tasks.json   多任务配置（改这里就能增删策略）
 config/services.json 多服务编排配置（hub 拉起哪些服务、怎么互相订阅）
 config/collector.json 采集编排配置（每个标的采什么粒度、多久采一次）
-scripts/            集成演示与冒烟脚本
+config/brokers.json 券商接入点（网关 + 资金账号 + 连接参数，凭据走环境变量）
+config/backtest.json 回测默认参数（资金/手续费/滑点/区间，CLI 与面板共用）
+scripts/            集成演示、冒烟脚本、算法自检
+data/alphaquant.db  SQLite：行情 + 订单/成交/权益/事件/回测结果
 output/
-  snapshots/        运行快照（每个 run 一个目录）
+  snapshots/        运行快照（每个 run 一个目录，默认只在有操作时写）
   runtime/          运行时新增的任务（重启自动重放）
   services/         各服务的心跳 / 命令 / 日志 / PID
   bus/              文件消息总线（*.jsonl + .offsets/）
@@ -366,6 +639,32 @@ output/
 | `SERVICES_CONFIG` | `config/services.json` | 多服务编排配置文件 |
 | `HUB_HOST` / `HUB_PORT` | `127.0.0.1` / `8899` | hub 聚合面板监听地址与端口 |
 | `SERVICE_HEARTBEAT_TIMEOUT` | `15` | 多久收不到心跳判定服务失联（秒） |
+| `TRADE_PERSIST_ENABLED` | `true` | 订单/成交/权益落 SQLite 的总开关 |
+| `EQUITY_SAMPLE_INTERVAL` | `30` | 权益曲线采样间隔（秒），**不逐笔存** |
+| `TRADE_FLUSH_BATCH` / `TRADE_FLUSH_INTERVAL` | `50` / `2` | 落库批量大小与刷盘间隔 |
+| `MONITOR_SNAPSHOT_MODE` | `on_event` | 快照策略：`on_event`/`on_change`/`interval`/`off` |
+| `MONITOR_SNAPSHOT_ENABLED` | `true` | 快照总开关 |
+| `MONITOR_SNAPSHOT_MIN_GAP` | `2` | 两次落盘最小间隔（秒），合并突发用 |
+| `MONITOR_SNAPSHOT_DEBOUNCE` | `1` | `on_event` 的抖动窗口（秒），把同一批操作并成一份 |
+| `MONITOR_SNAPSHOT_INTERVAL` | `5` | `on_change` 的检查间隔（秒），不是写入间隔 |
+| `MONITOR_SNAPSHOT_KEEP` | `300` | 每个 run 保留多少份历史快照 |
+| `BROKER_ENDPOINTS_CONFIG` | `config/brokers.json` | 券商接入点配置文件 |
+| `BROKER_ENDPOINT` | 空 | 默认使用哪个接入点（空则用 `default_endpoint`） |
+| `BACKTEST_DEFAULTS_CONFIG` | `config/backtest.json` | 回测默认参数配置文件 |
+| `USER_STRATEGY_DIR` | `strategies/` | 用户自定义策略目录（自动发现 + 热重载） |
+| `USER_STRATEGY_AUTOLOAD` | `true` | 是否自动发现用户策略（测试环境可关） |
+| `LOG_FILE_LEVEL` | 空（同 `LOG_LEVEL`） | 文件日志级别，可比控制台更严 |
+| `LOG_THROTTLE_WINDOW` | `5` | 重复日志节流窗口（秒）；DEBUG 下不节流 |
+| `LOG_ROTATION` | `00:00` | 日志轮转点（按天） |
+| `EXECUTION_MODE` | `simulated` | 撮合模式：`simulated` / `live` |
+| `BROKER_GATEWAY` | 空 | 券商网关名（不用接入点配置时的简写），如 `simulated` |
+| `LIVE_MAX_ORDER_VALUE` | `0`（不限） | 单笔委托金额上限 |
+| `LIVE_MAX_DAILY_TRADES` | `0`（不限） | 单日成交笔数上限 |
+| `LIVE_PRICE_LIMIT_PCT` | `0.02` | 价格笼子：偏离现价超过此比例直接拒单 |
+| `LIVE_ORDER_TIMEOUT` | `30` | 多久没收到回报就去券商查一次（秒） |
+| `LIVE_STRICT_RECONCILE` | `true` | 对账不一致时是否阻断交易 |
+| `CLEAN_MAX_MOVE_PCT` | `0.21` | 异常跳变阈值（≈一个主板涨跌停） |
+| `CLEAN_ACTION` | `mark` | 清洗策略：`mark` 只标记 / `drop` 丢掉不可用数据 |
 
 ## 测试
 
@@ -375,6 +674,16 @@ python -m unittest discover -s app/test -p "test_*.py"
 
 测试全部使用合成数据、临时数据库与临时目录，**不依赖网络，也不会往工程的
 `output/` 里写东西**。
+
+两个自检脚本可以复算关键算法的正确性：
+
+```bash
+python scripts/weekly_ma_check.py        # 周均线 vs pandas 独立实现，逐点对齐
+python scripts/weekly_factor_check.py    # 金叉/死叉/趋势 vs 因果参照实现
+python scripts/smoke_engine_monitor.py   # 端到端：引擎 + 面板 + 落库 + 采集 + 接入点（55 项）
+python scripts/smoke_collector.py        # 采集服务集成冒烟
+python scripts/smoke_live_loop.py        # 实盘闭环冒烟（39 项，用内置网关，不碰真钱）
+```
 
 ## 已知约定
 

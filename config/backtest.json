@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "回测默认参数。所有字段都能被「命令行 / 面板表单 / 回测作业入参」覆盖。",
+    "优先级：显式传入 > 本文件 > 代码内置兜底值。",
+    "这里只管默认值，真正跑起来用哪份参数，回测结果里会记录（可复现）。"
+  ],
+
+  "symbol": "000001",
+  "strategy": "ma_cross",
+  "strategy_params": {},
+
+  "start": "2020-01-01",
+  "end": "",
+
+  "cash": 100000,
+  "commission": 0.0003,
+  "slippage": 0.001,
+  "adjust": "qfq",
+  "data_source": "auto",
+
+  "risk_free_rate": 0.0,
+  "trading_days_per_year": 252,
+
+  "print_log": false,
+  "plot": false,
+  "export": false
+}

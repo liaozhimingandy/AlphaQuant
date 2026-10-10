@@ -30,6 +30,24 @@ class TaskRuntime:
         self.tasks: Dict[str, QuantTask] = {}
         self._by_symbol: Dict[str, List[str]] = {}
         self._order_sink: Optional[Callable[[Order], None]] = None
+        #: 实盘共享网关的**延迟取值**provider。
+        #: 用 lambda 而不是直接塞对象：任务是在组件 initialize 阶段才建的，
+        #: 那时网关可能刚连上（甚至还没连），先取对象会拿到 None。
+        self.gateway_provider: Optional[Callable[[], Any]] = None
+        #: 引擎级运行模式。任务 spec 没写 run_mode 时跟随它 ——
+        #: 否则 LIVE 起引擎而任务跑模拟撮合，是最危险的静默错配。
+        self.run_mode: Any = None
+
+    # ============================================================
+    # 实盘共享网关
+    # ============================================================
+    def current_gateway(self) -> Any:
+        if self.gateway_provider is None:
+            return None
+        try:
+            return self.gateway_provider()
+        except Exception:
+            return None
 
     # ============================================================
     # 任务管理
@@ -38,13 +56,23 @@ class TaskRuntime:
         if task.task_id in self.tasks:
             raise ValueError(f"任务 ID 重复: {task.task_id}")
         self.tasks[task.task_id] = task
+        # 把订单出口交给任务。实盘的成交回报是**异步**到来的，
+        # 那时已经不在 on_bar/on_news 的调用栈里，返回值机制覆盖不到；
+        # 只有让任务自己能往外发订单事件，回报驱动的状态变化才进得了事件总线。
+        task.set_order_sink(self._emit)
         for sym in self._watch_symbols(task):
             self._by_symbol.setdefault(sym, []).append(task.task_id)
         logger.info(f"注册任务 {task.task_id} | 标的 {task.symbol} | 关注 {self._watch_symbols(task)}")
         return task
 
     def add_from_spec(self, spec: TaskSpec | Mapping[str, Any]) -> QuantTask:
-        return self.add(build_task(spec))
+        return self.add(
+            build_task(
+                spec,
+                gateway=self.current_gateway(),
+                run_mode=self.run_mode,
+            )
+        )
 
     def add_from_config(self, raw: Any) -> List[QuantTask]:
         return [self.add_from_spec(s) for s in parse_task_specs(raw)]

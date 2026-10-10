@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import click
@@ -117,56 +118,228 @@ def list_cmd() -> None:
 
 
 # ============================== 策略列表 ==============================
-@cli.command(name="strategies", help="列出所有可用策略")
-def strategies_cmd() -> None:
-    from app.backtest.registry import list_strategies
+@cli.command(name="strategies", help="列出所有可用策略（含 strategies/ 下的自定义策略）")
+@click.option("--reload", "do_reload", is_flag=True, help="重新扫描用户策略目录（改完策略代码不用重启）")
+@click.option("--dir", "strategy_dir", default=None, help="临时指定用户策略目录")
+def strategies_cmd(do_reload, strategy_dir) -> None:
+    from app.backtest.registry import (
+        list_strategies as bt_list,
+        load_user_strategies as bt_load,
+        user_strategy_dir,
+    )
+    from app.core.strategy import list_strategies as live_list
+    from app.core.strategy.registry import load_user_strategies as live_load
 
-    for name in list_strategies():
-        click.echo(f"  - {name}")
+    dirs = [strategy_dir] if strategy_dir else None
+    user_bt = bt_load(dirs, force=True) if (do_reload or strategy_dir) else {}
+    if do_reload or strategy_dir:
+        live_load(dirs, force=True)
+
+    click.secho("回测策略（backtrader 链路）:", fg="cyan", bold=True)
+    for n in bt_list():
+        tag = click.style("  [自定义]", fg="yellow") if n in user_bt else ""
+        click.echo(f"  - {n}{tag}")
+    click.secho("实盘策略（事件引擎链路）:", fg="cyan", bold=True)
+    for n in live_list():
+        click.echo(f"  - {n}")
+    click.secho(f"\n用户策略目录: {user_strategy_dir()}", fg="blue")
+
+
+# ============================== 新建自定义策略 ==============================
+@cli.group(name="strategy", help="自定义策略：新建模板 / 看目录")
+def strategy_group() -> None:
+    pass
+
+
+@strategy_group.command(name="dir", help="打印用户策略目录")
+def strategy_dir_cmd() -> None:
+    from app.backtest.registry import user_strategy_dir
+
+    click.echo(user_strategy_dir())
+
+
+@strategy_group.command(name="new", help="在用户策略目录里生成一个策略模板")
+@click.argument("name")
+@click.option("--kind", type=click.Choice(["backtest", "engine", "both"]),
+              default="both", show_default=True, help="模板类型")
+@click.option("--force", is_flag=True, help="已存在时覆盖")
+def strategy_new_cmd(name, kind, force) -> None:
+    from app.backtest.registry import user_strategy_dir
+
+    target_dir = Path(user_strategy_dir())
+    target_dir.mkdir(parents=True, exist_ok=True)
+    file_name = _snake_case(name) + ".py"
+    path = target_dir / file_name
+    if path.exists() and not force:
+        click.secho(f"❌ 已存在: {path}（要覆盖加 --force）", fg="red")
+        sys.exit(1)
+    path.write_text(_strategy_template(name, kind), encoding="utf-8")
+    click.secho(f"✅ 已生成: {path}", fg="green")
+    click.echo("   改完之后让服务重新扫描：")
+    click.echo("     python main.py strategies --reload      # 本地")
+    click.echo("     python main.py ctl strategies           # 运行中的服务")
+
+
+def _snake_case(name: str) -> str:
+    from app.core.strategy.discovery import snake
+
+    return snake(name)
+
+
+def _strategy_template(name: str, kind: str) -> str:
+    cls = "".join(p.capitalize() for p in _snake_case(name).split("_")) or "My"
+    key = _snake_case(name)
+    backtest_part = f'''# ==================== 回测链路（backtrader） ====================
+class {cls}Strategy(bt.Strategy):
+    """{name}
+
+    改 next() 里的判据即可。回测：python main.py backtest -s 000001 --strategy {key}
+    """
+
+    STRATEGY_NAME = "{key}"
+
+    params = dict(fast=5, slow=20, lot_size=100, printlog=False)
+
+    def __init__(self) -> None:
+        self.ma_fast = bt.indicators.SMA(self.data.close, period=self.p.fast)
+        self.ma_slow = bt.indicators.SMA(self.data.close, period=self.p.slow)
+        self.cross = bt.indicators.CrossOver(self.ma_fast, self.ma_slow)
+        self.order = None
+
+    def notify_order(self, order) -> None:
+        if order.status in (order.Submitted, order.Accepted):
+            return
+        self.order = None
+
+    def next(self) -> None:
+        # 有未完成订单时不动，避免同一根K线反复下单
+        if self.order is not None:
+            return
+        if not self.position and self.cross > 0:
+            price = float(self.data.close[0])
+            size = int(self.broker.getcash() * 0.95 / price / 100) * 100
+            if size > 0:
+                self.order = self.buy(size=size)
+        elif self.position and self.cross < 0:
+            self.order = self.close()
+'''
+    engine_part = f'''# ==================== 实盘链路（事件引擎） ====================
+class {cls}LiveStrategy(IBaseStrategy):
+    """与上面同一套逻辑的实盘版。decide() 返回 Signal 或 None 即可。"""
+
+    STRATEGY_NAME = "{key}_live"
+    name = "{key}_live"
+    description = "{name}（实盘版）"
+
+    def __init__(self, fast: int = 5, slow: int = 20, **params) -> None:
+        super().__init__(fast=fast, slow=slow, **params)
+        self.fast = int(fast)
+        self.slow = int(slow)
+
+    def _cross(self, ctx):
+        now_f, now_s = ctx.ind("sma", period=self.fast), ctx.ind("sma", period=self.slow)
+        prev = ctx.previous(1)
+        if prev is None:
+            return 0
+        pre_f, pre_s = prev.ind("sma", period=self.fast), prev.ind("sma", period=self.slow)
+        if None in (now_f, now_s, pre_f, pre_s):
+            return 0
+        if pre_f <= pre_s and now_f > now_s:
+            return 1
+        if pre_f >= pre_s and now_f < now_s:
+            return -1
+        return 0
+
+    def decide(self, ctx, state, source=SignalSource.BAR, event=None):
+        cross = self._cross(ctx)
+        if not state.has_position and cross > 0:
+            return self.make_signal(state, Side.BUY, source, reason="金叉")
+        if state.has_position and cross < 0:
+            return self.make_signal(state, Side.SELL, source, reason="死叉")
+        return None
+'''
+    header = (
+        "#!/usr/bin/env python3\n"
+        "# -*- coding: utf-8 -*-\n"
+        f'"""{name} —— 自定义策略（由 `main.py strategy new` 生成）。\n\n'
+        "回测链路与实盘链路放在同一个文件里：同一个想法应该用同一套参数，\n"
+        "而不是回测用 5/20、实盘手滑写成 5/30。\n"
+        '"""\n\n'
+        "from __future__ import annotations\n\n"
+        "from app.core.factor.context import FactorContext  # noqa: F401\n"
+        "from app.core.market.types import Side, Signal, SignalSource\n"
+        "from app.core.strategy.base import IBaseStrategy\n"
+    )
+    parts = []
+    if kind in ("backtest", "both"):
+        header += "import backtrader as bt\n"
+        parts.append(backtest_part)
+    if kind in ("engine", "both"):
+        parts.append(engine_part)
+    return header + "\n\n" + "\n\n".join(parts)
 
 
 # ============================== 回测 ==============================
-@cli.command(name="backtest", help="运行一次回测")
-@click.option("--symbol", "-s", required=True, help="股票代码")
-@click.option("--start", default="2020-01-01", show_default=True, help="开始日期")
-@click.option("--end", default=DEFAULT_END, show_default=True, help="结束日期")
-@click.option("--strategy", default="ma_cross", show_default=True, help="策略名，可用 strategies 查看")
-@click.option("--cash", default=settings.DEFAULT_CASH, show_default=True, type=float, help="初始资金")
-@click.option("--commission", default=settings.DEFAULT_COMMISSION, show_default=True, type=float, help="手续费率")
-@click.option("--slippage", default=settings.DEFAULT_SLIPPAGE_PERC, show_default=True, type=float, help="滑点比例")
+@cli.command(name="backtest", help="运行一次回测（默认参数来自 config/backtest.json）")
+@click.option("--symbol", "-s", default=None, help="股票代码（默认取 config/backtest.json）")
+@click.option("--start", default=None, help="开始日期（默认取 config/backtest.json）")
+@click.option("--end", default=None, help="结束日期（默认取 config/backtest.json 或今天）")
+@click.option("--strategy", default=None, help="策略名，可用 strategies 查看")
+@click.option("--cash", default=None, type=float, help="初始资金")
+@click.option("--commission", default=None, type=float, help="手续费率")
+@click.option("--slippage", default=None, type=float, help="滑点比例")
+@click.option("--adjust", default=None, type=click.Choice(["qfq", "hfq", "none"]), help="复权方式")
 @click.option(
     "--data-source",
     type=click.Choice(["auto", "db", "csv", "remote"]),
-    default="auto",
-    show_default=True,
+    default=None,
     help="auto=库里没有就联网采集；db=只读库；csv=只读本地CSV；remote=强制联网",
 )
 @click.option("--param", multiple=True, help="策略参数，可重复，如 --param fast=5")
+@click.option("--show-defaults", is_flag=True, help="只打印当前生效的默认参数，不跑回测")
 @click.option("--print-log", is_flag=True, help="打印逐根K线的策略日志（默认关闭）")
 @click.option("--plot", is_flag=True, help="回测结束后绘制K线图")
 @click.option("--export", "do_export", is_flag=True, help="导出结果 JSON/CSV 到 output/")
 @click.option("--output-dir", default=None, help="导出目录，默认 output/")
 def backtest_cmd(
-    symbol, start, end, strategy, cash, commission, slippage,
-    data_source, param, print_log, plot, do_export, output_dir,
+    symbol, start, end, strategy, cash, commission, slippage, adjust,
+    data_source, param, show_defaults, print_log, plot, do_export, output_dir,
 ) -> None:
     from app.backtest import BacktestConfig, run_backtest
-    from app.backtest.report import export_report, print_report
+    from app.backtest.defaults import BacktestDefaults
+    from app.backtest.report import print_report
 
+    # 没填的字段回落到 config/backtest.json —— 三处入口（CLI/面板/作业 API）共用一份默认值
+    d = BacktestDefaults.load()
+    if show_defaults:
+        click.secho(f"默认参数来源: {d.source}", fg="cyan")
+        for k, v in d.to_dict().items():
+            click.echo(f"  {k:22s} = {v}")
+        return
+
+    params = _parse_params(param) or dict(d.strategy_params)
+    merged = d.merge({
+        "symbol": symbol, "start": start, "end": end, "strategy": strategy,
+        "cash": cash, "commission": commission, "slippage": slippage,
+        "adjust": adjust, "data_source": data_source,
+    })
     try:
         config = BacktestConfig(
-            symbol=symbol,
-            start=start,
-            end=end,
-            strategy=strategy,
-            strategy_params=_parse_params(param),
-            cash=cash,
-            commission=commission,
-            slippage_perc=slippage,
-            data_source=data_source,
-            plot=plot,
-            print_log=print_log,
-            export=do_export,
+            symbol=merged["symbol"],
+            start=merged["start"],
+            end=merged["end"],
+            strategy=merged["strategy"],
+            strategy_params=params,
+            cash=merged["cash"],
+            commission=merged["commission"],
+            slippage_perc=merged["slippage"],
+            data_source=merged["data_source"],
+            adjust=merged["adjust"],
+            risk_free_rate=merged.get("risk_free_rate") or 0.0,
+            trading_days_per_year=int(merged.get("trading_days_per_year") or 252),
+            plot=plot or bool(merged.get("plot")),
+            print_log=print_log or bool(merged.get("print_log")),
+            export=do_export or bool(merged.get("export")),
             output_dir=output_dir,
         )
         result = run_backtest(config)
@@ -176,7 +349,9 @@ def backtest_cmd(
         sys.exit(1)
 
     print_report(result)
-    if do_export:
+    if do_export or config.export:
+        from app.backtest.report import export_report
+
         files = export_report(result, output_dir)
         for k, v in files.items():
             click.secho(f"  📄 {k}: {v}", fg="blue")
@@ -232,14 +407,31 @@ def engine_cmd(mode, symbol, idle_timeout, no_auto_stop) -> None:
 
 
 # ============================== 能力清单 ==============================
-@cli.command(name="factors", help="列出可用指标与因子（自定义因子的接入点）")
-def factors_cmd() -> None:
+@cli.command(name="factors", help="列出可用指标与因子（含每个指标的可配参数）")
+@click.option("--params", is_flag=True, help="展开每个指标的可配参数与默认值")
+def factors_cmd(params) -> None:
     from app.core.factor import list_factors
     from app.core.indicator import list_indicators
+    from app.core.indicator.registry import describe_indicator
 
     click.secho("指标:", fg="cyan", bold=True)
     for n in list_indicators():
-        click.echo(f"  - {n}")
+        spec = describe_indicator(n)
+        sig = "  ".join(
+            f"{k}={v['default']}" if not v["required"] else f"{k}=<必填>"
+            for k, v in spec.items()
+        )
+        if params:
+            click.echo(f"  - {n:<14}{sig}")
+        else:
+            click.echo(f"  - {n}")
+    if not params:
+        click.secho(
+            "  （加 --params 看可配参数；周期是参数不是指标，"
+            "如 sma 配 period 即可，不需要 sma5/sma20 两个指标）",
+            fg="yellow",
+        )
+
     click.secho("因子:", fg="cyan", bold=True)
     for n in list_factors():
         click.echo(f"  - {n}")
@@ -330,10 +522,24 @@ def tasks_cmd(config) -> None:
               help="额外纳入采集的标的，可重复（会与 config/collector.json 合并）")
 @click.option("--collector-config", default=None,
               help="采集编排配置文件，默认 config/collector.json")
+@click.option("--snapshot/--no-snapshot", "snapshot", default=None,
+              help="快照总开关（默认取 MONITOR_SNAPSHOT_ENABLED）")
+@click.option("--snapshot-mode", default=None,
+              type=click.Choice(["on_change", "interval", "off"]),
+              help="快照策略：on_change=内容变了才写（默认）；interval=到点就写；off=不写")
+@click.option("--snapshot-min-gap", default=None, type=float,
+              help="两次落盘的最小间隔（秒），防止逐笔行情把磁盘写爆")
+@click.option("--store/--no-store", "store", default=None,
+              help="订单/成交/权益落 SQLite（默认开）")
+@click.option("--broker-gateway", default=None,
+              help="实盘券商网关名（LIVE 模式必填），如 simulated")
+@click.option("--broker-endpoint", default=None,
+              help="券商接入点 id（见 config/brokers.json），比 --broker-gateway 更具体")
 def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_source,
               no_news, monitor, port, monitor_host, snapshot_interval, namespace,
               no_runtime_tasks, collector, collect_interval, collect_period,
-              collect_symbol, collector_config) -> None:
+              collect_symbol, collector_config, snapshot, snapshot_mode,
+              snapshot_min_gap, store, broker_gateway, broker_endpoint) -> None:
     """前台运行后台服务（Ctrl+C 退出）。要放到后台跑请用 `start`。
 
     一个进程 = 一个引擎 = N 个任务。任务之间状态完全隔离，
@@ -369,6 +575,12 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
             collector_period=collect_period,
             collector_symbols=list(collect_symbol) or None,
             collector_config=collector_config,
+            with_store=store,
+            snapshot_enabled=snapshot,
+            snapshot_mode=snapshot_mode or "",
+            snapshot_min_gap=snapshot_min_gap,
+            broker_gateway=broker_gateway or "",
+            broker_endpoint=broker_endpoint or "",
         )
     except Exception as exc:
         click.secho(f"❌ 引擎装配失败: {exc}", fg="red")
@@ -397,9 +609,26 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
             buckets[job.interval] = buckets.get(job.interval, 0) + 1
         click.secho(
             "📥 行情采集: "
-            + ", ".join(f"{humanize_frequency(k)}×{v}" for k, v in sorted(buckets.items()))
-            + f" | 共 {len(col.spec.jobs)} 个任务",
+            + (", ".join(f"{humanize_frequency(k)}×{v}" for k, v in sorted(buckets.items()))
+               or "无任务")
+            + f" | 共 {len(col.spec.jobs)} 个任务"
+            + ("" if col.spec.enabled else f"（已停用：{col.disabled_reason}）"),
             fg="cyan",
+        )
+
+    store_comp = engine.get_component("trading_store")
+    if store_comp is not None:
+        click.secho(
+            f"🗄️  交易落库: {'开' if store_comp.enabled else '关'}"
+            + (f" | {_settings.DATABASE_URL}" if store_comp.enabled else ""),
+            fg="cyan",
+        )
+    gw_comp = engine.get_component("live_gateway")
+    if gw_comp is not None:
+        click.secho(
+            f"🔌 实盘网关: {getattr(gw_comp.gateway, 'name', '?')} | "
+            f"回报轮询 {gw_comp.poll_interval}s | 对账 {gw_comp.reconcile_interval}s",
+            fg="yellow", bold=True,
         )
 
     try:
@@ -439,10 +668,13 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
     ["1d", "1", "5", "15", "30", "60"]), help="采集粒度：1d=日线，其余为分钟线")
 @click.option("--collect-symbol", multiple=True, help="额外纳入采集的标的，可重复")
 @click.option("--collector-config", default=None, help="采集编排配置文件")
+@click.option("--broker-gateway", default=None, help="实盘券商网关名（LIVE 模式用）")
+@click.option("--broker-endpoint", default=None,
+              help="券商接入点 id（见 config/brokers.json），比 --broker-gateway 更具体")
 def start_cmd(config, mode, market_mode, interval, start_date, end_date, data_source,
               symbol, port, snapshot_interval, namespace, no_news, no_monitor,
               no_collector, collect_interval, collect_period, collect_symbol,
-              collector_config) -> None:
+              collector_config, broker_gateway, broker_endpoint) -> None:
     """后台启动：脱离终端运行，日志写入 logs/service.out.log。"""
     from app.core.engine import daemon
     from app.core.config import settings as _settings
@@ -466,6 +698,8 @@ def start_cmd(config, mode, market_mode, interval, start_date, end_date, data_so
         collect_period=collect_period or "",
         collect_symbols=list(collect_symbol),
         collector_config=collector_config or "",
+        broker_gateway=broker_gateway or "",
+        broker_endpoint=broker_endpoint or "",
     )
     result = daemon.start(cmd)
     if not result.get("ok"):
@@ -879,6 +1113,471 @@ def ctl_collector_reload(port) -> None:
     else:
         click.secho(f"❌ 失败: {data.get('error')}", fg="red")
         sys.exit(1)
+
+
+# ============================== 实盘控制 ==============================
+@ctl_group.group(name="live", help="实盘网关：状态 / 对账 / 撤单")
+def ctl_live_group() -> None:
+    """只在 RUN_MODE=LIVE 的服务上可用。"""
+
+
+@ctl_live_group.command(name="status", help="查看实盘网关与对账状态")
+@_ctl_port
+def ctl_live_status(port) -> None:
+    data = _api(port, "/api/live")
+    if data.get("error"):
+        click.secho(f"❌ {data['error']}", fg="red")
+        sys.exit(1)
+    if not data.get("available"):
+        click.secho(f"未启用实盘网关：{data.get('reason','')}", fg="yellow")
+        return
+    st = data.get("stats") or {}
+    conn = data.get("connected")
+    click.secho(
+        f"网关 {data.get('gateway')} | {'已连接' if conn else '已断开'} | "
+        f"接入任务 {data.get('tasks')} 个",
+        fg="green" if conn else "red", bold=True,
+    )
+    click.echo(
+        f"  回报: 轮询 {st.get('polls',0)} 次 / 成交 {st.get('fills',0)} 笔 / "
+        f"无法归属 {st.get('unknown',0)} 笔"
+    )
+    click.echo(f"  未结订单: {data.get('pending_count', 0)} 笔")
+    rc = data.get("last_reconcile") or {}
+    if rc:
+        ok = rc.get("ok")
+        click.secho(f"  对账: {'一致' if ok else '不一致'} | {rc.get('at','')}",
+                    fg="green" if ok else "red")
+        for d in rc.get("position_diffs") or []:
+            click.secho(
+                f"    ⚠ {d['symbol']} 本地 {d['local']} / 券商 {d['broker']}", fg="red")
+        if rc.get("cash_diff"):
+            click.secho(f"    ⚠ 资金差异 {rc['cash_diff']}", fg="red")
+
+
+@ctl_live_group.command(name="reconcile", help="立即与券商对账")
+@_ctl_port
+def ctl_live_reconcile(port) -> None:
+    data = _api(port, "/api/live/reconcile", {}, timeout=60.0)
+    if data.get("ok") is False and data.get("error"):
+        click.secho(f"❌ {data['error']}", fg="red")
+        sys.exit(1)
+    ok = data.get("ok")
+    click.secho(f"{'✅ 对账一致' if ok else '⚠ 对账不一致'}",
+                fg="green" if ok else "red", bold=True)
+    click.echo(
+        f"  本地 {data.get('local_cash')} / 券商 {data.get('broker_cash')} | "
+        f"持仓 {data.get('local_positions')}"
+    )
+    for d in data.get("position_diffs") or []:
+        click.secho(f"    ⚠ {d['symbol']} 本地 {d['local']} / 券商 {d['broker']}", fg="red")
+    for d in data.get("open_order_diffs") or []:
+        click.secho(f"    ⚠ {d['kind']}: {d['orders']}", fg="red")
+    if data.get("cash_diff"):
+        click.secho(f"    ⚠ 资金差异 {data['cash_diff']}", fg="red")
+
+
+@ctl_live_group.command(name="cancel-all", help="撤销全部未结订单")
+@click.option("--task-id", default="", help="只撤某个任务的，留空=全部")
+@_ctl_port
+@click.option("--yes", is_flag=True, help="跳过确认")
+def ctl_live_cancel_all(task_id, yes, port) -> None:
+    if not yes and not click.confirm("确认撤销未结订单？实盘上这会立即向券商发出撤单请求。"):
+        return
+    data = _api(port, "/api/live/cancel-all", {"task_id": task_id})
+    if data.get("ok"):
+        click.secho(f"✅ 已请求撤销 {data.get('cancelled', 0)} 笔", fg="green")
+    else:
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        sys.exit(1)
+
+
+@ctl_group.command(name="snapshot-mode", help="查看/切换快照策略（on_event/on_change/interval/off）")
+@click.argument("mode", required=False, default="",
+                type=click.Choice(["", "on_event", "on_change", "interval", "off"]))
+@click.option("--enable/--disable", "enable", default=None,
+              help="同时切换快照总开关")
+@_ctl_port
+def ctl_snapshot_mode(mode, enable, port) -> None:
+    """不带参数时只查看当前策略与落盘统计。"""
+    if not mode:
+        data = _api(port, "/api/config")
+        snap = (data or {}).get("snapshot") or {}
+        if not snap:
+            click.secho("❌ 读不到快照配置（服务没在跑？）", fg="red")
+            sys.exit(1)
+        _print_snapshot_mode(snap)
+        return
+    body: Dict = {"mode": mode}
+    if enable is not None:
+        body["enabled"] = enable
+    data = _api(port, "/api/snapshot/mode", body)
+    if data.get("ok"):
+        click.secho("✅ 快照策略已切换", fg="green")
+        _print_snapshot_mode(data)
+    else:
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        sys.exit(1)
+
+
+@ctl_group.group(name="db", help="查 SQLite 里的交易数据（订单/成交/权益/事件）")
+def ctl_db_group() -> None:
+    """与文件快照的分工：快照看"当时长什么样"，这里查"按条件筛出来的行"。"""
+
+
+@ctl_live_group.command(name="account", help="查看券商账户（资金/持仓，来自券商源）")
+@click.option("--refresh", is_flag=True, help="先让服务去券商拉一次最新数据")
+@_ctl_port
+def ctl_live_account(refresh, port) -> None:
+    if refresh:
+        r = _api(port, "/api/live/refresh", {}, timeout=60.0)
+        if not r.get("ok"):
+            click.secho(f"❌ 刷新失败: {r.get('error')}", fg="red")
+        else:
+            click.secho("✅ 已从券商刷新账户", fg="green")
+    data = _api(port, "/api/live")
+    if not data.get("available"):
+        click.secho(f"未启用实盘网关：{data.get('reason','')}", fg="yellow")
+        return
+    acct = data.get("broker_account") or {}
+    if not acct:
+        click.secho("尚无账户数据（可能还没刷新成功）", fg="yellow")
+        if data.get("account_error"):
+            click.secho(f"  最近错误: {data['account_error']}", fg="red")
+        return
+    click.secho(
+        f"券商账户 | 接入点 {data.get('endpoint') or '-'} | "
+        f"账号 {data.get('account_id') or '-'}"
+        + ("（只读）" if data.get("readonly") else ""),
+        fg="cyan", bold=True,
+    )
+    click.echo(
+        f"  总资产 {acct.get('total_asset')} | 可用 {acct.get('available')} | "
+        f"冻结 {acct.get('frozen')} | 市值 {acct.get('market_value')}"
+    )
+    click.echo(f"  更新时间: {data.get('account_at') or '-'}")
+    poss = data.get("broker_positions") or {}
+    if not poss:
+        click.secho("  持仓: 空", fg="yellow")
+        return
+    click.secho(f"  {'标的':<10}{'持仓':>10}{'可卖':>10}{'成本':>10}", fg="cyan")
+    for sym, p in sorted(poss.items()):
+        click.echo(f"  {sym:<10}{p.get('size',0):>10}{p.get('sellable',0):>10}"
+                   f"{p.get('avg_price',0):>10.3f}")
+
+
+@ctl_group.group(name="endpoints", help="券商接入点：列出 / 试连接")
+def ctl_endpoints_group() -> None:
+    """接入点 = 网关类型 + 资金账号 + 连接参数。切账户不用改代码。"""
+
+
+@ctl_endpoints_group.command(name="list", help="列出全部接入点（凭据已脱敏）")
+@_ctl_port
+def ctl_endpoints_list(port) -> None:
+    data = _api(port, "/api/endpoints")
+    _print_endpoints(data)
+
+
+@ctl_endpoints_group.command(name="check", help="试连接一个接入点（只查询，不下单）")
+@click.argument("endpoint", required=False, default="")
+@_ctl_port
+def ctl_endpoints_check(endpoint, port) -> None:
+    data = _api(port, "/api/endpoints/check", {"endpoint": endpoint}, timeout=60.0)
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        if data.get("available_gateways"):
+            click.echo(f"  可用网关: {', '.join(data['available_gateways'])}")
+        sys.exit(1)
+    ep = data.get("endpoint") or {}
+    click.secho(
+        f"✅ 连接成功 | {ep.get('name')} | 网关 {data.get('gateway')} | "
+        f"账号 {ep.get('account') or '-'}", fg="green", bold=True,
+    )
+    acct = data.get("account") or {}
+    click.echo(
+        f"  总资产 {acct.get('total_asset')} | 可用 {acct.get('available')} | "
+        f"市值 {acct.get('market_value')}"
+    )
+    poss = data.get("positions") or {}
+    click.echo(f"  持仓 {len(poss)} 个标的" + (f": {', '.join(sorted(poss))}" if poss else ""))
+
+
+def _print_endpoints(data: Dict) -> None:
+    if data.get("error"):
+        click.secho(f"❌ {data['error']}", fg="red")
+        sys.exit(1)
+    click.secho(f"配置文件: {data.get('path') or '（未找到）'}", fg="blue")
+    active = data.get("in_use") or data.get("active") or ""
+    rows = data.get("endpoints") or []
+    if not rows:
+        click.secho("没有任何接入点。示例见 config/brokers.json", fg="yellow")
+        return
+    click.secho(f"{'接入点':<14}{'网关':<12}{'账号':<14}{'只读':<6}{'启用':<6}名称", fg="cyan")
+    for e in rows:
+        mark = " ← 使用中" if e.get("id") == active else ""
+        click.echo(
+            f"{e.get('id',''):<14}{e.get('gateway',''):<12}{e.get('account',''):<14}"
+            f"{str(e.get('readonly')):<6}{str(e.get('enabled')):<6}{e.get('name','')}{mark}"
+        )
+    click.secho(f"\n可用网关: {', '.join(g['name'] for g in data.get('gateways') or [])}",
+                fg="blue")
+
+
+@ctl_group.command(name="strategies", help="查看/热重载用户自定义策略")
+@click.option("--reload", is_flag=True, help="重新扫描用户策略目录")
+@_ctl_port
+def ctl_strategies(reload, port) -> None:
+    if reload:
+        r = _api(port, "/api/strategies/reload", {}, timeout=30.0)
+        if r.get("ok"):
+            click.secho(
+                f"✅ 已重扫 | 回测: {r.get('backtest')} | 引擎: {r.get('engine')}",
+                fg="green",
+            )
+            if r.get("backtest_error") or r.get("engine_error"):
+                click.secho(f"  ⚠ {r.get('backtest_error') or r.get('engine_error')}", fg="yellow")
+        else:
+            click.secho(f"❌ {r.get('error')}", fg="red")
+            sys.exit(1)
+    data = _api(port, "/api/strategies")
+    click.secho("回测策略:", fg="cyan", bold=True)
+    user = set(data.get("user_strategies") or [])
+    for n in data.get("backtest_strategies") or []:
+        click.echo(f"  - {n}" + ("  [自定义]" if n in user else ""))
+    click.secho("实盘策略:", fg="cyan", bold=True)
+    for n in data.get("live_strategies") or []:
+        click.echo(f"  - {n}")
+    if data.get("user_strategy_dir"):
+        click.secho(f"用户策略目录: {data['user_strategy_dir']}", fg="blue")
+
+
+def _print_snapshot_mode(snap: Dict) -> None:
+    mode = snap.get("mode")
+    explain = {
+        "on_event": "有操作才落盘（没操作 = 状态没变 = 不写）",
+        "on_change": "定期检查，内容真的变了才写",
+        "interval": "到点就写（想要完整时间轴时用）",
+        "off": "不写历史快照（面板仍可实时看）",
+    }.get(str(mode), "")
+    click.secho(f"模式: {mode} | 启用: {snap.get('enabled')} | {explain}", fg="cyan", bold=True)
+    click.echo(
+        f"  已落盘 {snap.get('writes', 0)} 份 | 触发 {snap.get('triggers', 0)} 次 | "
+        f"因内容未变跳过 {snap.get('skipped_unchanged', 0)} 次"
+    )
+    if snap.get("last_trigger"):
+        click.echo(f"  最近触发原因: {snap.get('last_trigger')}")
+    if snap.get("pending"):
+        click.echo("  当前有待落盘变更（将在抖动窗口后写入）")
+
+
+@ctl_db_group.command(name="orders", help="查订单（含状态聚合）")
+@click.option("--task-id", default="", help="按任务过滤")
+@click.option("--status", default="", help="按状态过滤，如 FILLED/REJECTED/SUBMITTED")
+@click.option("--limit", default=30, show_default=True, type=int)
+@_ctl_port
+def ctl_db_orders(task_id, status, limit, port) -> None:
+    q = f"/api/db/orders?limit={limit}"
+    if task_id:
+        q += f"&task_id={task_id}"
+    if status:
+        q += f"&status={status}"
+    data = _api(port, q)
+    if data.get("error"):
+        click.secho(f"❌ {data['error']}", fg="red")
+        sys.exit(1)
+    click.secho(f"状态聚合: {data.get('stats')}", fg="cyan", bold=True)
+    rows = data.get("orders") or []
+    if not rows:
+        click.secho("没有订单", fg="yellow")
+        return
+    click.secho(f"{'时间':<20}{'任务':<16}{'标的':<9}{'方向':<6}"
+                f"{'数量':>8}{'已成':>8}  {'状态':<12}{'价格':>9}", fg="cyan")
+    for o in rows:
+        click.echo(
+            f"{str(o.get('created_at') or '')[:19]:<20}"
+            f"{str(o.get('task_id')):<16}{str(o.get('symbol')):<9}"
+            f"{str(o.get('side')):<6}{o.get('size') or 0:>8}{o.get('filled_size') or 0:>8}  "
+            f"{str(o.get('status')):<12}{float(o.get('filled_price') or 0):>9.3f}"
+        )
+
+
+@ctl_db_group.command(name="trades", help="查成交明细")
+@click.option("--task-id", default="", help="按任务过滤")
+@click.option("--limit", default=30, show_default=True, type=int)
+@_ctl_port
+def ctl_db_trades(task_id, limit, port) -> None:
+    q = f"/api/db/trades?limit={limit}" + (f"&task_id={task_id}" if task_id else "")
+    data = _api(port, q)
+    rows = data.get("trades") or []
+    if not rows:
+        click.secho("没有成交记录", fg="yellow")
+        return
+    click.secho(f"{'时间':<20}{'任务':<16}{'方向':<6}{'数量':>8}"
+                f"{'价格':>10}{'手续费':>9}{'实现盈亏':>11}", fg="cyan")
+    for t in rows:
+        click.echo(
+            f"{str(t.get('dt') or '')[:19]:<20}{str(t.get('task_id')):<16}"
+            f"{str(t.get('side')):<6}{t.get('size') or 0:>8}"
+            f"{float(t.get('price') or 0):>10.3f}{float(t.get('fee') or 0):>9.2f}"
+            f"{float(t.get('realized_pnl') or 0):>+11.2f}"
+        )
+
+
+@ctl_db_group.command(name="equity", help="查某个任务的权益曲线")
+@click.argument("task_id")
+@click.option("--limit", default=50, show_default=True, type=int)
+@_ctl_port
+def ctl_db_equity(task_id, limit, port) -> None:
+    data = _api(port, f"/api/db/equity?task_id={task_id}&limit={limit}")
+    pts = data.get("points") or []
+    if not pts:
+        click.secho("没有权益采样点（EQUITY_SAMPLE_INTERVAL 控制采样间隔）", fg="yellow")
+        return
+    click.secho(f"{task_id} 权益曲线（{len(pts)} 点）", fg="cyan", bold=True)
+    for p in pts:
+        click.echo(f"  {str(p.get('dt') or '')[:19]}  {float(p.get('equity') or 0):>12.2f}")
+
+
+@ctl_db_group.command(name="events", help="查重要系统事件")
+@click.option("--category", default="", help="collect/risk/order/engine/error")
+@click.option("--level", default="", help="INFO/WARNING/ERROR")
+@click.option("--limit", default=30, show_default=True, type=int)
+@_ctl_port
+def ctl_db_events(category, level, limit, port) -> None:
+    q = f"/api/db/events?limit={limit}"
+    if category:
+        q += f"&category={category}"
+    if level:
+        q += f"&level={level}"
+    data = _api(port, q)
+    rows = data.get("events") or []
+    if not rows:
+        click.secho("没有事件记录", fg="yellow")
+        return
+    for e in rows:
+        color = {"ERROR": "red", "WARNING": "yellow"}.get(str(e.get("level")), None)
+        click.secho(
+            f"{str(e.get('ts') or '')[:19]} [{e.get('level')}] "
+            f"({e.get('category')}) {e.get('message')}", fg=color,
+        )
+
+
+@ctl_db_group.command(name="backtests", help="查历史回测结果（从库里读，重启不丢）")
+@click.option("--limit", default=20, show_default=True, type=int)
+@_ctl_port
+def ctl_db_backtests(limit, port) -> None:
+    data = _api(port, f"/api/backtest?limit={limit}")
+    rows = data.get("results") or []
+    if not rows:
+        click.secho("还没有回测记录（面板「回测监控」页可以新建）", fg="yellow")
+        return
+    click.secho(f"{'时间':<20}{'标的':<9}{'策略':<18}{'区间':<24}"
+                f"{'收益':>9}{'回撤':>9}{'夏普':>8}{'成交':>6}", fg="cyan", bold=True)
+    for r in rows:
+        click.echo(
+            f"{str(r.get('created_at') or '')[:19]:<20}{str(r.get('symbol')):<9}"
+            f"{str(r.get('strategy')):<18}"
+            f"{str(r.get('start_date'))+'~'+str(r.get('end_date')):<24}"
+            f"{float(r.get('total_return') or 0)*100:>+8.2f}%"
+            f"{float(r.get('max_drawdown') or 0)*100:>8.2f}%"
+            f"{float(r.get('sharpe') or 0):>8.2f}{r.get('trade_count') or 0:>6}"
+        )
+
+
+# ============================== 券商接入点 ==============================
+@cli.group(name="brokers", help="券商接入点：列出 / 试连接 / 看网关能力")
+def brokers_group() -> None:
+    """接入点 = 网关实现 + 资金账号 + 连接参数（见 config/brokers.json）。
+
+    与服务无关，直接读配置 —— 所以**不要求服务在跑**，
+    适合"改完配置先验一下能不能连上"。
+    """
+
+
+@brokers_group.command(name="list", help="列出全部接入点（凭据已脱敏）")
+@click.option("--config", "config_path", default=None, help="接入点配置文件路径")
+def brokers_list(config_path) -> None:
+    from app.core.execution.endpoints import describe_endpoints
+    from app.core.execution.gateway import gateway_signature, list_gateways
+
+    data = describe_endpoints(config_path)
+    _print_endpoints({
+        **data,
+        "gateways": [{"name": g, "params": gateway_signature(g)} for g in list_gateways()],
+    })
+
+
+@brokers_group.command(name="check", help="试连接一个接入点（只查询账户/持仓，不下单）")
+@click.argument("endpoint", required=False, default="")
+@click.option("--config", "config_path", default=None, help="接入点配置文件路径")
+def brokers_check(endpoint, config_path) -> None:
+    from app.core.execution.endpoints import load_endpoints
+    from app.core.execution.gateway import create_gateway, has_gateway, list_gateways
+
+    cfg = load_endpoints(config_path)
+    try:
+        ep = cfg.resolve(endpoint)
+    except Exception as exc:
+        click.secho(f"❌ {exc}", fg="red")
+        sys.exit(1)
+    if ep is None:
+        click.secho(
+            f"❌ 未找到接入点（配置 {cfg.path} 里没有 default_endpoint）", fg="red")
+        click.echo(f"  可用: {[e.id for e in cfg.list()] or '（无）'}")
+        sys.exit(1)
+    if not ep.enabled:
+        click.secho(f"❌ 接入点 {ep.id} 已被禁用（enabled=false）", fg="red")
+        sys.exit(1)
+    if not has_gateway(ep.gateway):
+        click.secho(f"❌ 网关 {ep.gateway!r} 未注册 | 可用: {list_gateways()}", fg="red")
+        sys.exit(1)
+
+    click.secho(f"正在连接 {ep.id}（{ep.label}）…", fg="cyan")
+    gw = None
+    try:
+        gw = create_gateway(ep.gateway, **ep.gateway_kwargs())
+        gw.connect()
+        acct = gw.query_account()
+        poss = gw.query_positions()
+        click.secho(
+            f"✅ 连接成功 | 网关 {getattr(gw, 'name', ep.gateway)} | "
+            f"账号 {getattr(gw, 'account', '') or ep.account or '-'}"
+            + ("（只读档位）" if getattr(gw, "readonly", False) else ""),
+            fg="green", bold=True,
+        )
+        click.echo(
+            f"  总资产 {acct.total_asset:.2f} | 可用 {acct.available:.2f} | "
+            f"冻结 {acct.frozen:.2f} | 市值 {acct.market_value:.2f}"
+        )
+        if poss:
+            click.secho(f"  {'标的':<10}{'持仓':>10}{'可卖':>10}{'成本':>10}", fg="cyan")
+            for sym, p in sorted(poss.items()):
+                click.echo(f"  {sym:<10}{p.size:>10}{p.sellable:>10}{p.avg_price:>10.3f}")
+        else:
+            click.echo("  持仓: 空")
+    except Exception as exc:
+        click.secho(f"❌ 连接失败: {type(exc).__name__}: {exc}", fg="red")
+        sys.exit(1)
+    finally:
+        if gw is not None:
+            try:
+                gw.disconnect()
+            except Exception:
+                pass
+
+
+@brokers_group.command(name="gateways", help="列出可用网关与其可配参数")
+def brokers_gateways() -> None:
+    from app.core.execution.gateway import gateway_signature, list_gateways
+
+    names = list_gateways()
+    if not names:
+        click.secho("没有任何已注册的网关", fg="yellow")
+        return
+    for n in names:
+        click.secho(f"- {n}", fg="cyan", bold=True)
+        for k, v in (gateway_signature(n) or {}).items():
+            click.echo(f"    {k:18s} 默认 {v!r}")
 
 
 # ============================== 多服务编排 ==============================

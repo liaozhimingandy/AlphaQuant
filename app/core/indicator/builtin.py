@@ -24,11 +24,24 @@ def _rolling_mean(arr: np.ndarray, period: int) -> np.ndarray:
 
 
 def _rolling_std(arr: np.ndarray, period: int) -> np.ndarray:
+    """滚动标准差（总体标准差，ddof=0）。
+
+    用「平方的均值 - 均值的平方」一次算完，而不是每个窗口调一次 np.std：
+    后者在 500 根窗口 × 20 周期的场景下是几十万次 Python 层函数调用，
+    回测时会明显拖慢每一根K线。
+    """
     out = np.full(arr.shape, np.nan, dtype=float)
-    if arr.size < period:
+    n = arr.size
+    if n < period:
         return out
-    for i in range(period - 1, arr.size):
-        out[i] = np.std(arr[i - period + 1: i + 1], ddof=0)
+    # 前视窗口会因浮点误差出现极小负数，夹一下避免 sqrt 出 nan
+    cs = np.cumsum(np.insert(arr, 0, 0.0))
+    cs2 = np.cumsum(np.insert(arr * arr, 0, 0.0))
+    s = cs[period:] - cs[:-period]
+    s2 = cs2[period:] - cs2[:-period]
+    mean = s / period
+    var = np.maximum(s2 / period - mean * mean, 0.0)
+    out[period - 1:] = np.sqrt(var)
     return out
 
 

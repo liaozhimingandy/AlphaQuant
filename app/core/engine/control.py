@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
 from app.core.config import settings
 from app.core.engine.event import StandardEvents
@@ -38,6 +38,10 @@ class ControlCenter:
         #: 运行时新增的任务 spec（用于持久化，重启后自动重放）
         self._extra_specs: Dict[str, Dict[str, Any]] = {}
         self._removed_ids: set[str] = set()
+        #: 任务新增后的外部回调（装配器把落库组件的 register_task 挂在这里）。
+        #: 用回调而不是让控制面直接 import 落库组件：控制面不该知道存储细节，
+        #: 而且落库可能是关的（回调为 None 时这条路自然不生效）。
+        self.on_task_added: Optional[Callable[[Any], None]] = None
 
     # ============================================================
     # 内部存取
@@ -129,6 +133,13 @@ class ControlCenter:
                 task.start()
             except Exception as exc:
                 logger.error(f"任务 {task.task_id} 启动失败: {exc}", exc_info=True)
+
+        # 通知外部（落库）：新任务要登记，否则"这轮跑了哪些任务"查不到
+        if self.on_task_added is not None:
+            try:
+                self.on_task_added(task)
+            except Exception as exc:
+                logger.debug(f"任务登记回调失败（忽略）: {exc}")
 
         self._audit("add_task", {"task_id": task.task_id, "symbol": task.symbol})
         self._publish(StandardEvents.TASK_ADDED, task_id=task.task_id, task=task)

@@ -1,0 +1,47 @@
+{
+  "_comment": [
+    "券商接入点配置。一个接入点 = 一种网关 + 一个资金账号 + 一组连接参数。",
+    "切换接哪个券商/哪个账户，改 default_endpoint 或启动时传 --broker-endpoint 即可，不用改代码。",
+    "",
+    "凭据**不要写在这里**：只写「从哪个环境变量取」（credential_env）。",
+    "这样本文件可以安全入库。环境变量示例：",
+    "    set HT_PASSWORD=xxxxxxx        (Windows)",
+    "    export HT_PASSWORD=xxxxxxx     (Linux/macOS)",
+    "",
+    "readonly=true 是首次接入的推荐档位：能查账户/持仓/回报，但不下单。",
+    "先用它跑一两天，确认账本与券商一致，再改成 false 放行交易。"
+  ],
+  "default_endpoint": "sim",
+  "endpoints": {
+    "sim": {
+      "name": "本地模拟托盘",
+      "gateway": "simulated",
+      "account": "SIMULATED",
+      "enabled": true,
+      "readonly": false,
+      "note": "进程内模拟网关：下单→回报→账本→对账全链路可跑通，适合先验证策略。",
+      "params": {
+        "initial_cash": 100000,
+        "fill_delay_calls": 1,
+        "slippage": 0.0005,
+        "fee_rate": 0.0003
+      }
+    },
+    "real": {
+      "name": "实盘主账户",
+      "gateway": "",
+      "account": "",
+      "enabled": false,
+      "readonly": true,
+      "note": "示例。把 gateway 换成你实现的网关名（main.py ctl live gateways 可列出），填上资金账号。",
+      "credential_env": {
+        "password": "AQ_BROKER_PASSWORD",
+        "app_id": "AQ_BROKER_APPID"
+      },
+      "params": {
+        "host": "127.0.0.1",
+        "port": 0
+      }
+    }
+  }
+}

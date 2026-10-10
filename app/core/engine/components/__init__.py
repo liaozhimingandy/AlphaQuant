@@ -11,6 +11,8 @@ from .market import MarketCenterComponent, df_to_bars
 from .news import NewsCenterComponent
 from .strategy import StrategyManagerComponent
 from .collector import DataCollectorComponent, parse_interval
+from .trading_store import TradingStoreComponent
+from .live_gateway import LiveGatewayComponent
 
 __all__ = [
     "IBaseComponent",
@@ -20,5 +22,7 @@ __all__ = [
     "NewsCenterComponent",
     "StrategyManagerComponent",
     "DataCollectorComponent",
+    "TradingStoreComponent",
+    "LiveGatewayComponent",
     "parse_interval",
 ]

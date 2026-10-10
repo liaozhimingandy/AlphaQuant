@@ -9,10 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.database import Base
+from app.db.database import Base, create_sqlite_engine
 from app.repository import stock_repository as stock_repo
 from app.repository.stock_repository import StockRepository, session_scope
 
@@ -21,7 +20,10 @@ class RepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="alphaquant_test_")
         db_path = Path(self.tmp_dir) / "test.db"
-        self.engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+        # 用**生产同款**连接配置（WAL + busy timeout）。
+        # 直接 create_engine 拿不到 WAL —— 那等于用另一套配置测试，
+        # "批量写 + 并发读"的锁问题在测试里永远不会出现。
+        self.engine = create_sqlite_engine(f"sqlite:///{db_path.as_posix()}")
         Base.metadata.create_all(bind=self.engine)
         self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
         self.db = self.Session()
@@ -121,7 +123,8 @@ class TestSessionScope(unittest.TestCase):
         from pathlib import Path
 
         tmp_dir = tempfile.mkdtemp(prefix="alphaquant_test_")
-        self.engine = create_engine(f"sqlite:///{Path(tmp_dir) / 't.db'}")
+        # 同样用生产同款连接配置（WAL），避免"测试用另一套连接配置"
+        self.engine = create_sqlite_engine(f"sqlite:///{Path(tmp_dir) / 't.db'}")
         Base.metadata.create_all(bind=self.engine)
         self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
 

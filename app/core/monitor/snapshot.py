@@ -10,6 +10,7 @@
 # -------------------------------------------------------------------------------
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections import deque
 from datetime import datetime
@@ -19,6 +20,7 @@ from typing import Any, Deque, Dict, List, Optional
 from app.core.config import settings
 from app.utils.jsonio import (
     append_jsonl,
+    dumps,
     json_safe,
     read_json,
     read_jsonl,
@@ -28,6 +30,41 @@ from app.utils.logger import logger
 
 #: 权益曲线最多保留多少个采样点，避免快照体积随运行时长无限膨胀
 MAX_CURVE_POINTS = 400
+
+#: 算"内容指纹"时要剔除的字段。
+#: 这些字段每份快照都不一样（时间戳、序号、心跳、内存占用），
+#: 但它们的差异**不代表状态有任何实质变化**。不剔除的话，
+#: "变了才存"永远成立 —— 每份都会被认为"变了"，等于没做。
+_VOLATILE_KEYS = frozenset({
+    "captured_at", "snapshot_seq", "seq", "ts", "timestamp", "updated_at",
+    "uptime_sec", "uptime", "last_snapshot_at", "age_sec", "elapsed",
+    "memory_mb", "rss_mb", "threads", "api_calls", "requests",
+    "heartbeat", "heartbeat_at", "checked_at", "last_seen",
+})
+
+
+def _strip_volatile(obj: Any) -> Any:
+    """递归去掉易变字段，只留下"状态本体"。"""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_volatile(v)
+            for k, v in obj.items()
+            if k not in _VOLATILE_KEYS
+        }
+    if isinstance(obj, (list, tuple)):
+        return [_strip_volatile(v) for v in obj]
+    return obj
+
+
+def content_fingerprint(snap: Dict[str, Any]) -> str:
+    """对快照的**实质内容**取指纹。
+
+    用途：判断"这次到底有没有变化"，决定要不要落盘。
+    只看状态本体（任务权益/持仓/订单/组件状态），忽略时间戳之类
+    每份都会变的字段——否则比较永远是不相等，等于在按时间无脑写盘。
+    """
+    body = _strip_volatile(snap)
+    return hashlib.blake2b(dumps(body).encode("utf-8"), digest_size=16).hexdigest()
 
 
 def _sample_curve(curve: List[Any], max_points: int = MAX_CURVE_POINTS) -> List[List[Any]]:

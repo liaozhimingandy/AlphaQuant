@@ -338,6 +338,8 @@ def service_cmd(
     collect_period: str = "",
     collect_symbols: Optional[List[str]] = None,
     collector_config: str = "",
+    broker_gateway: str = "",
+    broker_endpoint: str = "",
 ) -> List[str]:
     """拼出 ``python -m app.core.engine.service_runner ...`` 的完整命令。"""
     cmd: List[str] = [python or sys.executable, "-m", "app.core.engine.service_runner"]
@@ -379,6 +381,10 @@ def service_cmd(
         cmd += ["--collect-symbol", str(s)]
     if collector_config:
         cmd += ["--collector-config", str(collector_config)]
+    if broker_gateway:
+        cmd += ["--broker-gateway", str(broker_gateway)]
+    if broker_endpoint:
+        cmd += ["--broker-endpoint", str(broker_endpoint)]
     return cmd
 
 

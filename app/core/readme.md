@@ -3,7 +3,11 @@
 > 目标：一个后台常驻服务，支持**自定义因子**、**策略自由组合**、**实时新闻事件触发交易**、
 > **大模型分析新闻**、**可插拔风控**，并且**一个引擎同时跑多个量化任务**；
 > 同时**跑起来以后看得见、管得住**——网页面板、运行快照、运行中增删任务、
-> 多进程服务协作。
+> 多进程服务协作；并且**回测 / 模拟盘 / 实盘三套环境共用同一套策略代码**。
+>
+> 📖 **端到端数据流闭环、三种运行模式的差别、完整操作闭环、排查路径** →
+> 见 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)。
+> 本文聚焦"核心层为什么这么设计"。
 
 ---
 
@@ -145,6 +149,22 @@ on_bar(Bar)                          on_news(NewsItem, NewsAnalysis)
 
 ### 3.2 运行快照：事后复盘靠它
 
+**先分清两件事**：面板每 2s 刷新读的是**引擎内存**（不落盘）；
+快照落盘是另一件事，默认 `on_event` —— **有操作才写**。
+
+| 模式 | 触发 |
+|---|---|
+| `on_event`（默认） | 下单/成交/撤单/拒单、任务增删改暂停恢复、组件启停、控制指令、引擎启停 |
+| `on_change` | 定期查内容指纹，真变了才写 |
+| `interval` | 到点就写 |
+| `off` | 不写历史快照 |
+
+`BAR_RECEIVED` **不在触发白名单里**：行情自己跳动、权益随之浮动不构成状态变更
+（那是同一份状态的不同读数）。放进去就等于回到"行情一动就写盘"。
+
+合并突发有两道闸：`MONITOR_SNAPSHOT_DEBOUNCE`（1s，把同一批操作并成一份）、
+`MONITOR_SNAPSHOT_MIN_GAP`（2s，两次落盘的最小间隔）。
+
 ```
 output/snapshots/<run_id>/
 ├── latest.json     最新一份完整快照（原子写：先写临时文件再 os.replace）
@@ -153,8 +173,8 @@ output/snapshots/<run_id>/
 └── history/*.json  历史快照，按 MONITOR_SNAPSHOT_KEEP 滚动保留
 ```
 
-每份快照：引擎状态 + 所有组件状态与健康度 + 每个任务的
-**权益曲线 / 成交 / 订单 / 新闻 / 风控规则 / 错误** + 监控自身统计。
+每份快照：引擎状态（含 `snapshot_reason`，**写明这次是为什么写的**）+ 所有组件状态与
+健康度 + 每个任务的**权益曲线 / 成交 / 订单 / 新闻 / 风控规则 / 错误** + 监控自身统计。
 权益曲线会降采样到 400 个点（`_sample_curve`），否则跑一年的 run
 光曲线就有几十万个点，面板直接卡死。
 
@@ -164,6 +184,8 @@ output/snapshots/<run_id>/
   如果在工作线程里遍历而主线程正在增删任务，
   就是 `RuntimeError: dictionary changed size during iteration`
 - `persist()` 是拆出来的另一半，专门丢给线程池——磁盘慢的时候不能卡住交易
+- `mark_dirty()` 可以从**任意线程**调（成交回报是在工作线程处理的），
+  但它用 `reactor.callFromThread` 把排程交回 reactor 线程——`callLater` 不是线程安全的
 
 读快照则简单得多：`os.replace` 保证 `latest.json` 永远是完整文件，面板随便读，
 不会读到半截 JSON。
@@ -342,9 +364,35 @@ CollectJob(symbol × period × interval)
 | 加一个自定义指标 | `app/core/indicator/builtin.py` | 继承 `IBaseIndicator`，加 `@register_indicator` |
 | 加一条风控 | `app/core/risk/builtin.py` | 继承 `IBaseRiskRule`，加 `@register_risk` |
 | 组合出一个新策略 | **不用写代码** | 在 `config/tasks.json` 里用 `all/any/not` + 规则拼装 |
+| 写一个自己的策略（回测+实盘） | `strategies/` 目录 | 丢一个 `.py` 进去，自动发现；`main.py strategy new <名字>` 生成模板 |
+| 不写代码做回测 | `declarative` 策略 | 把规则写成 JSON，面板/命令行直接跑 |
 | 加一个新闻源 | `app/core/news/source.py` | 继承 `IBaseNewsSource`，加 `@register_news_source` |
 | 接大模型 | `settings.LLM_API_KEY` / `NEWS_ANALYZER=llm` | 未配 key 时自动降级到规则版，服务照常跑 |
-| 换券商 | `app/core/execution/broker.py` | 实现 `IBaseBroker`（当前是 `SimulatedBroker`） |
+| 换券商 | `app/core/execution/gateway.py` | 实现 `IBrokerGateway`（7 个方法）+ `@register_gateway`，再在 `config/brokers.json` 加接入点 |
+| 加一个券商账户/切换账户 | `config/brokers.json` | 加一个接入点，`--broker-endpoint <id>` 引用它 |
+
+### 自定义策略的两条链路
+
+项目里有**两套策略接口**，因为运行引擎不同：
+
+| 链路 | 基类 | 用在哪 |
+|---|---|---|
+| 回测 | `backtrader.Strategy` | `python main.py backtest --strategy <名字>`、面板「回测监控」 |
+| 实盘/模拟 | `IBaseStrategy` | `config/tasks.json` 的 `"strategy": {"type": "<名字>"}` |
+
+但**发现机制是同一套**（`app/core/strategy/discovery.py`），所以你可以把同一个想法
+写成两个类放进一个文件 —— 回测验证过的参数直接用于实盘，不用手抄一遍。
+
+注册名优先取类里的 `STRATEGY_NAME`（改名不影响配置），否则由类名推导：
+`DualMaStrategy` → `dual_ma`。
+
+```bash
+python main.py strategies --reload        # 重新扫描
+python main.py ctl strategies --reload    # 运行中的服务热重载
+python main.py strategy new my_idea       # 生成模板（回测版 + 实盘版）
+```
+
+一个写坏的文件**只跳过它并记日志**，不会让程序起不来。
 
 ### 策略组合示例（纯配置，零代码）
 
@@ -381,15 +429,22 @@ app/core/
 │   └── spec.py        频率解析 / 交易时段判断 / CollectJob / CollectorSpec / 配置加载
 ├── rule/          规则层：All/Any/Not 组合器 + 阈值/穿越规则，spec 支持声明式构造
 ├── strategy/      策略层：Combo/MaCross/NewsDriven，双通道 decide()
+│   ├── registry.py      注册表
+│   └── discovery.py     用户策略发现（回测链路与实盘链路共用同一套扫描逻辑）
 ├── risk/          风控层：闸门链，任一否决即拒绝；支持 scale 缩仓
 ├── portfolio/     组合层：Portfolio 账本 + Sizer（fixed/percent/all_in）
-├── execution/     执行层：SimulatedBroker（即时成交，无挂单）
+├── execution/     执行层
+│   ├── broker.py      SimulatedBroker（即时成交，无挂单）
+│   ├── gateway.py     IBrokerGateway + 内置模拟网关 + 注册表
+│   ├── endpoints.py   券商接入点（网关 + 资金账号 + 凭据来源，凭据只存环境变量名）
+│   └── live_broker.py LiveBroker（回报驱动 + 对账 + 前置校验）
 ├── task/          任务层：QuantTask 实例 + TaskRuntime 容器 + 声明式 spec
 ├── news/          新闻层：RSS/Atom 源 → 去重 → Keyword/LLM 分析 → NewsEvent
 ├── monitor/       可观测层
 │   ├── dashboard.py   自包含面板 HTML/CSS/JS（零 CDN，canvas 画权益曲线）
 │   ├── web.py         MonitorWebComponent + /api/* 路由（挂在引擎 reactor 上）
-│   └── snapshot.py    SnapshotStore：采集 / 原子落盘 / 订单流 / 历史滚动
+│   ├── snapshot.py    SnapshotStore：采集 / 原子落盘 / 订单流 / 历史滚动
+│   └── backtest_api.py 回测作业管理（提交 → 线程池执行 → 结果落库）
 ├── bus/           跨进程协作层
 │   ├── filebus.py     FileBus：JSONL append + byte offset 增量读 + 头部指纹防错位
 │   └── components.py  BusPublisher / BusSubscriber 两个标准引擎组件
@@ -492,6 +547,31 @@ python main.py backtest -s 000001 --start 2023-01-01 --end 2024-06-30
 20. **周线因子不能用 ffill/bfill 对齐**。`ffill` 整周滞后，`bfill` 是未来函数
     （周一就知道周五收盘）。本周就必须用"已有最后一根"，逐根因果推进。
     写参照实现时要逐根截断重算，否则验证本身就在骗人。
+21. **快照只能由"操作"触发**。`BAR_RECEIVED` 不能进触发白名单 ——
+    行情一动就写盘，等于把"有操作才存"又变回"按时间存"。
+    另外 `mark_dirty()` 会从工作线程被调用（成交回报），排程必须回 reactor 线程，
+    `callLater` 不是线程安全的。
+22. **`None` 不等于 `False`**。`snapshot_enabled=None` 表示"用默认值"，
+    写成 `if snapshot_enabled else` 会把它当假值 —— 日志于是写"快照关"而实际开着。
+    这类"看起来是关的其实开着"的日志比没有日志更害人。
+23. **接入点的凭据只存环境变量名**。写进配置文件就一定会随文件泄漏；
+    面板/CLI 输出一律打码。
+24. **显式指定的接入点找不到必须报错**。静默降级到另一个账户是实盘里最危险的行为
+    （用户以为连的是实盘主账户，实际连了模拟托盘）。
+25. **接入点参数要按网关构造签名过滤**。各家网关用不上的字段是常态，
+    原样透传会因为"多配了一个字段"抛 TypeError —— 那恰恰是接新券商时最容易踩的坑。
+26. **券商账户查询必须缓存**。查询接口是秒级网络 IO 且有频率限制，
+    面板每 2 秒刷新一次根本承受不起。
+27. **回测默认值只能有一个来源**。散在 CLI 默认值、面板 HTML 的 `value=`、
+    作业 API 硬编码里，三份迟早不一致，"命令行跑的"和"面板跑的"结果就不一样了。
+28. **用户策略加载失败只跳过该文件，但必须记日志**。不记的话用户会以为
+    "我的策略没被发现"，然后花时间怀疑注册表。
+29. **惰性初始化不能用"容器非空"做守卫**。`if _REGISTRY: return` 会让
+    "先注册用户扩展"把内置项永远挡在门外（内置策略曾因此全部消失）。
+    要么拆成独立的 `_loaded` 标志，要么按项判断。
+30. **SQLite 必须开 WAL 并把 busy timeout 放宽**。本项目同时有后台批量落库
+    和面板随时查询，默认的 rollback-journal + 5 秒等待在慢磁盘上必然报
+    `database is locked` —— 看起来像代码 bug，其实只是等得太短。
 21. **配置与命令行的采集标的要合并，不要二选一**。二选一会让用户纳闷
     "我在命令行指定的标的为什么没被采集"；同时要按 `symbol:period` 去重，
     否则同一个标的会被采两遍，白白翻倍消耗数据源配额。

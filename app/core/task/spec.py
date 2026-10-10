@@ -33,7 +33,10 @@ class TaskSpec:
     slippage: float = 0.0005
     warmup_bars: int = 60
     max_hold_bars: int = 0
-    run_mode: str = RunMode.SIMULATE.value
+    #: 运行模式。"跟随引擎"是默认（空串），不是硬编码 SIMULATE ——
+    #: 否则用 LIVE 起引擎时任务仍在模拟撮合，而看板上一切正常，
+    #: 这是最危险的一类错配：用户以为在实盘，其实一笔真单都没发。
+    run_mode: str = ""
     enabled: bool = True
     #: 关注的事件标的；留空表示只关注自己的 symbol
     watch_symbols: List[str] = field(default_factory=list)
@@ -59,8 +62,23 @@ class TaskSpec:
         }
 
 
-def build_task(spec: TaskSpec | Mapping[str, Any]) -> QuantTask:
-    """把配置装配成可运行的任务。"""
+def _mode_value(run_mode: Any) -> str:
+    """把引擎级运行模式归一成字符串（兼容 RunMode 枚举与裸字符串）。"""
+    if run_mode is None or run_mode == "":
+        return RunMode.SIMULATE.value
+    return str(getattr(run_mode, "value", run_mode))
+
+
+def build_task(spec: TaskSpec | Mapping[str, Any], gateway: Any = None,
+               run_mode: Any = None) -> QuantTask:
+    """把配置装配成可运行的任务。
+
+    :param gateway: 实盘模式下由引擎注入的**共享**券商网关。
+                    不传则各任务自建连接（只适合单机调试）。
+    :param run_mode: 引擎级运行模式。任务 spec 没显式指定时就跟随它 ——
+                     否则用 LIVE 起引擎、任务却悄悄跑模拟撮合，
+                     而面板上一切正常，用户会以为自己在实盘。
+    """
     if isinstance(spec, TaskSpec):
         cfg = spec
     elif isinstance(spec, Mapping):
@@ -83,8 +101,9 @@ def build_task(spec: TaskSpec | Mapping[str, Any]) -> QuantTask:
         sizer=build_sizer(cfg.sizer),
         warmup_bars=cfg.warmup_bars,
         max_hold_bars=cfg.max_hold_bars,
-        run_mode=RunMode(cfg.run_mode),
+        run_mode=RunMode(cfg.run_mode or _mode_value(run_mode)),
         meta={**cfg.meta, "name": cfg.name, "watch_symbols": list(cfg.watch_symbols)},
+        gateway=gateway,
     )
 
 
@@ -115,7 +134,7 @@ def parse_task_spec(raw: Mapping[str, Any]) -> TaskSpec:
         slippage=float(raw.get("slippage", 0.0005)),
         warmup_bars=int(raw.get("warmup_bars", 60)),
         max_hold_bars=int(raw.get("max_hold_bars", 0)),
-        run_mode=str(raw.get("run_mode", RunMode.SIMULATE.value)),
+        run_mode=str(raw.get("run_mode") or ""),
         enabled=bool(raw.get("enabled", True)),
         watch_symbols=list(raw.get("watch_symbols") or []),
         meta=dict(raw.get("meta") or {}),
