@@ -180,7 +180,7 @@ def run_probes():
 
 def main():
     global engine, TMP
-    from app.core.engine.builder import build_engine
+    from app.engine.builder import build_engine
 
     cfg = {
         "interval": "30m",          # 冒烟期间别真去高频请求数据源

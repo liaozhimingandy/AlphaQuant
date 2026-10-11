@@ -20,9 +20,9 @@ from typing import Any, Optional
 
 import backtrader as bt
 
-from app.core.factor.context import FactorContext
-from app.core.market.types import Side, Signal, SignalSource
-from app.core.strategy.base import IBaseStrategy
+from app.feature.context import FactorContext
+from app.domain.types import Side, Signal, SignalSource
+from app.strategy.base import IBaseStrategy
 
 
 # ===========================================================================

@@ -17,10 +17,13 @@ dist/
 # 运行产物：全是跑出来的东西，不该进版本库
 #   output/ 运行快照、运行时任务、服务状态、跨进程消息总线、*.pid / *.stop
 #   logs/   每天一个日志文件
-#   data/   本地 SQLite 库 + 导出的 CSV（随时可重建）
+#   /data/  本地 SQLite 库 + 导出的 CSV（随时可重建）
+#
+# 注意：这里必须写成 /data/ 。裸写 data/ 会匹配**任意层级**的 data 目录，
+# 连 app/data/ 这个源码包一起忽略掉（它曾因此长期游离在版本控制之外）。
 output/
 logs/
-data/
+/data/
 *.pid
 *.stop
 
@@ -29,3 +32,6 @@ data/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 测试临时目录（受管控 Windows 环境下系统 temp 会被文件锁阻塞，改用项目内）
+.pytest_tmp/

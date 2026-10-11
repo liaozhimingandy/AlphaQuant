@@ -1,0 +1,115 @@
+[32m2026-10-11 18:14:51[0m | [1mINFO    [0m | [35mregistry.py:440[0m | [33m_load_weights[0m | [36m已加载数据源权重: {'akshare': 1.0, 'tushare': 1.0, 'akshare_flow': 0.1, 'akshare_em': 0.25, 'xueqiu_hot': 0.25, 'akshare_spot': 0.25, 'baostock_daily': 1.0, 'akshare_daily': 1.0, 'astockdata': 1.0, 'mootdx': 1.0}[0m
+............................................................................................................... [ 14%]
+.................................................................F...... [ 23%]
+........................................................................ [ 32%]
+......................................................FFFFFFFFFFF....... [ 41%]
+........................................................................ [ 50%]
+........................................................................ [ 59%]
+....................................F............................F.F.... [ 69%]
+....FFF.................................................+++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++
+~~~~~~~~~~~~~~~~~~~~~~~~ Stack of test-reaper (40672) ~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\threading.py", line 1044, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\threading.py", line 1082, in _bootstrap_inner
+    self._context.run(self.run)
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\threading.py", line 1024, in run
+    self._target(*self._args, **self._kwargs)
+  File "D:\Git\AlphaQuant\app\tests\helpers.py", line 99, in _drain_trash
+    shutil.rmtree(target, ignore_errors=True)
+  File "D:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\vendor\shim\sitecustomize.py", line 1209, in _safe_shutil_rmtree
+    _try_trash(abs_path, recursive=True)
+  File "D:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\vendor\shim\sitecustomize.py", line 1003, in _try_trash
+    _platform_trash(abs_path)
+  File "D:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\vendor\shim\sitecustomize.py", line 144, in _platform_trash
+    result = _shell32.SHFileOperationW(byref(fileop))
+~~~~~~~~~~~~~~~~~~~~~~ Stack of loguru-writer-2 (24100) ~~~~~~~~~~~~~~~~~~~~~~~
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\threading.py", line 1044, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\threading.py", line 1082, in _bootstrap_inner
+    self._context.run(self.run)
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\threading.py", line 1024, in run
+    self._target(*self._args, **self._kwargs)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\loguru\_handler.py", line 300, in _queued_writer
+    message = queue.get()
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\multiprocessing\queues.py", line 385, in get
+    res = self._reader.recv_bytes()
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\multiprocessing\connection.py", line 226, in recv_bytes
+    buf = self._recv_bytes(maxlength)
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\multiprocessing\connection.py", line 335, in _recv_bytes
+    waitres = _winapi.WaitForMultipleObjects(
+~~~~~~~~~~~~~~~~~~~~~~~~~ Stack of MainThread (31912) ~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pytest\__main__.py", line 9, in <module>
+    raise SystemExit(_console_main())
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229, in _main
+    ret: ExitCode | int = config.hook.pytest_cmdline_main(config=config)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\main.py", line 377, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\main.py", line 330, in wrap_session
+    session.exitstatus = doit(config, session) or 0
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\main.py", line 384, in _main
+    config.hook.pytest_runtestloop(session=session)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\main.py", line 408, in pytest_runtestloop
+    item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\runner.py", line 118, in pytest_runtest_protocol
+    runtestprotocol(item, nextitem=nextitem)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\runner.py", line 139, in runtestprotocol
+    reports.append(call_and_report(item, "call", log))
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\runner.py", line 249, in call_and_report
+    call = CallInfo.from_call(
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\runner.py", line 361, in from_call
+    result: TResult | None = func()
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\runner.py", line 250, in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\runner.py", line 184, in pytest_runtest_call
+    item.runtest()
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\_pytest\unittest.py", line 410, in runtest
+    testcase(result=self)
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\unittest\case.py", line 725, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\unittest\case.py", line 672, in run
+    self._callTearDown()
+  File "C:\Users\liaoz\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\unittest\case.py", line 629, in _callTearDown
+    self.tearDown()
+  File "D:\Git\AlphaQuant\app\tests\test_repository.py", line 33, in tearDown
+    self.engine.dispose()
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 3220, in dispose
+    self.pool.dispose()
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\sqlalchemy\pool\impl.py", line 224, in dispose
+    conn.close()
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\sqlalchemy\pool\base.py", line 784, in close
+    self.__close()
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\sqlalchemy\pool\base.py", line 883, in __close
+    self.__pool._close_connection(
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\sqlalchemy\pool\base.py", line 375, in _close_connection
+    self._dialect.do_close(connection)
+  File "D:\Git\AlphaQuant\.venv\Lib\site-packages\sqlalchemy\engine\default.py", line 721, in do_close
+    dbapi_connection.close()
++++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++

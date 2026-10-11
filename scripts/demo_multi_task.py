@@ -5,9 +5,9 @@ from datetime import datetime
 
 from twisted.internet import reactor
 
-from app.core.engine.builder import build_engine
-from app.core.market.types import NewsItem
-from app.utils.logger import logger
+from app.engine.builder import build_engine
+from app.domain.types import NewsItem
+from app.common.logging import logger
 
 
 def main():

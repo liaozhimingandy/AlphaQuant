@@ -43,7 +43,7 @@ def main() -> int:
     argv = sys.argv[1:] or ["start"]
     sys.argv = [sys.argv[0], *argv]
 
-    from app.core.config import settings
+    from app.common.config import settings
 
     exit_code = 0
     try:

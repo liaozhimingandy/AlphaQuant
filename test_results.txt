@@ -1,0 +1,36 @@
+test_backtest.py :: 18 passed in 3.92s
+test_calendar.py :: 20 passed in 1.36s
+test_clean.py :: 19 passed in 0.14s
+test_collector.py :: 62 passed, 33 subtests passed in 2.24s
+test_component_progress.py :: 28 passed in 24.41s
+test_control.py :: 35 passed in 2.91s
+test_core_layers.py :: 16 passed in 0.50s
+test_dashboard_js.py :: 14 passed in 0.04s
+test_data_categories.py :: 49 passed in 2.82s
+test_data_fabric.py :: 48 passed in 0.66s
+test_data_integrity.py :: HANG/TIMEOUT
+test_datasource.py :: 11 passed in 0.11s
+test_endpoints.py :: 18 passed in 0.20s
+test_factor_lab.py :: 46 passed in 11.97s
+test_filebus.py :: 24 passed in 2.64s
+test_kline_sources.py :: 19 passed in 1.72s
+test_live_execution.py :: 36 passed in 1.47s
+test_marketx_retry_sources.py :: 33 passed in 9.15s
+test_monitor.py :: 21 passed in 20.16s
+test_net_transport.py :: 33 passed in 2.33s
+test_news.py :: 25 passed in 0.53s
+test_pool_exclusions.py :: 9 passed in 1.79s
+test_pool_hot_flow_names.py :: 10 passed in 3.70s
+test_pool_refresh_day.py :: 5 passed in 2.36s
+test_repository.py :: HANG/TIMEOUT
+test_risk_sizer.py :: 16 passed in 0.13s
+test_score_pool.py :: 48 passed in 2.83s
+test_source_retry_and_dedup.py :: 17 passed in 38.02s
+test_source_weights.py :: 18 passed in 1.69s
+test_task_runtime.py :: 16 passed in 2.94s
+test_trading_store.py :: 31 passed in 3.61s
+test_user_strategy.py :: 29 passed in 2.48s
+=== ALL DONE ===
+
+文件: 全过 30 / 有失败 0 / 卡死 2
+用例: 通过 774 / 失败 0

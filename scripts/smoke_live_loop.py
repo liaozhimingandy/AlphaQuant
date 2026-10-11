@@ -36,12 +36,12 @@ def section(title: str) -> None:
 
 
 def main() -> int:
-    from app.core.engine.builder import build_engine
-    from app.core.engine.event import StandardEvents
-    from app.core.market.clean import BarCleaner, is_tradable
-    from app.core.market.types import Bar
-    from app.core.risk import list_risks
-    from app.repository.trading_repository import TradingRepository
+    from app.engine.builder import build_engine
+    from app.engine.event import StandardEvents
+    from app.domain.clean import BarCleaner, is_tradable
+    from app.domain.types import Bar
+    from app.risk import list_risks
+    from app.storage.repo.trade_repo import TradingRepository
 
     # ============================================================
     section("① 数据采集：清洗层独立可用")
@@ -66,9 +66,9 @@ def main() -> int:
     # ============================================================
     section("② 因子 / 指标：参数化 + 缓存")
     # ============================================================
-    from app.core.factor.context import FactorContext
-    from app.core.indicator.registry import cache_stats, clear_cache
-    from app.core.market.series import BarSeries
+    from app.feature.context import FactorContext
+    from app.feature.indicator.registry import cache_stats, clear_cache
+    from app.domain.series import BarSeries
 
     series = BarSeries("000001", maxlen=500)
     for i in range(120):
@@ -178,7 +178,7 @@ def main() -> int:
     # ============================================================
     section("⑥ 落库：交易数据进了 SQLite")
     # ============================================================
-    from app.repository.trading_repository import get_repository
+    from app.storage.repo.trade_repo import get_repository
 
     get_repository().flush()
     run_id = store.run_id

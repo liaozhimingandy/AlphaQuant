@@ -1,0 +1,7 @@
+[32m2026-10-11 19:55:41[0m | [1mINFO    [0m | [35mregistry.py:440[0m | [33m_load_weights[0m | [36m已加载数据源权重: {'akshare': 1.0, 'tushare': 1.0, 'akshare_flow': 0.1, 'akshare_em': 0.25, 'xueqiu_hot': 0.25, 'akshare_spot': 0.25, 'baostock_daily': 1.0, 'akshare_daily': 1.0, 'astockdata': 1.0, 'mootdx': 1.0}[0m
+============================= test session starts =============================
+collecting ... collected 12 items
+
+app/tests/test_repository.py::TestUpsert::test_empty_records PASSED      [  8%]
+app/tests/test_repository.py::TestUpsert::test_insert PASSED             [ 16%]
+app/tests/test_repository.py::TestUpsert::test_missing_field_raises 

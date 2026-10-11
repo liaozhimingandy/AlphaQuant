@@ -15,7 +15,7 @@ sys.path.insert(0, r"D:/Git/AlphaQuant")
 
 from twisted.internet import reactor, threads  # noqa: E402
 
-from app.core.engine.builder import build_engine  # noqa: E402
+from app.engine.builder import build_engine  # noqa: E402
 
 BASE = "http://127.0.0.1:8791"
 FAILED = []
@@ -133,8 +133,8 @@ def run_probes():
     check("删除任务", r.get("ok") is True and SM.runtime.get("smoke-manual") is None, f"{r}")
 
     # 运行时任务应已固化到磁盘
-    from app.core.config import settings as _settings
-    from app.utils.jsonio import read_json
+    from app.common.config import settings as _settings
+    from app.common.jsonio import read_json
 
     saved = read_json(_settings.RUNTIME_DIR / "default" / "tasks.json")
     check("运行时任务已固化", isinstance(saved, dict) and "removed_ids" in saved,
@@ -227,7 +227,7 @@ def run_probes():
     check("切回 on_change", r.get("ok") is True and r.get("mode") == "on_change", f"{r}")
 
     print("\n--- 快照落盘 ---")
-    from app.core.monitor.snapshot import SnapshotStore
+    from app.monitoring.snapshot import SnapshotStore
 
     runs = SnapshotStore.runs()
     check("快照 run 已创建", len(runs) >= 1, f"{[r['run_id'] for r in runs]}")
@@ -239,7 +239,7 @@ def run_probes():
 
 
 def done(result):
-    from app.core.config import settings
+    from app.common.config import settings
 
     print(f"\n快照目录: {settings.SNAPSHOT_DIR}")
     print(f"运行时目录: {settings.RUNTIME_DIR}")

@@ -2,125 +2,98 @@
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
 # @FileName    : score_strategy.py
-# @Description : 综合评分回测策略（backtrader 链路）
+# @Description : 综合评分策略（事件引擎链路）
 #
-#                与实盘 ScoreStrategy 用**同一套评分数据**（stock_score 表）：
-#                这样"回测里选出来的票"和"实盘要买的票"是同一批，
-#                而不是回测用一套打分、实盘用另一套 —— 那是最常见的自欺。
+#                与单因子策略的本质区别：**它不自己判断，而是消费打分引擎的结论**。
+#                好处是"判断逻辑"集中在打分引擎里，一份权重配置同时服务于
+#                选股（股票池）和择时（本策略），两边口径必然一致。
 #
-#                评分是**日频**的：一根K线上只有一个分。
-#                所以这里不做任何"日内"逻辑，只在每日收盘决策。
+#                参数：
+#                  entry_score  综合分 ≥ 此值 → 买入（默认 70）
+#                  exit_score   综合分 ≤ 此值 → 卖出（默认 55）
+#                  hold_score   持仓期间低于此值也减仓？——刻意**不做**。
+#                               频繁进出会把手续费吃光，评分小幅波动不该触发交易。
 #
-#                取不到当天评分时**不动手**（不买也不卖）。
-#                这是与实盘一致的保守选择。
+#                关键设计：**评分缺失（None）时不动手**。
+#                拿不到评分可能是因为数据没同步，此时"不交易"是唯一安全的选择 ——
+#                凭空假设一个分数去交易，比不交易危险得多。
 # @Project     : AlphaQuant
 # -------------------------------------------------------------------------------
 from __future__ import annotations
 
-from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-import backtrader as bt
-
-from app.utils.logger import logger
-
-STRATEGY_NAME = "score"
+from app.feature.context import FactorContext
+from app.domain.types import Side, Signal, SignalSource
+from app.strategy.base import IBaseStrategy
+from app.strategy.registry import register_strategy
 
 
-class ScoreStrategy(bt.Strategy):
-    """按多维度综合分决策的回测策略。"""
+@register_strategy
+class ScoreStrategy(IBaseStrategy):
+    """按多维度综合分决策。"""
 
-    STRATEGY_NAME = STRATEGY_NAME
+    name = "score"
+    description = "多维度综合评分策略（题材+资金链+筹码+技术+涨停）"
 
-    params = dict(
-        entry_score=70.0,
-        exit_score=55.0,
-        lot_size=100,
-        cash_buffer=0.95,
-        printlog=False,
-        symbol="",
-    )
+    def __init__(
+        self,
+        entry_score: float = 70.0,
+        exit_score: float = 55.0,
+        min_score_gap: float = 0.0,
+        **params: Any,
+    ) -> None:
+        super().__init__(entry_score=entry_score, exit_score=exit_score, **params)
+        self.entry_score = float(entry_score)
+        self.exit_score = float(exit_score)
+        self.min_score_gap = float(min_score_gap)
+        if self.exit_score > self.entry_score:
+            # 出口高于入口会造成"刚买就卖"的抖动，直接拒绝这种配置
+            raise ValueError(
+                f"exit_score({self.exit_score}) 不能大于 entry_score({self.entry_score})"
+            )
 
-    def __init__(self) -> None:
-        self.order = None
-        self._scores: Dict[str, float] = self._load_scores()
-        self._used = 0
-        self._missed = 0
-
-    # ------------------------------------------------------------------
-    def _load_scores(self) -> Dict[str, float]:
-        """一次性把该标的的历史评分读进内存。
-
-        在 __init__ 里读而不是每根K线查库：后者会让一次回测变成几千次查询，
-        而且回测期间数据是静态的，没必要反复读。
-        """
-        symbol = str(self.p.symbol or getattr(self.data, "_name", "") or "")
-        if not symbol:
-            return {}
+    def _score(self, ctx: FactorContext) -> Optional[float]:
+        v = ctx.feature("composite_score")
+        if v is None:
+            return None
         try:
-            from app.db.database import SessionLocal
-            from app.db.models import StockScore
+            s = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if s != s else s
 
-            with SessionLocal() as s:
-                rows = (s.query(StockScore)
-                        .filter(StockScore.symbol == symbol)
-                        .all())
-            return {str(r.date): float(r.total_score)
-                    for r in rows if r.total_score is not None}
-        except Exception as exc:
-            logger.warning(f"[score] 读取历史评分失败（该策略不会触发交易）: {exc}")
-            return {}
-
-    def _score_on(self, day: date) -> Optional[float]:
-        return self._scores.get(str(day))
-
-    # ------------------------------------------------------------------
-    def log(self, msg: str) -> None:
-        if self.p.printlog:
-            print(f"{self.data.datetime.date(0)} | {msg}")
-
-    def notify_order(self, order) -> None:
-        if order.status in (order.Submitted, order.Accepted):
-            return
-        self.order = None
-
-    def next(self) -> None:
-        if self.order is not None:
-            return
-        day = self.data.datetime.date(0)
-        score = self._score_on(day)
+    def decide(
+        self,
+        ctx: FactorContext,
+        state: Any,
+        source: SignalSource = SignalSource.BAR,
+        event: Any = None,
+    ) -> Optional[Signal]:
+        score = self._score(ctx)
         if score is None:
-            self._missed += 1
-            return
-        self._used += 1
+            return None
 
-        if not self.position:
-            if score >= float(self.p.entry_score):
-                price = float(self.data.close[0])
-                if price <= 0:
-                    return
-                size = int(self.broker.getcash() * float(self.p.cash_buffer)
-                           / price / int(self.p.lot_size)) * int(self.p.lot_size)
-                if size > 0:
-                    self.log(f"评分 {score:.1f} ≥ {self.p.entry_score} → 买入 {size}")
-                    self.order = self.buy(size=size)
-            return
+        if not state.has_position:
+            if score >= self.entry_score:
+                # 强度按超出阈值的程度给，用于下游 sizer 决定仓位
+                strength = min(1.0, 0.5 + (score - self.entry_score) / 60.0)
+                return self.make_signal(
+                    state, Side.BUY, source,
+                    reason=f"综合评分 {score:.1f} ≥ {self.entry_score}",
+                    strength=strength,
+                    meta={"score": score},
+                )
+            return None
 
-        if score <= float(self.p.exit_score):
-            self.log(f"评分 {score:.1f} ≤ {self.p.exit_score} → 平仓")
-            self.order = self.close()
-
-    def stop(self) -> None:
-        if not self._scores:
-            logger.warning(
-                "[score] 该标的没有历史评分数据，回测不会产生任何交易。"
-                "先跑 `python main.py pool refresh` 生成评分。"
+        if score <= self.exit_score:
+            return self.make_signal(
+                state, Side.SELL, source,
+                reason=f"综合评分 {score:.1f} ≤ {self.exit_score}",
+                strength=1.0,
+                meta={"score": score},
             )
-        else:
-            logger.info(
-                f"[score] 回测结束 | 评分覆盖 {self._used} 天 / 缺失 {self._missed} 天 | "
-                f"期末权益 {self.broker.getvalue():,.2f}"
-            )
+        return None
 
 
 __all__ = ["ScoreStrategy"]

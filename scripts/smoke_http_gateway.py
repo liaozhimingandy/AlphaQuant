@@ -163,13 +163,13 @@ def main() -> int:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"迷你券商已启动: http://127.0.0.1:{port}\n")
 
-    from app.core.execution.gateway import (
+    from app.execution.gateway import (
         GatewayError,
         OrderRejected,
         OrderRequest,
         create_gateway,
     )
-    from app.core.market.types import OrderStatus, Side
+    from app.domain.types import OrderStatus, Side
 
     print("=" * 66)
     print("① 构造与连接")

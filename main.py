@@ -3,8 +3,10 @@
 # -------------------------------------------------------------------------------
 # @FileName    : main.py
 # @Description : AlphaQuant 统一入口
-#               原先这里堆了 5 个实验性质的 run_backtest1~5，
-#               已全部收敛到 app/cli.py，回测逻辑统一在 app/backtest/。
+#               原先这里堆了 5 个实验性质的 run_backtest1~5，已全部收敛。
+#               命令实现在 app/cli/ 包里（按职责切成 data/strategy/engine/
+#               control/research/pool/hub/broker 九个模块），回测逻辑在 app/research/。
+#               三者等价：python main.py ... / python -m app.cli ... / alphaquant ...
 # @Project     : AlphaQuant
 # -------------------------------------------------------------------------------
 import sys

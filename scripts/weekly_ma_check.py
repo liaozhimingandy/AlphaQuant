@@ -18,12 +18,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.factor import create_factor
-from app.core.factor.context import FactorContext
-from app.core.indicator import create_indicator
-from app.core.market.series import BarSeries
-from app.core.market.types import Bar
-from app.test.helpers import make_uptrend
+from app.feature import create_factor
+from app.feature.context import FactorContext
+from app.feature.indicator import create_indicator
+from app.domain.series import BarSeries
+from app.domain.types import Bar
+from app.tests.helpers import make_uptrend
 
 
 def build_series(df: pd.DataFrame, symbol: str = "000001") -> BarSeries:

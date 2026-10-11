@@ -5,7 +5,7 @@
 | 你写的类 | 用在哪 |
 | --- | --- |
 | 继承 `backtrader.Strategy` | `python main.py backtest --strategy <名字>` 与网页面板「回测监控」 |
-| 继承 `app.core.strategy.base.IBaseStrategy` | 实盘/模拟引擎（`config/tasks.json` 里的 `"strategy": {"type": "<名字>"}`） |
+| 继承 `app.strategy.base.IBaseStrategy` | 实盘/模拟引擎（`config/tasks.json` 里的 `"strategy": {"type": "<名字>"}`） |
 
 两条链路**共用这一套发现机制**，所以你可以把同一份策略逻辑写成两个类放在一个文件里：
 回测验证过的参数，直接用于实盘。

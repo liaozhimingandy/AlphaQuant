@@ -113,7 +113,7 @@ python main.py serve --monitor-host 0.0.0.0   # 允许远程访问（注意安�
 
 ## 数据清洗：脏数据不会流到策略里
 
-数据源给你的东西**不等于**能喂给策略的东西。`app/core/market/clean.py` 负责中间这道工序：
+数据源给你的东西**不等于**能喂给策略的东西。`app/domain/clean.py` 负责中间这道工序：
 
 | 检查 | 为什么必须有 |
 |---|---|
@@ -448,7 +448,7 @@ config/services.json
                          └─ 零依赖、可审计、进程崩了消息也不丢
 ```
 
-跨进程通信用**文件消息总线**（`app/core/bus/`）：发布者 append JSONL，订阅者按
+跨进程通信用**文件消息总线**（`app/engine/bus/`）：发布者 append JSONL，订阅者按
 byte offset 增量读，进度落盘所以进程重启能接着读。语义是「至少一次」，
 重复消费由下游幂等兜住（新闻去重、bar_count）。
 
@@ -475,7 +475,7 @@ python main.py hub stop               # 停 hub 并带走所有服务
 日志刷了一屏，拿回来的还是和上一交易日一模一样的数据。更糟的是它掩盖真问题 ——
 日志里"一切正常"，实际一天里绝大多数请求都是无意义的重复。
 
-交易日历（`app/core/market/calendar.py`）分三层兜底：
+交易日历（`app/domain/calendar.py`）分三层兜底：
 
 1. **内置表** —— 已公布的交易所休市安排（2025 / 2026 精确到日，如 2026 国庆 10/1–10/7）
 2. **配置文件** —— `config/trade_calendar.json`（联网校准后写这里，之后离线可用）
@@ -633,7 +633,7 @@ python main.py providers --capability hot_rank
 同样是涨 5%，**主力持续净流入**和**散户情绪拉抬**后续的持续性完全不是一回事。
 K线只告诉你价格怎么走的，资金流告诉你谁在推动它。
 
-数据链路：`akshare 日频截面` → `app/data/marketx.py`（封装+降级）→ SQLite
+数据链路：`akshare 日频截面` → `app/datasource/service/facade.py`（封装+降级）→ SQLite
 → `FeatureProvider`（注入因子上下文，TTL 缓存）→ `Factor` → `ScoreEngine` → `StockPool`。
 
 **新增的因子**（都可直接在规则/策略里引用）：
@@ -1014,7 +1014,7 @@ python main.py ctl component disable news_center
 新增任务的标的会自动纳入行情订阅（否则它永远等不到 K 线）。
 
 完整架构说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（推荐的深入阅读入口）
-与 [`app/core/readme.md`](app/core/readme.md)（核心层设计取舍）。
+与 [`app/readme.md`](app/readme.md)（核心层设计取舍）。
 
 ## 回测数据来源
 
@@ -1032,53 +1032,67 @@ python main.py ctl component disable news_center
 
 ## 目录结构
 
+> 完整说明见 [docs/STRUCTURE.md](docs/STRUCTURE.md)（含新旧路径对照表）。
+
+按数据流向分层，**每层只依赖它下面的层**：
+
 ```
 app/
-  cli.py            统一命令行入口（serve / start / stop / status / ctl / snapshot / hub）
-  backtest/         回测闭环：config / runner / result / report / registry / analyzers
-  data/             数据源与采集：datasource / service / collector
-  repository/       数据仓储（幂等 upsert、查询、覆盖度）
-  db/               SQLAlchemy 模型与会话
-  core/
-    config.py       全局配置（路径/数据库/日志/行情/新闻/大模型/监控，支持环境变量覆盖）
-    market/         领域模型 Bar/Tick/Signal/Order/Position/Account/News + BarSeries + clean（数据清洗）
-    indicator/      指标层（可插拔注册表、参数化、共享缓存，含周均线 wma）
-    factor/         因子层（含 wma_cross_up / wma_trend_up 等周线因子，flow.py 资金流因子）
-    data/           特征提供层：features.py（把截面数据注入因子上下文）
-    score/          多维度打分引擎（资金/题材/筹码/技术/涨停 → 总分+等级）
-    pool/           股票池：候选池 → 打分 → 排序 → 推荐（pool/sync/demo）
-    rule/           规则层（All/Any/Not 组合器 + 声明式构造）
-    strategy/       策略层（双通道：行情 + 事件）
-    risk/           风控层（闸门链 + A股实盘特有规则 T+1/涨跌停/限额）
-    portfolio/      组合层（账本 + 仓位计算）
-    execution/      执行层：broker（模拟撮合）/ gateway（券商网关）/ live_broker（实盘撮合）
-    task/           QuantTask + TaskRuntime（多任务隔离）
-    collect/        采集编排：频率解析 / 交易时段 / 任务定义（不依赖 Twisted）
-    news/           新闻层（RSS 采集 → 去重 → 关键词/大模型分析）
-    monitor/        可观测层：dashboard / web / snapshot / backtest_api（回测作业）
-    bus/            跨进程文件消息总线 + 发布/订阅组件
-    hub/            多服务编排：supervisor / worker / panel / spec
-    engine/         Twisted 引擎 + 业务组件 + 装配器 + 守护进程 + 控制中心
-      components/   data_collector / ext_data / market_center / live_gateway /
-                    strategy_manager / trading_store / news_center
-  strategy/         backtrader 策略（单次回测链路）
-  utils/            jsonio（原子写 JSON）/ logger（分级 + 重复节流）
-docs/ARCHITECTURE.md 架构与数据流（深入理解运行原理看这份）
-strategies/        用户自定义策略（自动发现，升级框架不会覆盖这里）
-config/tasks.json   多任务配置（改这里就能增删策略）
-config/services.json 多服务编排配置（hub 拉起哪些服务、怎么互相订阅）
-config/collector.json 采集编排配置（每个标的采什么粒度、多久采一次）
-config/brokers.json 券商接入点（网关 + 资金账号 + 连接参数，凭据走环境变量）
-config/backtest.json 回测默认参数（资金/手续费/滑点/区间，CLI 与面板共用）
-config/pool.json    股票池配置（默认候选池来源 / 保留前几名 / 自选股）
-config/score.json   打分权重（资金/题材/筹码/技术/涨停）
-scripts/            集成演示、冒烟脚本、算法自检
-data/alphaquant.db  SQLite：行情 + 订单/成交/权益/事件/回测结果
+├── common/                 L0 配置 / 日志 / JSON（零业务依赖）
+├── domain/                 L1 领域模型：Bar/Order/Signal/Position、交易日历、代码标准化
+│
+├── datasource/             L2 数据源全链路（详见 docs/DATA_FABRIC.md）
+│   ├── model/               ★ Canonical Model：Kline / RankRow / FundFlowRow + Request
+│   ├── transport/           统一 HTTP：UA/Referer、代理→直连回退、域名健康
+│   ├── provider/            ★ Provider + Capability + 能力级熔断 + 注册表
+│   ├── adapters/            ★ Adapter：外部格式 → 标准模型（8 个源）
+│   ├── routing/             ★ Router（四层决策）+ 质量校验 + providers.json
+│   ├── service/             ★ DataService —— 对上层的唯一出口
+│   ├── raw/                 Raw/Bronze：原始响应存档，供审计与重放
+│   └── compat/              兼容期保留的旧注册表，逐步下线
+│
+├── storage/                L3 engine.py(会话) / schema.py(ORM) / repo/(四个仓储)
+├── feature/                L4 指标(向量) → 因子(标量) → mining(挖掘)
+├── alpha/                  L5 score.py(多维打分) + pool/(候选池)
+│
+├── strategy/               L6 策略本体 + rule/(规则 DSL)
+├── risk/                   L6 风控闸门链
+├── portfolio/              L6 账户 / 持仓 / 仓位
+├── execution/              L7 撮合网关 / 券商接入
+│
+├── engine/                 L8 运行时
+│   ├── component/          采集/行情/新闻/策略/数据校验/实盘网关等组件
+│   ├── tasking/            单进程内多任务容器
+│   ├── collect/            采集调度
+│   ├── bus/                跨进程文件总线
+│   └── hub/                多进程编排
+│
+├── news/                   舆情：采集 → 去重 → 分析
+├── research/               回测：runner/result/report + adapter.py(策略桥)
+│   └── strategies/         legacy backtrader 实现（对照基线，勿新增）
+├── monitoring/             监控：server.py(组件核心) + resource.py(HTTP)
+│   ├── api/                业务视图 mixin：overview/live/brokers/factors/pool/…
+│   └── static/             dashboard.html（面板前端，自包含单文件）
+├── cli/                    命令行包：base + data/strategy/engine/control/
+│                           research/pool/hub/broker 八个 *_cmds.py
+└── tests/                  测试
+
+docs/                       文档（STRUCTURE.md 是本目录重构的说明）
+strategies/                 用户自定义策略（自动发现，回测与实盘通用）
+config/
+  providers.json            数据源 provider / route 配置
+  tasks.json                多任务配置（改这里就能增删策略）
+  services.json             多服务编排配置（hub 拉起哪些服务）
+  collector.json            采集编排配置（采什么粒度、多久采一次）
+  brokers.json              券商接入点（凭据走环境变量）
+  backtest.json             回测默认参数（资金/手续费/滑点/区间）
+  pool.json                 股票池配置     score.json 打分权重
+data/alphaquant.db          SQLite：行情 + 订单/成交/权益/事件/回测结果
 output/
-  snapshots/        运行快照（每个 run 一个目录，默认只在有操作时写）
-  runtime/          运行时新增的任务（重启自动重放）
-  services/         各服务的心跳 / 命令 / 日志 / PID
-  bus/              文件消息总线（*.jsonl + .offsets/）
+  snapshots/                运行快照（每个 run 一个目录）
+  runtime/                  运行时新增的任务（重启自动重放）
+  services/                 各服务心跳 / 命令 / 日志 / PID
+  bus/                      文件消息总线（*.jsonl + .offsets/）
 ```
 
 ## 配置
