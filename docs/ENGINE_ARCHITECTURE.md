@@ -414,9 +414,79 @@ d.addErrback(...)                            # 槽位满时这里会收到错误
 
 ---
 
-## 十、新旧对照表
+## 十、新增的 `PortfolioService`
 
-### 10.1 组件
+服务名 `portfolio_service`，提供 `portfolio.view`（账户聚合）与
+`portfolio.quota`（额度预留）两个能力。
+
+### 10.1 它补的是两个洞
+
+**洞一：系统里没有"账户"这个概念。**
+
+`Portfolio` 是 **per-task** 的——每个任务一本账。于是不存在任何地方能回答
+"整个账户现在有多少钱、总回撤多少"：面板只能一个任务一个任务地看，
+全账户回撤没人算，风控拿到的 `account` 也只是单个任务的账本。
+
+这里有个**不能走捷径**的点：**全账户回撤无法从各任务的回撤推出来**。
+任务 A 亏 10%、任务 B 赚 10%，两个任务的 `drawdown` 都是 10%，账户却可能
+压根没回撤；反过来各任务都没回撤，账户也可能在回撤（钱在任务之间腾挪的
+时点错配）。所以服务**自己维护聚合权益的峰值**，不做任何"取最大值/平均值"
+的近似。`test_each_task_down_but_account_not` 专门钉这条。
+
+**洞二：并发下单会超额度。**
+
+风控是在单个任务的账本上做判断的，它看不见别的任务刚放行了一单。实盘所有
+任务共享一个券商账户：任务 A 放行 8 万 → 任务 B 放行 8 万 → 账户一共 10 万，
+两笔都发出去就是 16 万。`task._has_open_order` 只挡"同一任务同一方向的
+重复单"，挡不住跨任务。
+
+### 10.2 额度预留
+
+在风控放行之后、真正报单之前，把预计占用从全账户额度里扣住；订单落到终态
+（成交/撤单/拒单）再释放。这样第二个任务再过风控时，看到的"可用额度"
+已经把第一个任务的在途单算进去了。
+
+```python
+pf = engine.get_component("portfolio_service")
+
+pf.reserve("t1", "000001", 50_000.0, order_id="o1")   # 成功返回 "r1"，额度不够返回 None
+pf.bind_order("r1", "o1")                             # 订单号后置绑定
+pf.release_order("o1")                                # 按订单释放（幂等）
+pf.release_task("t1") / pf.release_all()
+pf.aggregate()["drawdown"]                            # 全账户回撤
+```
+
+三个不做就会出事的取舍：
+
+| 取舍 | 不做会怎样 |
+|---|---|
+| **预留必须有 TTL**（默认 180s） | 一笔丢失的回报会永久占住额度，症状是"跑着跑着就不下单了"，而**日志里没有任何错误** |
+| **释放必须幂等** | 成交回报 + 主动查询各来一次，重复释放会把额度还多，预留机制形同虚设 |
+| **只预留买入** | 现金是跨任务共享的；持仓是 per-task 独立账本，任务 A 卖不掉任务 B 的仓位，不存在跨任务卖超 |
+
+`PARTIAL` 刻意**不释放**：还有一部分挂在市场上，那部分资金仍在途。
+`SUBMITTED` 同理。终态只有 `FILLED` / `CANCELLED` / `REJECTED`。
+
+额度上限没配时（默认）自动取**聚合账户的可用现金**，于是"下单占用的钱
+不能超过账户里有的钱"这条底线一行配置都不写也成立。聚合不到任何任务时
+返回"不限制"——看不见账户的时候不该瞎拦。
+
+### 10.3 与 `RiskService` 的分工
+
+| | `RiskService` | `PortfolioService` |
+|---|---|---|
+| 回答的问题 | 这一笔该不该开、开多大 | 整个账户还能不能开 |
+| 视角 | 单任务的账本 + 全局熔断 | **跨任务**的在途资金 |
+| 时机 | 信号 → 订单之前 | 风控放行 → 报单之前 |
+
+两者串联，缺一不可：风控放行不代表账户还有位置，账户有位置也不代表
+这一笔该开。
+
+---
+
+## 十一、新旧对照表
+
+### 11.1 组件
 
 | 旧注册名 | 旧文件 | 现在 |
 |---|---|---|
@@ -433,7 +503,7 @@ d.addErrback(...)                            # 槽位满时这里会收到错误
 | — | — | **`worker`（新增）** |
 | `monitor` | `monitoring/` | `monitor`（PLAIN，不变） |
 
-### 10.2 已删除的文件
+### 11.2 已删除的文件
 
 ```
 app/engine/component/collector.py
@@ -446,7 +516,7 @@ app/engine/component/news.py
 app/engine/component/timer.py
 ```
 
-### 10.3 旧名兼容层
+### 11.3 旧名兼容层
 
 约 30 处 `engine.get_component("market_center")` 不可能一次改完，
 所以留了一层**别名**：
@@ -468,7 +538,7 @@ LEGACY_ALIASES = {
 **这是兼容层，不是推荐写法。新代码一律用新服务名**，
 别名会在后续版本里逐步清掉。
 
-### 10.4 引擎新增的 API
+### 11.4 引擎新增的 API
 
 ```python
 engine.services                          # ServiceRegistry
@@ -483,7 +553,7 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 
 ---
 
-## 十一、我要加东西，放哪
+## 十二、我要加东西，放哪
 
 **加一个服务**（比如"因子服务"）：
 
@@ -505,7 +575,7 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 
 ---
 
-## 十二、约定与红线
+## 十三、约定与红线
 
 1. **服务层不消费别人的输出。** 要消费 → 那是策略或工作单元。
 2. **服务之间互相找人用能力，不用名字。** `first_by_capability(Cap.ORDER_ROUTE)`，
@@ -516,3 +586,127 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 6. **被否决的订单必须留痕**（REJECTED 订单对象），不能只打日志。
 7. **合并产物的方法体不要手改。** 要改就改 `scripts/merge_services.py`
    里的重命名表与头部模板，再重新生成。
+8. **跨任务共享的资源（券商账户的现金）必须有预留。**
+   只在单任务账本上做判断，等于默认"别的任务不存在"。
+
+---
+
+## 十四、附录：目标架构建议 → 本项目现状
+
+这一节回答"外面那套通用量化引擎架构建议，我们做到了哪一步"。
+**✅ = 已落地，⚠️ = 部分落地，❌ = 未做。**
+
+### 14.1 容器与调度
+
+| 建议 | 现状 | |
+|---|---|---|
+| `EngineApp` 顶层容器：装配/注册/生命周期/优雅关闭 | `BaseQuantEngine` + `builder.build_engine()` | ✅ |
+| `EngineScheduler` 调度中枢：定时 + 事件触发 | `SchedulerComponent`（定时器 + 优先级队列合并为一个） | ✅ |
+| `registry.py` 只是简单字典 | `ServiceRegistry`：能力登记 + 别名 + 拓扑排序 + 注入。**比建议更进一步** | ✅ |
+| Scheduler 管调度，EventBus 管分发，两者不混 | `app/engine/event.py` 的 `EventBus` 与调度器完全独立 | ✅ |
+
+### 14.2 Component 层
+
+| 建议的组件 | 本项目 | |
+|---|---|---|
+| `MarketComponent` | `MarketService`（`market.bar_feed` / `market.quote` / `market.watchlist`） | ✅ |
+| `CollectionComponent` | `CollectionService`（K线 + 日频截面 + 完整性三单元） | ✅ |
+| `StrategyComponent` | `StrategyComponent`（持有 `TaskRuntime`） | ✅ |
+| `RiskComponent` | `RiskService`（`risk.gate` 全局闸门 + 一键熔断） | ✅ |
+| `TradingComponent` | `TradingService`（券商网关 + 落库二单元） | ✅ |
+| `PortfolioComponent` | `PortfolioService`（账户聚合 + 额度预留） | ✅ |
+| `BacktestComponent` | `app/research/`：由面板/CLI 直接调函数，**不是引擎组件** | ❌ |
+| 共享基础设施：EventBus | `app/engine/event.py` | ✅ |
+| TaskQueue / Worker（并发与积压控制） | `WorkerComponent`（有槽位上限） | ✅ |
+| Provider / Broker Registry | `app/datasource` 数据源注册表 + `app/execution` 网关注册表 | ✅ |
+| Observability（日志/指标/健康检查/告警） | `app/monitoring`（面板 + 快照 + API） | ✅ |
+| Persistence（行情库 / Raw 原始 / 交易记录） | `app/storage`（行情 + 交易审计 + 原始归档） | ✅ |
+
+### 14.3 三条核心业务链路
+
+**实时自动交易链路** —— 建议里强调的四点，逐条对照：
+
+| 建议 | 现状 |
+|---|---|
+| 行情**事件**触发策略，而非 Scheduler 高频轮询 | `MarketService` 发 `BAR_RECEIVED` → `StrategyComponent.on_bar` 订阅 | ✅ |
+| 风控必须在订单提交**前**执行 | 全局闸门先于任务级链，`scale` 取更小值 | ✅ |
+| 涉及账户/持仓/资金的检查要**避免并发下单导致超限** | `PortfolioService` 的额度预留（放行即占位，终态释放 + TTL 兜底） | ✅ |
+| 订单提交成功 ≠ 成交，状态由券商回报或主动查询更新 | `OrderStatus` 六态 + `live_broker.apply_order_update` + 定期对账 | ✅ |
+| 成交/拒单/撤单都要形成事件 | `ORDER_CREATED/FILLED/CANCELLED` + `SIGNAL_REJECTED` 四事件，`TradingService` 订阅落库 | ✅ |
+| 订单挂久了要处理（超时撤单/告警） | 有 `cancel_open_orders`，但**没有超时自动处理** | ❌ |
+
+**历史数据采集链路**（Scheduler → 增量计划 → 数据源路由 → 抓 → 存 Raw →
+标准化 → 质量检查 → 入库 → 更新任务状态）：
+
+`CollectionService` 三单元已覆盖"抓 + 质量检查 + 入库"，增量计划与数据源
+路由分别在 `app/engine/collect` 与 `app/datasource`。
+**任务由调度器启动**这一点是 ✅，但下面这条不是：
+
+| 建议 | 现状 |
+|---|---|
+| 用交易日历驱动，非交易日不跑，任务带幂等键 | `app/domain/calendar.py` 存在，但 `SchedulerComponent` **只用 `TIMER_3MIN`，完全没接日历** | ❌ |
+
+**定时任务链路**（开盘前准备 / 盘中监控 / 收盘后采集 / 每日结算四类节拍）：
+
+| 建议 | 现状 |
+|---|---|
+| 四类节拍按交易日历触发 | 只有统一的 3 分钟定时器，没有按交易时段的节拍分类 | ❌ |
+
+### 14.4 "常驻 / 任务驱动 / 事件驱动"的归类
+
+| 类别 | 建议的例子 | 本项目 |
+|---|---|---|
+| 常驻 | EventBus、实时行情连接、回报监听 | `EventBus`、`MarketService`、`TradingService` 的回报轮询、`CollectionService` 的定时器 |
+| 任务驱动 | 历史K线采集、每日结算、定期财务更新、回测 | `CollectionService` 的 K线/截面单元、回测作业（`app/research`，非组件） |
+| 事件驱动 | 行情→策略、信号→风控、通过→交易、成交→持仓 | `BAR_RECEIVED` → `on_bar` → 风控 → 预留 → 报单 → `ORDER_FILLED` → 落库 |
+
+三条链路都已经按这个分类跑着，只是"任务驱动"那一类还没接交易日历。
+
+### 14.5 目录结构：建议 vs 现状
+
+建议是**按域分目录**：
+
+```
+components/market/component.py + service.py + providers/ + streams/
+components/collection/component.py + service.py + collectors/ + planners/
+...
+```
+
+本项目是**按角色分目录**：
+
+```
+app/engine/component/
+├── service/          ← 全部服务
+│   ├── market.py     MarketService
+│   ├── collection.py CollectionService
+│   ├── trading.py    TradingService
+│   ├── risk.py       RiskService
+│   ├── portfolio.py  PortfolioService
+│   └── news.py       NewsService
+├── strategy.py       StrategyComponent
+├── worker.py         WorkerComponent
+└── scheduler.py      SchedulerComponent
+```
+
+**为什么没有按建议重排**：两者语义等价（一个 `component/service/market.py`
+与一对 `market/{component,service}.py` 表达的是同一件事），但重排要动
+20+ 文件的 import，并把刚跑通的 800+ 条测试全部重验一遍，收益不抵风险。
+按角色分目录还有一个额外好处：**"什么算服务"这个问题由目录本身回答**，
+新加东西时不用纠结该放哪个域。
+
+### 14.6 实施顺序（建议的四阶段，我们在哪）
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 一 | 引擎骨架：`EngineApp`、`IBaseComponent`、注册、生命周期、简单 Scheduler | ✅ |
+| 二 | 数据闭环：采集组件、数据源适配器、质量检查、持久化 | ✅ |
+| 三 | 回测闭环：接入 Backtrader 作**回测执行器** | ✅（`app/research` 用 `bt.Cerebro` 当执行器，策略本身是自研 `IBaseStrategy` 桥接进去的，正是建议里说的用法） |
+| 四 | 实盘能力：实时行情、风控、交易、账户同步、故障恢复、告警 | ✅（账户级聚合与额度预留即本次补齐的部分） |
+
+### 14.7 仍未做的三件事（按优先级）
+
+1. **调度层接交易日历** —— 非交易日不跑、"每天 9:30"不等于每天都执行、
+   四类节拍（开盘前/盘中/收盘后/结算）。对 A 股是必需项，不是优化项。
+2. **回测组件化** —— 让 `BacktestComponent` 可装配、可观测、走 `WorkerComponent`
+   的槽位限流（现在连点"跑回测"会打满线程池）。
+3. **订单超时未成交的处理** —— 挂单久了要撤单或告警。

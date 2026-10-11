@@ -114,6 +114,10 @@ class Cap:
     # —— 风控 ——
     RISK_GATE = "risk.gate"             # 下单前拦截/放行/改量
 
+    # —— 组合 ——
+    ACCOUNT_VIEW = "portfolio.view"     # 账户级聚合视图（全账户资金/持仓/回撤）
+    QUOTA_RESERVE = "portfolio.quota"   # 跨任务下单额度预留（治并发超限）
+
     # —— 资讯 ——
     NEWS_FEED = "news.feed"             # 新闻采集与分析
 
@@ -277,6 +281,11 @@ class StrategyComponent(IBaseComponent):
     #: 必需的服务名。引擎启动时校验，缺失直接抛错（fail fast）。
     required_services: Tuple[str, ...] = ()
 
+    #: 可选的服务名。声明了就注入，没装配就不给（消费方自己判断 None）。
+    #: 与 required_services 的区别是**缺了不报错**——组合服务是典型例子：
+    #: 没有它照样能交易，只是少了"跨任务额度预留"这道保护。
+    optional_services: Tuple[str, ...] = ()
+
     def __init__(self) -> None:
         super().__init__()
         self.services: Dict[str, Any] = {}
@@ -314,6 +323,7 @@ class StrategyComponent(IBaseComponent):
         return {
             "kind": self.kind.value,
             "required_services": list(self.required_services),
+            "optional_services": list(self.optional_services),
             "services_bound": sorted(self.services.keys()),
         }
 

@@ -43,6 +43,7 @@ from app.engine.component import (
     CollectionService,
     MarketService,
     NewsService,
+    PortfolioService,
     RiskService,
     SchedulerComponent,
     StrategyComponent,
@@ -224,7 +225,23 @@ def build_engine(
     risk_service = RiskService(rules=risk_rules or cfg.get("risk") or [])
     engine.register_component(risk_service)
 
-    # 2) 采集服务：K 线采集 + 日频截面 + 完整性校验，三者合成一个服务。
+    # 2) 组合服务：账户级聚合视图 + 跨任务额度预留。
+    #
+    #    风控是在**单个任务的账本**上做判断的，它看不见别的任务刚放行了一单。
+    #    实盘所有任务共享一个券商账户，各自放行 8 万、两笔都发出去就是 16 万。
+    #    组合服务在报单前把预计占用先扣住，把这个跨任务的洞补上；
+    #    顺带提供"整个账户有多少钱、总回撤多少"——以前这个问题没人能回答，
+    #    因为 Portfolio 是 per-task 的。
+    #
+    #    budget 不配时自动取聚合账户的可用现金（见 PortfolioService 的说明）。
+    engine.register_component(
+        PortfolioService(
+            budget=settings.PORTFOLIO_BUDGET,
+            reserve_ttl=settings.PORTFOLIO_RESERVE_TTL,
+        )
+    )
+
+    # 3) 采集服务：K 线采集 + 日频截面 + 完整性校验，三者合成一个服务。
     #
     #    **默认装配**（而不是"满足条件才装配"）。这两个概念要分清：
     #      - 「装配」= 服务挂进引擎，面板能看到它、能改频率、能手动补采
@@ -281,7 +298,7 @@ def build_engine(
     collection_service.set_engine(engine)
     engine.register_component(collection_service)
 
-    # 3) 行情服务
+    # 4) 行情服务
     #    with_market=False 用于"消费别的服务推过来的行情"的场景：
     #    策略服务自己不该再连行情源，否则会与总线上的 bar 重复驱动同一批策略。
     if with_market:
@@ -296,7 +313,7 @@ def build_engine(
             )
         )
 
-    # 4) 交易服务（网关 + 落库合成一个）
+    # 5) 交易服务（网关 + 落库合成一个）
     #    网关只在 LIVE 模式连真券商；落库在任何模式都工作
     #    （只读档位、模拟盘也要能留下审计记录）。
     enable_store = settings.TRADE_PERSIST_ENABLED if with_store is None else with_store
@@ -309,7 +326,7 @@ def build_engine(
     )
     engine.register_component(trade)
 
-    # 5) 资讯服务（可选）
+    # 6) 资讯服务（可选）
     enable_news = settings.NEWS_ENABLED if with_news is None else with_news
     if enable_news:
         news_cfg = cfg.get("news") or {}

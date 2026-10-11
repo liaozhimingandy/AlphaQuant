@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -168,6 +169,17 @@ class Settings:
     # 补全请求，把数据源打到限流，连定时采集一起拖下水。
     WORKER_ENABLED: bool = _env_bool("WORKER_ENABLED", True)
     WORKER_CAPACITY: int = _env_int("WORKER_CAPACITY", 2)
+
+    # ---------------- 组合服务（账户聚合 + 跨任务额度预留）----------------
+    # 全账户"在途下单额度"上限（元）。不配时自动取聚合账户的可用现金，
+    # 于是"下单占用的钱不能超过账户里有的钱"这条底线一行配置都不写也成立。
+    # 显式配一个更小的数，等于给"同时在途的资金"再上一道闸。
+    PORTFOLIO_BUDGET: Optional[float] = (
+        float(os.getenv("PORTFOLIO_BUDGET")) if os.getenv("PORTFOLIO_BUDGET") else None
+    )
+    # 单笔预留的存活秒数。实盘订单可能永远收不到回报，没有 TTL 的预留会
+    # 永久占住额度，症状是"跑着跑着就不下单了"且日志里没有任何错误。
+    PORTFOLIO_RESERVE_TTL: float = float(os.getenv("PORTFOLIO_RESERVE_TTL", "180"))
 
     # ---------------- 监控面板（内嵌 Twisted Web，零额外进程）----------------
     MONITOR_ENABLED: bool = _env_bool("MONITOR_ENABLED", True)

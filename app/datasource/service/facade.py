@@ -305,6 +305,32 @@ def _ff_anchor_day() -> date:
         return d
 
 
+def _ff_span_days(anchor: date, max_off: int) -> List[date]:
+    """从锚点日往前取 ``max_off + 1`` 个**交易日**（升序，最后一个是锚点）。
+
+    快照只给"即时/3日/5日/10日"四个视角的净额、不带日期，所以序列的日期
+    要自己造。锚点已经锚到最近交易日了，但**往前推的时候也必须按交易日推**：
+    直接 ``anchor - timedelta(days=off)`` 会把周末和节假日也算进去，
+    于是库里多出"周六的资金流"，把"最新评分日"顶成周六，
+    列表口径和刷新判断跟着一起乱。
+    """
+    try:
+        from app.domain.calendar import TradeCalendar
+        got = TradeCalendar().recent_trading_days(n=max_off + 1, until=anchor)
+        if got:
+            return got
+    except Exception as exc:      # 日历不可用也要能降级
+        logger.debug(f"交易日历不可用，按自然日跳过周末: {exc}")
+    out: List[date] = []
+    d = anchor
+    while len(out) <= max_off:
+        out.append(d)
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:   # 5=周六 6=周日
+            d -= timedelta(days=1)
+    return sorted(out)
+
+
 def _fund_flow_from_snapshot(code: str, days: Optional[int]) -> pd.DataFrame:
     """从全市场快照反推单只票资金流序列（降级模式）。
 
@@ -349,6 +375,8 @@ def _fund_flow_from_snapshot(code: str, days: Optional[int]) -> pd.DataFrame:
 
     today = _ff_anchor_day()  # 锚到最近交易日，别在周末造出非交易日数据行
     offsets = {"即时": 0, "3日": 2, "5日": 4, "10日": 9}
+    # 往前推也要按交易日推，见 _ff_span_days 的说明
+    span = _ff_span_days(today, max(offsets.values()))
     rows: List[Dict[str, Any]] = []
     for k, off in offsets.items():
         fr = frames.get(k)
@@ -366,7 +394,8 @@ def _fund_flow_from_snapshot(code: str, days: Optional[int]) -> pd.DataFrame:
         val = _num(sub.iloc[0].get(col_main))
         rows.append({
             "symbol": code,
-            "date": today - timedelta(days=off),
+            "date": span[len(span) - 1 - off] if len(span) > off
+                    else span[0],
             "close": None,
             "pct_change": pct_change if off == 0 else None,
             "main_net": val,

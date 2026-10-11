@@ -23,6 +23,7 @@
     │   ├── collection.py   CollectionService
     │   ├── trading.py      TradingService
     │   ├── risk.py         RiskService
+    │   ├── portfolio.py    PortfolioService
     │   └── news.py         NewsService
     ├── strategy.py   StrategyComponent   消费能力，产出订单
     ├── worker.py     WorkerComponent     消费能力，执行作业
@@ -69,6 +70,7 @@ from .service import (
     CollectionService,
     MarketService,
     NewsService,
+    PortfolioService,
     RiskService,
     TradingService,
     df_to_bars,
@@ -93,6 +95,7 @@ __all__ = [
     "CollectionService",
     "TradingService",
     "RiskService",
+    "PortfolioService",
     "NewsService",
     # ---- 其它三种组件 ----
     "StrategyComponent",

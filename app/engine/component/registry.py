@@ -264,6 +264,11 @@ class ServiceRegistry:
         ) or list(
             getattr(target, "required_services", ()) or ()
         )
+        # 可选服务：声明了就注入，没装配就不给（消费方自己判断 None）。
+        # 与 required_services 的区别是**缺了不报错**——
+        # 组合服务就是典型的例子：没有它照样能交易，只是少了跨任务额度控制。
+        wanted += [w for w in (getattr(target, "optional_services", ()) or ())
+                   if w not in wanted]
         out: Dict[str, Any] = {}
         for w in wanted:
             svc = self.get(w)

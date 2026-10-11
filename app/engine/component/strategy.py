@@ -61,6 +61,9 @@ class StrategyComponent(StrategyBase):
     #: 硬依赖。缺了就起不来（见模块文档的理由）
     required_services = ("risk_service",)
 
+    #: 软依赖。缺了只是没有跨任务额度预留，不影响交易本身。
+    optional_services = ("portfolio_service",)
+
     #: 已发布订单事件的去重集合上限
     _PUBLISHED_MAX = 8192
 
@@ -81,6 +84,15 @@ class StrategyComponent(StrategyBase):
         risk = self.services.get("risk_service")
         if risk is not None:
             self.runtime.risk_gate_provider = lambda: risk.gate
+
+        # 组合服务（可选）：一边把额度预留器交给运行时，让每个任务下单前
+        # 先占住额度；一边把 runtime 交给它，它要据此聚合全账户口径。
+        # 双向都是 provider —— 服务和 runtime 互相都比对方建得早。
+        pf = self.services.get("portfolio_service")
+        if pf is not None:
+            self.runtime.quota_provider = lambda: pf
+            pf.attach_runtime(lambda: self.runtime)
+            logger.info("策略中枢已接入组合服务 | 额度预留与账户聚合已启用")
 
         cfg = self.component_config or {}
         raw = cfg.get("tasks") or self._task_configs

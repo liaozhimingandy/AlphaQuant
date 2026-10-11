@@ -1022,11 +1022,17 @@ python main.py ctl component disable news_service
 
 ```
 IBaseComponent
-├── ServiceComponent    提供能力：market / collection / trading / risk / news
+├── ServiceComponent    提供能力：market / collection / trading / risk / portfolio / news
 ├── StrategyComponent   消费行情与风控，产出订单
 ├── WorkerComponent     执行一次性作业（有并发上限）
 └── SchedulerComponent  决定"什么时候跑"
 ```
+
+其中 `PortfolioService` 提供**账户级**的两件事：
+把所有任务的账本聚合出"整个账户有多少钱、总回撤多少"（`Portfolio` 是
+per-task 的，以前没人能回答这个问题），以及在报单前把预计占用从全账户
+额度里扣住——风控是在单个任务的账本上做判断的，看不见别的任务刚放行了一单，
+实盘多策略共享一个券商账户时那会导致超额下单。
 
 判定标准只有一条：**它消费别人的输出吗？** 不消费、只提供 → 服务；
 要消费 → 策略或工作单元。启停顺序由 `depends_on` + 种类层级算出来，

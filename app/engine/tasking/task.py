@@ -72,6 +72,7 @@ class QuantTask:
         broker: Any = None,
         gateway: Any = None,
         global_gate: Any = None,
+        quota: Any = None,
     ) -> None:
         self.task_id = task_id
         self.symbol = symbol
@@ -81,6 +82,14 @@ class QuantTask:
         #: 它管"整个账户还能不能开"，risk_chain 管"这个策略该开多大"。
         #: 为 None 时退化为只有任务自己的链 —— 单独 new 一个任务做回测时是常态。
         self.global_gate = global_gate
+        #: 跨任务额度预留器（引擎级 PortfolioService）。
+        #: 风控是在**单个任务的账本**上做判断的，它看不见别的任务刚放行了一单；
+        #: 实盘所有任务共享一个券商账户，各自放行 8 万合起来就是 16 万。
+        #: 这里在报单前把预计占用先扣住，订单到终态再释放。
+        #: 为 None 时不做预留（单任务回测的常态）。
+        self.quota = quota
+        #: order_id -> 预留号。订单到终态时按图索骥释放。
+        self._reservations: Dict[str, str] = {}
         self.run_mode = run_mode
         self.warmup_bars = int(warmup_bars)
         self.max_hold_bars = int(max_hold_bars)
@@ -215,6 +224,10 @@ class QuantTask:
                     self._hold_bars = 0
             self._count_fill(order)
             self._sync_state(order.created_at)
+        # 终态释放额度；PARTIAL 继续占着（还有一部分在途）
+        if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED,
+                            OrderStatus.REJECTED):
+            self._release_quota(order, note=f"update:{order.status.value}")
         self._book_order(order)
         self._emit_order(order)
 
@@ -352,6 +365,25 @@ class QuantTask:
     # ============================================================
     # 统一出口：Signal -> 风控 -> 仓位 -> 撮合
     # ============================================================
+    def _release_quota(self, order: Order, note: str = "") -> None:
+        """释放这笔订单占住的额度。
+
+        幂等：同一订单的回报可能重复到达（成交回报 + 主动查询），
+        重复释放不会把额度还多——``PortfolioService.release`` 那边已经兜住了。
+        全程吞异常：额度没还回来只是少下一单，抛出去会打断整个交易链路。
+        """
+        if self.quota is None:
+            return
+        rid = self._reservations.pop(order.order_id, None)
+        try:
+            if rid:
+                self.quota.release(rid, note=note)
+            else:
+                self.quota.release_order(order.order_id, note=note)
+            self.quota.mark_dirty()
+        except Exception as exc:
+            logger.debug(f"[{self.task_id}] 额度预留释放失败（忽略）: {exc}")
+
     def _reject(self, signal: Signal, rule: str, reason: str) -> None:
         """产一条 REJECTED 订单并发出去。
 
@@ -437,6 +469,34 @@ class QuantTask:
             logger.debug(f"[{self.task_id}] 计算出的下单数量为 0，跳过")
             return None
 
+        # 3.8) 跨任务额度预留。
+        #      上面两步风控看的都是**本任务的账本**，它们不知道别的任务
+        #      刚刚也放行了一单。实盘所有任务共享一个券商账户 —— 各自放行
+        #      8 万，两笔都发下去就是 16 万。这里在报单前把预计占用从全账户
+        #      额度里扣住，订单落到终态再释放，第二个任务再过风控时看到的
+        #      "可用额度"就已经把这笔在途单算进去了。
+        #
+        #      只给买入预留：现金是跨任务共享的，持仓是 per-task 独立账本
+        #      （任务 A 卖不掉任务 B 的仓位），而且 plan_size 已经把卖出量
+        #      截断到持仓量了，不存在跨任务卖超。
+        rid = ""
+        if self.quota is not None and signal.side == Side.BUY:
+            est = float(price) * int(size) * (1.0 + float(self.portfolio.fee_rate))
+            rid = self.quota.reserve(
+                task_id=self.task_id,
+                symbol=self.symbol,
+                amount=est,
+                side=signal.side.value,
+                note=signal.reason,
+            )
+            if rid is None:
+                # 额度不够是**正常的业务结果**，不是异常。走标准否决流程，
+                # 让面板上"今天拦了几笔、因为什么拦"有据可查。
+                return self._reject(
+                    signal, "quota_exhausted",
+                    f"全账户下单额度不足（需 {est:.2f}）"
+                )
+
         # 4) 撮合。返回时**未必已成交**（实盘只是报单成功）
         order = self.broker.create_order(
             self.symbol,
@@ -446,10 +506,30 @@ class QuantTask:
             signal.reason,
             signal.source.value,
         )
+        if rid:
+            # 订单号要等 create_order 之后才有，这时才能把预留绑上去，
+            # 将来按订单号释放（成交回报只带订单号，不带预留号）。
+            self._reservations[order.order_id] = rid
+            try:
+                self.quota.bind_order(rid, order.order_id)
+            except Exception as exc:
+                logger.debug(f"[{self.task_id}] 绑定额度预留失败（忽略）: {exc}")
         order = self.broker.submit(order)
         self._book_order(order)
         self.strategy.on_order(order)
         self._emit_order(order)
+
+        # 4.5) 终态立即释放，在途继续占着。
+        #      REJECTED：券商没接单，额度当场还回去。
+        #      FILLED / PARTIAL：钱已经变成持仓记进账本了，不再是"在途占用"。
+        #      SUBMITTED：**不释放** —— 单还挂在市场上，这时还额度等于
+        #      没有预留。等券商回报走 _on_broker_update 释放；回报永远不来
+        #      则由预留自身的 TTL 兜底（见 PortfolioService._sweep）。
+        if order.status in (OrderStatus.REJECTED, OrderStatus.FILLED):
+            self._release_quota(order, note=f"submit:{order.status.value}")
+        # PARTIAL 刻意**不释放**：还有一部分挂在市场上，那部分资金仍在途。
+        # 它要么等到 FILLED/CANCELLED 走 _on_broker_update 释放，
+        # 要么等回报永远不来时由预留的 TTL 兜底。
 
         # 5) 同步成交（回测/模拟）与异步成交（实盘）在这里分叉
         if order.status in (OrderStatus.FILLED, OrderStatus.PARTIAL):
@@ -544,6 +624,9 @@ class QuantTask:
             try:
                 if self.broker.cancel(o.order_id):
                     n += 1
+                    # 撤掉了就没有在途占用了，额度当场还回去；
+                    # 不还的话熔断一次就会把额度永久吃掉一批。
+                    self._release_quota(o, note="cancelled")
             except Exception as exc:
                 logger.debug(f"[{self.task_id}] 撤单失败 {o.order_id}: {exc}")
         return n

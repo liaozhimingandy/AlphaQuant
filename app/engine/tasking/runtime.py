@@ -39,6 +39,10 @@ class TaskRuntime:
         #: 全局闸门管"整个账户还能不能开"——两者串联，缺一不可。
         #: 用 provider 而非直接塞对象，理由同网关：任务建得比服务早。
         self.risk_gate_provider: Optional[Callable[[], Any]] = None
+        #: 跨任务额度预留器的延迟取值 provider（由策略组件从 PortfolioService 注入）。
+        #: 风控在单任务账本上判断，看不见别的任务刚放行了一单；额度预留
+        #: 补的正是这个跨任务的洞。用 provider 的理由同上。
+        self.quota_provider: Optional[Callable[[], Any]] = None
         #: 引擎级运行模式。任务 spec 没写 run_mode 时跟随它 ——
         #: 否则 LIVE 起引擎而任务跑模拟撮合，是最危险的静默错配。
         self.run_mode: Any = None
@@ -63,6 +67,15 @@ class TaskRuntime:
         except Exception:
             return None
 
+    def current_quota(self) -> Any:
+        """取额度预留器。没有注入时返回 None（不做跨任务额度控制）。"""
+        if self.quota_provider is None:
+            return None
+        try:
+            return self.quota_provider()
+        except Exception:
+            return None
+
     # ============================================================
     # 任务管理
     # ============================================================
@@ -77,6 +90,12 @@ class TaskRuntime:
             gate = self.current_risk_gate()
             if gate is not None:
                 task.global_gate = gate
+        # 额度预留器同理在这里下发：运行时新增的任务（面板/CLI 下发的）
+        # 不走 build_task 那条路，只在构造时传参必然漏掉它们。
+        if getattr(task, "quota", None) is None:
+            quota = self.current_quota()
+            if quota is not None:
+                task.quota = quota
         # 把订单出口交给任务。实盘的成交回报是**异步**到来的，
         # 那时已经不在 on_bar/on_news 的调用栈里，返回值机制覆盖不到；
         # 只有让任务自己能往外发订单事件，回报驱动的状态变化才进得了事件总线。
@@ -103,6 +122,14 @@ class TaskRuntime:
         if task is None:
             return False
         task.stop()
+        # 任务没了，它占着的额度必须还回去，否则删几次任务额度就见底了
+        quota = self.current_quota()
+        if quota is not None:
+            try:
+                quota.release_task(task_id, note="task_removed")
+                quota.mark_dirty()
+            except Exception:
+                pass
         for sym, ids in list(self._by_symbol.items()):
             if task_id in ids:
                 ids.remove(task_id)

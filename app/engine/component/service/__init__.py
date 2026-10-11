@@ -16,10 +16,13 @@
           ├── MarketService        market.py      行情
           ├── CollectionService    collection.py  采集
           ├── TradingService       trading.py     交易
-          └── RiskService          risk.py        风控
+          ├── RiskService          risk.py        风控
+          └── PortfolioService     portfolio.py   组合（账户聚合 + 额度预留）
 
 （另有一个 ``NewsService`` 也是服务，只是不在上面那张图的四项里 ——
-  资讯确实是引擎对外提供的一项能力，把它降级成"组件"反而说不通。）
+  资讯确实是引擎对外提供的一项能力，把它降级成"组件"反而说不通。
+  ``PortfolioService`` 同理：它不在最初那张图的四项里，但没有它就没有
+  "账户"这个概念，风控只能在单个任务的账本上做判断。）
 
 判断一个东西该不该放在这里，只有一条标准：
 
@@ -35,6 +38,7 @@ from .market import MarketService, df_to_bars
 from .collection import CollectionService, parse_interval
 from .trading import TradingService
 from .risk import RiskService
+from .portfolio import PortfolioService, Reservation
 from .news import NewsService
 
 __all__ = [
@@ -44,5 +48,7 @@ __all__ = [
     "parse_interval",
     "TradingService",
     "RiskService",
+    "PortfolioService",
+    "Reservation",
     "NewsService",
 ]

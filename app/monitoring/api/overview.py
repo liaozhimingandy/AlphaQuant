@@ -37,6 +37,10 @@ class OverviewViewsMixin:
         return {
             "engine": engine_snap,
             "components": control.component_states() if control is not None else [],
+            # 账户级聚合。为什么单独给一段：``Portfolio`` 是 per-task 的，
+            # 面板上一个个任务看不出"整个账户有多少钱、总回撤多少"。
+            # 没有组合服务时是空 dict，前端按"无"处理。
+            "account": self._account_view(),
             "tasks": tasks,
             "task_count": len(tasks),
             "symbol_count": len(symbols),
@@ -44,6 +48,37 @@ class OverviewViewsMixin:
             "monitor": self.stats_dict(),
             "audit": list(self.audit),
         }
+
+    def _account_view(self) -> Dict[str, Any]:
+        """账户级聚合视图（来自 PortfolioService）。
+
+        全程吞异常：这是**展示**用的数据，它挂了不该让整个总览接口 500。
+        """
+        engine = self.bound_engine
+        if engine is None:
+            return {}
+        try:
+            pf = engine.get_component("portfolio_service")
+        except Exception:
+            return {}
+        if pf is None:
+            return {}
+        try:
+            agg = pf.aggregate()
+            quota = {
+                "budget": getattr(pf, "budget", None),
+                "reserved": round(pf.reserved, 2),
+                "available": (None if pf.available is None
+                              else round(pf.available, 2)),
+                "pending_count": len(getattr(pf, "_reservations", {}) or {}),
+                "stats": dict(getattr(pf, "stats", {}) or {}),
+            }
+        except Exception as exc:
+            logger.debug(f"账户聚合失败: {exc}")
+            return {}
+        out = dict(agg)
+        out["quota"] = quota
+        return out
 
     def order_feed(self, limit: int = 100) -> List[Dict[str, Any]]:
         if self.store is None:

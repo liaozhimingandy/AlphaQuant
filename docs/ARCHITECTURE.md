@@ -261,6 +261,7 @@ IBaseComponent
 │     ├── CollectionService    collect.kline / collect.cross / collect.integrity
 │     ├── TradingService       trade.route / trade.account / trade.reconcile / trade.persist
 │     ├── RiskService          risk.gate（下单前拦截 + 一键熔断）
+│     ├── PortfolioService      portfolio.view / portfolio.quota（账户聚合 + 额度预留）
 │     └── NewsService          news.feed
 ├── StrategyComponent    消费行情与风控，产出订单
 ├── WorkerComponent      执行一次性作业（有并发上限）
@@ -274,6 +275,7 @@ IBaseComponent
 | `market_service` | `component/service/market.py` | 读库/回放 → 发 `BAR_RECEIVED` | 除非外部总线供数 |
 | `trading_service` | `component/service/trading.py` | 券商网关 + 交易落库（二合一） | 总是（网关仅 `LIVE` 启用） |
 | `risk_service` | `component/service/risk.py` | 全局风控闸门 + 一键熔断 | 总是 |
+| `portfolio_service` | `component/service/portfolio.py` | 账户级聚合视图 + 跨任务额度预留 | 总是 |
 | `news_service` | `component/service/news.py` | 抓新闻 → 分析 → 发 `NEWS_ANALYZED` | 可关 |
 | `scheduler` | `component/scheduler.py` | 任务队列 + 周期定时器 | 总是 |
 | `strategy` | `component/strategy.py` | 持有 TaskRuntime，驱动全部任务 | 总是 |
