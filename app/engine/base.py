@@ -21,7 +21,18 @@ from twisted.internet.defer import Deferred
 
 from app.common.config import settings
 from app.engine import component
-from app.engine.component import TaskSchedulerComponent, TimerComponent, IBaseComponent
+from app.engine.component import (
+    IBaseComponent,
+    SchedulerComponent,
+    StrategyComponent,
+    WorkerComponent,
+)
+from app.engine.component.kinds import ComponentKind, KIND_LAYER, ServiceComponent
+from app.engine.component.registry import (
+    LEGACY_ALIASES,
+    ServiceRegistry,
+    aliases_for,
+)
 from app.engine.control import ControlCenter
 
 from app.engine.event import EventBus, StandardEvents
@@ -159,6 +170,19 @@ class BaseQuantEngine(IQuantEngine):
         self._components: Dict[str, IBaseComponent] = {}
         self._component_order: List[str] = []  # 按注册顺序初始化/启动
 
+        # 服务注册表：只登记**服务**，负责能力查询、依赖解析与注入。
+        #
+        # 为什么组件容器之外还要一个注册表：容器回答"它在不在"，
+        # 注册表回答"谁能提供这个能力、它依赖谁、该按什么顺序起"。
+        # 以前这些问题全靠注册顺序和魔法字符串回答 ——
+        # 于是"采集服务先于行情服务启动"这种约束只存在于注释里。
+        self.services = ServiceRegistry()
+
+        #: 旧组件名 → 新组件名。服务那份别名由注册表管（连同能力一起），
+        #: 这里补的是**非服务**组件（strategy / scheduler）——
+        #: 它们不进注册表，但旧代码同样在用旧名字找它们。
+        self._name_aliases: Dict[str, str] = dict(LEGACY_ALIASES)
+
         # 日志与信号
         self._register_system_signals()
 
@@ -175,7 +199,8 @@ class BaseQuantEngine(IQuantEngine):
         self._status = EngineStatus.INITIALIZING
         self.context.engine_status = self._status
 
-        # 按注册顺序初始化所有组件，异常隔离，一个组件失败不影响其他
+        # 按依赖拓扑顺序初始化所有组件，异常隔离，一个组件失败不影响其他
+        self._component_order = self.ordered_component_names()
         for component_name in self._component_order:
             component = self._components[component_name]
             if not component.enabled:
@@ -183,10 +208,22 @@ class BaseQuantEngine(IQuantEngine):
                 continue
             try:
                 logger.info(f"初始化组件: {component_name}")
+
+                # 依赖注入：把该组件声明的服务先塞进去，再初始化。
+                # 顺序不能反 —— 组件的 on_initialize 里就要用这些服务
+                # （策略组件在 on_initialize 里就把风控闸门交给任务运行时）。
+                injector = getattr(component, "bind_services", None)
+                if callable(injector):
+                    injector(self.services.build_injections(component))
+
                 # 组件配置从全局配置里按组件名取，这样一个组件的行为
                 # 也能通过配置驱动，不必改代码
                 components_cfg = self.config.get("components") or {}
-                cfg = components_cfg.get(component_name) or self.config.get(component_name) or {}
+                cfg = (
+                    components_cfg.get(component_name)
+                    or self.config.get(component_name)
+                    or {}
+                )
                 component.initialize(self.context, self.event_bus, cfg)
             except Exception as e:
                 logger.error(f"组件 {component_name} 初始化失败: {str(e)}", exc_info=True)
@@ -270,7 +307,7 @@ class BaseQuantEngine(IQuantEngine):
     def _component_is_busy(self) -> bool:
         """是否有业务组件仍在工作。
 
-        只问 task_scheduler 是不够的：回放行情、轮询新闻这类组件不往调度器里
+        只问调度组件是不够的：回放行情、轮询新闻这类组件不往调度器里
         放任务，但显然不应该被判定为空闲。所以这里让组件自己声明忙闲。
         """
         for comp in self._components.values():
@@ -288,7 +325,7 @@ class BaseQuantEngine(IQuantEngine):
         """调度器是否空闲。调度器组件缺失时视为空闲。"""
         if self._component_is_busy():
             return False
-        scheduler = self.get_component("task_scheduler")
+        scheduler = self.get_component("scheduler")
         if scheduler is None:
             return True
         is_idle = getattr(scheduler, "is_idle", None)
@@ -323,16 +360,21 @@ class BaseQuantEngine(IQuantEngine):
     # ------------------------------
     def register_component(self, component: IBaseComponent) -> None:
         """
-        注册你架构中的所有模块，按注册顺序调度
-        推荐注册顺序（和你的架构完全一致）：
-        1. MarketCenter 行情中心
-        2. TaskScheduler 定时调度器
-        3. StrategyManager 策略管理器
-        4. RiskManager 风控管理器
-        5. Sizer 仓位计算器
-        6. Portfolio 持仓账户
-        7. Execution 执行层
-        8. BrokerAdapter 券商适配器
+        注册一个组件。
+
+        **注册顺序不再是启停顺序**。以前靠"先注册先启动"这种隐式约定
+        表达依赖（"采集要在行情之前注册"），问题是：
+          - 顺序要求写在 builder 的注释里，改装配代码时极易破坏；
+          - 组件之间真正的依赖关系完全没被表达出来。
+
+        现在启停顺序由 :class:`ServiceRegistry` 按三样东西算出来：
+          1. 服务声明的 ``depends_on``（硬依赖，拓扑排序保证）；
+          2. 组件种类层级（调度 → 服务 → 策略 → 工作单元 → 其它）；
+          3. 注册顺序（同层内保持稳定，日志不至于乱跳）。
+
+        服务会额外登记进注册表，并自动带上旧组件名作为别名，
+        于是 ``get_component("market_center")`` 这类旧写法仍能工作
+        （别名表见 :data:`~app.engine.component.registry.LEGACY_ALIASES`）。
         """
         if not component.name:
             raise ValueError("组件必须定义name属性")
@@ -341,10 +383,84 @@ class BaseQuantEngine(IQuantEngine):
 
         self._components[component.name] = component
         self._component_order.append(component.name)
-        logger.info(f"注册组件: {component.name} | 状态: {'启用' if component.enabled else '禁用'}")
+
+        if isinstance(component, ServiceComponent):
+            self.services.register(component, alias=aliases_for(component.name))
+
+        kind = getattr(component, "kind", ComponentKind.PLAIN)
+        logger.info(
+            f"注册组件: {component.name} | 种类: {kind.label} "
+            f"| 状态: {'启用' if component.enabled else '禁用'}"
+        )
 
     def get_component(self, component_name: str) -> Optional[IBaseComponent]:
-        return self._components.get(component_name)
+        """按名字取组件。
+
+        三级查找：组件容器 → 服务注册表（含旧名别名）→ None。
+        这样旧代码里的 ``get_component("live_gateway")`` 依然能拿到
+        交易服务，而新代码一律用新服务名 ``trading_service``。
+        """
+        if component_name in self._components:
+            return self._components[component_name]
+        # 旧名 → 新名（非服务组件靠这一层，服务组件注册表里也有别名）
+        real = self._name_aliases.get(component_name, component_name)
+        if real in self._components:
+            return self._components[real]
+        return self.services.get(component_name)
+
+    # ------------------------------
+    # 服务访问（新代码请用这一组，别再用字符串）
+    # ------------------------------
+    def get_service(self, service_name: str) -> Optional[ServiceComponent]:
+        """按服务名取服务。找不到返回 None。"""
+        return self.services.get(service_name)
+
+    def require_service(self, service_name: str) -> ServiceComponent:
+        """按服务名取服务，**取不到就抛**。
+
+        用于"这个服务必须在场"的场合。返回 None 会让调用方写出
+        ``if svc:`` 的降级分支，而在实盘里那条分支通常意味着
+        "单没发出去但没人知道"。
+        """
+        return self.services.require(service_name)
+
+    def service_by_capability(self, capability: str) -> Optional[ServiceComponent]:
+        """按**能力**取服务。
+
+        这是比按名字取更抗改名的写法：服务改了名，调用方一行都不用动。
+        """
+        return self.services.first_by_capability(capability)
+
+    def ordered_component_names(self) -> List[str]:
+        """安全的启动顺序（停止时反序）。见 :meth:`register_component`。"""
+        try:
+            svc_order = self.services.resolve_dependencies()
+        except Exception as exc:
+            # 依赖成环是**装配错误**，但它不该让引擎连日志都打不出来。
+            # 退化成注册顺序，把问题打进日志等人修。
+            logger.error(f"服务依赖解析失败，退化为注册顺序: {exc}")
+            svc_order = [n for n in self._component_order
+                         if isinstance(self._components[n], ServiceComponent)]
+
+        # 服务内部已经有了拓扑顺序，把它"折叠"进全局的层级排序里：
+        # 先按种类分层（调度 → 服务 → 策略 → 工作单元 → 其它），
+        # 服务那一层内部再按拓扑结果排。
+        #
+        # 不能简单写成 [服务们] + [其它们] —— 那样调度组件会被排到服务之后，
+        # 而它必须**最先启动**：它是 TASK_SUBMIT 的订阅者，
+        # 晚于服务启动就会丢掉服务启动阶段提交的任务。
+        svc_pos = {n: i for i, n in enumerate(svc_order)}
+
+        def layer(n: str) -> int:
+            kind = getattr(self._components[n], "kind", ComponentKind.PLAIN)
+            return KIND_LAYER.get(kind, 99)
+
+        def sort_key(n: str) -> tuple:
+            if n in svc_pos:
+                return (layer(n), 0, svc_pos[n])
+            return (layer(n), 1, self._component_order.index(n))
+
+        return sorted(self._component_order, key=sort_key)
 
     def enable_component(self, component_name: str) -> None:
         component = self._get_component_or_throw(component_name)
@@ -377,8 +493,15 @@ class BaseQuantEngine(IQuantEngine):
         return max(0.0, (end - self.context.start_time).total_seconds())
 
     def component_names(self) -> List[str]:
-        """组件注册顺序（启停顺序即此顺序，停止时逆序）。"""
-        return list(self._component_order)
+        """组件名单，顺序即**启停顺序**（停止时逆序）。
+
+        这里直接走 :meth:`ordered_component_names` 而不是返回注册顺序。
+        理由：注册顺序是装配器书写的偶然结果，今天改一行注册代码
+        面板上的组件顺序就变了，而看面板的人会以为"顺序有意义"。
+        依赖算出来的顺序才是有意义的那一个（调度 → 服务 → 策略 →
+        工作单元 → 其它），所以对外只暴露它。
+        """
+        return self.ordered_component_names()
 
     def snapshot(self) -> Dict[str, Any]:
         """聚合引擎 + 全部组件的瞬时状态，供监控面板与快照落盘使用。
@@ -389,8 +512,11 @@ class BaseQuantEngine(IQuantEngine):
         components: Dict[str, Any] = {}
         for name in self._component_order:
             comp = self._components[name]
+            kind = getattr(comp, "kind", ComponentKind.PLAIN)
             entry: Dict[str, Any] = {
                 "name": name,
+                "kind": kind.value,
+                "kind_label": kind.label,
                 "enabled": bool(comp.enabled),
                 "state": comp.state,
             }
@@ -437,14 +563,17 @@ class BaseQuantEngine(IQuantEngine):
                 "component_order": list(self._component_order),
             },
             "components": components,
+            # 服务全景：能力、依赖、缺失情况。面板按这个画依赖图，
+            # 也可以直接拿 missing_dependencies 当"装配自检报告"看。
+            "services": self.services.snapshot(),
         }
 
     # ------------------------------
     # 内部核心逻辑
     # ------------------------------
     def _start_all_components(self) -> None:
-        """按注册顺序启动所有组件，异常隔离"""
-        for component_name in self._component_order:
+        """按依赖拓扑顺序启动所有组件，异常隔离"""
+        for component_name in self.ordered_component_names():
             component = self._components[component_name]
             if not component.enabled:
                 continue
@@ -561,16 +690,19 @@ if __name__ == "__main__":
     # 2. 创建引擎实例
     engine = BaseQuantEngine.create(config)
 
-    engine.register_component(TaskSchedulerComponent())  # 1. 调度器（必须）
-    # engine.register_component(MarketCenter())  # 2. 行情中心（必须）
-    # engine.register_component(StrategyManager())  # 3. 策略管理器（必须）
-    # engine.register_component(RiskManager())        # 你的风控管理器
-    # engine.register_component(Sizer())              # 你的仓位计算器
-    # engine.register_component(Portfolio())          # 你的持仓账户
-    # engine.register_component(BrokerAdapter())  # 4. 券商/撮合适配器（必须）
+    # 调度器：负责"什么时候跑"，先注册也行后注册也行 ——
+    # 启停顺序由种类层级决定，不再依赖这里的书写顺序。
+    engine.register_component(SchedulerComponent())
+    engine.register_component(WorkerComponent(capacity=2))
 
-    # 测试一个自定义组件
-    engine.register_component(TimerComponent())
+    # 服务层：提供能力，被策略依赖
+    # engine.register_component(MarketService(symbols=[...]))
+    # engine.register_component(CollectionService(symbols=[...]))
+    # engine.register_component(TradingService())
+    # engine.register_component(RiskService(rules=[...]))
+
+    # 策略层：消费服务，产出订单
+    # engine.register_component(StrategyComponent(tasks=[...]))
 
 
     # 4. 订阅事件示例（所有模块通过事件通信，无直接调用）

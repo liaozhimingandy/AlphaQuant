@@ -301,10 +301,11 @@ class TestGatewayCapitalSeeding(unittest.TestCase):
             })()
 
     def _component(self, gateway):
-        from app.engine.component.live_gateway import LiveGatewayComponent
+        # 券商网关原是独立的 LiveGatewayComponent，现在与落库单元一起
+        # 并进 TradingService（网关那一半是它的 ``gateway`` 单元）。
+        from app.engine.component import TradingService
 
-        comp = LiveGatewayComponent(gateway=gateway)
-        return comp
+        return TradingService(gateway=gateway)
 
     def test_endpoint_cash_not_counted_twice(self):
         from app.execution.gateway import SimulatedGateway

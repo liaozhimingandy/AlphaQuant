@@ -47,15 +47,15 @@ def gen_bars(symbol: str, n: int = 40) -> list[Bar]:
 def make_engine(tasks=None) -> BaseQuantEngine:
     """搭一台"能跑但不起 reactor"的引擎，用于验证控制面与监控面。"""
     from app.engine import component
-    from app.engine.component import StrategyManagerComponent, TaskSchedulerComponent
+    from app.engine.component import SchedulerComponent, StrategyComponent
 
     engine = BaseQuantEngine.create({"RUN_MODE": "BACKTEST"})
-    engine.register_component(TaskSchedulerComponent())
-    engine.register_component(StrategyManagerComponent(tasks=tasks or []))
+    engine.register_component(SchedulerComponent())
+    engine.register_component(StrategyComponent(tasks=tasks or []))
     # 手动初始化策略中枢，让它拿到引擎的事件总线。
     # 否则直接喂 K 线时成交事件会发布到 None 上，日志里刷出误导性的 ERROR，
     # 把测试输出淹掉——真实错误反而看不见了。
-    engine.get_component("strategy_manager").initialize(
+    engine.get_component("strategy").initialize(
         engine.context, engine.get_event_bus(), {}
     )
     return engine
@@ -65,10 +65,10 @@ class TestSnapshotStore(TempWorkspaceMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.base = self.workdir()
         self.engine = make_engine()
-        self.engine.get_component("strategy_manager").load_tasks(
+        self.engine.get_component("strategy").load_tasks(
             [make_task_spec("s-a"), make_task_spec("s-b", "600000")]
         )
-        self.engine.get_component("strategy_manager").runtime.start_all()
+        self.engine.get_component("strategy").runtime.start_all()
         self.store = SnapshotStore("run-test", base_dir=self.base, keep=3)
 
     def test_write_creates_files(self):
@@ -86,7 +86,7 @@ class TestSnapshotStore(TempWorkspaceMixin, unittest.TestCase):
         self.assertEqual(snap["task_count"], 2)
 
     def test_tasks_have_equity_curve(self):
-        sm = self.engine.get_component("strategy_manager")
+        sm = self.engine.get_component("strategy")
         for b in gen_bars("000001", 30):
             sm.runtime.on_bar(b)
         snap = self.store.capture(self.engine)
@@ -164,8 +164,8 @@ class TestMonitorWebData(TempWorkspaceMixin, unittest.TestCase):
         self.ns = f"test-{uuid.uuid4().hex[:8]}"
 
         self.engine = make_engine()
-        self.engine.get_component("strategy_manager").load_tasks([make_task_spec("m1")])
-        self.engine.get_component("strategy_manager").runtime.start_all()
+        self.engine.get_component("strategy").load_tasks([make_task_spec("m1")])
+        self.engine.get_component("strategy").runtime.start_all()
 
         self.comp = MonitorWebComponent(
             engine=self.engine, port=0, snapshot_dir=str(self.snap_dir), namespace=self.ns
@@ -181,7 +181,7 @@ class TestMonitorWebData(TempWorkspaceMixin, unittest.TestCase):
             self.assertIn(key, ov)
         self.assertEqual(ov["task_count"], 1)
         names = [c["name"] for c in ov["components"]]
-        self.assertIn("strategy_manager", names)
+        self.assertIn("strategy", names)
 
     def test_run_id_single_sourced_from_engine(self):
         """回归：面板上的 run_id 必须只有一个来源。

@@ -32,7 +32,7 @@ from app.common.logging import logger
 @click.option("--no-auto-stop", is_flag=True, help="禁用回测模式自动停止")
 def engine_cmd(mode, symbol, idle_timeout, no_auto_stop) -> None:
     from app.engine import component
-    from app.engine.component import TaskSchedulerComponent, TimerComponent
+    from app.engine.component import SchedulerComponent, WorkerComponent
     from app.engine.base import BaseQuantEngine
     from twisted.internet import reactor
 
@@ -44,8 +44,9 @@ def engine_cmd(mode, symbol, idle_timeout, no_auto_stop) -> None:
     }
 
     engine = BaseQuantEngine.create(config)
-    engine.register_component(TaskSchedulerComponent())
-    engine.register_component(TimerComponent())
+    # 定时器已并入调度组件（SchedulerComponent），不再需要单独的定时器组件
+    engine.register_component(SchedulerComponent())
+    engine.register_component(WorkerComponent())
 
     click.secho(f"🚀 启动引擎 | 模式={mode} | Ctrl+C 退出", fg="green", bold=True)
     try:
@@ -183,7 +184,7 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
         logger.debug("装配失败详情", exc_info=True)
         sys.exit(1)
 
-    sm = engine.get_component("strategy_manager")
+    sm = engine.get_component("strategy")
     click.secho(
         f"🚀 服务启动 | 任务 {len(sm)} 个 | 数据源 {data_source} | Ctrl+C 优雅退出",
         fg="green",
@@ -196,46 +197,51 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
             fg="cyan",
         )
 
-    col = engine.get_component("data_collector")
+    # 采集服务把 K线 / 日频截面 / 完整性校验合成了一个服务，
+    # 所以这里一次把三块状态都报出来 —— 以前要查三个组件。
+    col = engine.get_component("collection_service")
     if col is not None:
         from app.engine.collect.spec import humanize_frequency
 
         buckets: dict = {}
-        for job in col.spec.jobs:
+        for job in col.kline_spec.jobs:
             buckets[job.interval] = buckets.get(job.interval, 0) + 1
         click.secho(
-            "📥 行情采集: "
+            "📥 采集服务: "
             + (", ".join(f"{humanize_frequency(k)}×{v}" for k, v in sorted(buckets.items()))
                or "无任务")
-            + f" | 共 {len(col.spec.jobs)} 个任务"
-            + ("" if col.spec.enabled else f"（已停用：{col.disabled_reason}）"),
+            + f" | 共 {len(col.kline_spec.jobs)} 个任务"
+            + ("" if col.kline_enabled else f"（已停用：{col.disabled_reason}）"),
+            fg="cyan",
+        )
+        click.secho(
+            f"   ├─ 日频截面(资金流/筹码/涨停池): {'开' if col.cross_enabled else '关'}"
+            + (f" | 个股 {len(col.cross_symbols)} 只 @ {col.cross_interval:.0f}s"
+               f" | 市场级 @ {col.cross_daily_interval:.0f}s"
+               if col.cross_enabled else ""),
+            fg="cyan",
+        )
+        click.secho(
+            f"   └─ 完整性校验: {'开' if col.guard_enabled else '关'}"
+            + (f" | {col.guard_start_delay:.0f}s 后首检，每 {col.guard_interval:.0f}s"
+               f" | 回溯 {col.guard_lookback_days} 天"
+               if col.guard_enabled else ""),
             fg="cyan",
         )
 
-    store_comp = engine.get_component("trading_store")
-    if store_comp is not None:
+    trade = engine.get_component("trading_service")
+    if trade is not None:
         click.secho(
-            f"🗄️  交易落库: {'开' if store_comp.enabled else '关'}"
-            + (f" | {_settings.DATABASE_URL}" if store_comp.enabled else ""),
+            f"🗄️  交易服务: 落库={'开' if trade.store_enabled else '关'}"
+            + (f" | {_settings.DATABASE_URL}" if trade.store_enabled else ""),
             fg="cyan",
         )
-    ext_comp = engine.get_component("ext_data")
-    if ext_comp is not None:
-        click.secho(
-            "💰 扩展数据: "
-            + ("开" if ext_comp.enabled else "关")
-            + (f" | 个股 {len(ext_comp.symbols)} 只 @ {ext_comp.interval:.0f}s"
-               f" | 市场级(涨停池/题材) @ {ext_comp.daily_interval:.0f}s"
-               if ext_comp.enabled else ""),
-            fg="cyan",
-        )
-    gw_comp = engine.get_component("live_gateway")
-    if gw_comp is not None:
-        click.secho(
-            f"🔌 实盘网关: {getattr(gw_comp.gateway, 'name', '?')} | "
-            f"回报轮询 {gw_comp.poll_interval}s | 对账 {gw_comp.reconcile_interval}s",
-            fg="yellow", bold=True,
-        )
+        if trade.gateway_enabled:
+            click.secho(
+                f"🔌 实盘网关: {getattr(trade.gateway, 'name', '?')} | "
+                f"回报轮询 {trade.poll_interval}s | 对账 {trade.reconcile_interval}s",
+                fg="yellow", bold=True,
+            )
 
     try:
         ctx = engine.start()

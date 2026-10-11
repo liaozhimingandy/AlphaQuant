@@ -152,11 +152,17 @@ class TestClosedMarketNoRequest(unittest.TestCase):
     """闭市不请求：这是本轮最核心的行为约束。"""
 
     def _component(self, symbols=("000001",)):
-        from app.engine.component.extdata import ExtDataComponent
+        # 日频截面原是独立的 ExtDataComponent，现在并进 CollectionService
+        # 的 ``_cross`` 单元：构造参数带 ``cross_`` 前缀，方法带 ``_cross`` 中缀。
+        from app.engine.component import CollectionService
 
-        c = ExtDataComponent(symbols=list(symbols))
-        c.enabled = True
-        return c
+        # K 线单元用一个不存在的配置文件：构造期它会解析一次采集配置，
+        # 不隔离的话会读到工程里的 config/collector.json，把真实标的带进用例。
+        return CollectionService(
+            cross_symbols=list(symbols),
+            cross_enabled=True,
+            kline_config_path="/nonexistent/collector.json",
+        )
 
     def test_when_market_closed_no_fetch(self):
         from app.domain import calendar as cal_mod
@@ -170,8 +176,8 @@ class TestClosedMarketNoRequest(unittest.TestCase):
 
             saturday = _dt.datetime(2026, 10, 10, 10, 0)
             with _freeze(saturday):
-                self.assertFalse(c._should_fetch())
-            self.assertGreater(c.stats["skipped_closed"], 0)
+                self.assertFalse(c._cross_should_fetch())
+            self.assertGreater(c.stats_cross["skipped_closed"], 0)
         finally:
             cal_mod.set_calendar(TradeCalendar.load())
 
@@ -187,10 +193,10 @@ class TestClosedMarketNoRequest(unittest.TestCase):
             c = self._component()
             post = datetime(2026, 10, 9, 15, 40)          # 盘后窗口
             with _freeze(post):
-                self.assertEqual(c._slot(), "post")
-                c._slots[post.date()] = {"post"}          # 标记已完成
-                self.assertIsNone(c._slot())
-            self.assertGreater(c.stats["skipped_synced"], 0)
+                self.assertEqual(c._cross_slot(), "post")
+                c._cross_slots[post.date()] = {"post"}          # 标记已完成
+                self.assertIsNone(c._cross_slot())
+            self.assertGreater(c.stats_cross["skipped_synced"], 0)
         finally:
             cal_mod.set_calendar(TradeCalendar.load())
 
@@ -203,13 +209,13 @@ class TestClosedMarketNoRequest(unittest.TestCase):
             c = self._component()
             pre = datetime(2026, 10, 9, 9, 10)
             with _freeze(pre):
-                self.assertEqual(c._slot(), "pre")
-                c._slots[pre.date()] = {"pre"}
-                self.assertIsNone(c._slot())
+                self.assertEqual(c._cross_slot(), "pre")
+                c._cross_slots[pre.date()] = {"pre"}
+                self.assertIsNone(c._cross_slot())
             # 到了盘后，定稿那一轮仍然要做
             post = datetime(2026, 10, 9, 15, 40)
             with _freeze(post):
-                self.assertEqual(c._slot(), "post")
+                self.assertEqual(c._cross_slot(), "post")
         finally:
             cal_mod.set_calendar(TradeCalendar.load())
 
@@ -221,9 +227,9 @@ class TestClosedMarketNoRequest(unittest.TestCase):
         try:
             c = self._component()
             with _freeze(datetime(2026, 10, 9, 15, 10)):
-                self.assertIsNone(c._slot())
+                self.assertIsNone(c._cross_slot())
             with _freeze(datetime(2026, 10, 9, 15, 35)):
-                self.assertEqual(c._slot(), "post")
+                self.assertEqual(c._cross_slot(), "post")
         finally:
             cal_mod.set_calendar(TradeCalendar.load())
 
@@ -241,7 +247,7 @@ class _freeze:
     # 采集时间窗口的判断在 schedule 模块里，也要一起冻住 ——
     # 只冻 calendar 会出现"日历说在盘后、窗口说不在"的自相矛盾
     _MODULES = ("app.domain.calendar",
-                "app.engine.component.extdata",
+                "app.engine.component.service.collection",
                 "app.engine.collect.schedule")
 
     def __init__(self, when: datetime) -> None:

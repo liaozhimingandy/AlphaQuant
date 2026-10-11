@@ -31,7 +31,7 @@
 引擎启动 → 组件逐个启动
               │
               ▼
-   data_guard 启动（延后 20s，线程池，不阻塞启动）
+   collection_service 的完整性单元启动（延后 20s，线程池，不阻塞启动）
               │
               ├─ 1. 比对：交易日历算出"应该有哪几天" − 库里实际有的 = 缺口
               │       └─ 右端点锚到**最近交易日**（不是今天）：
@@ -95,13 +95,13 @@ alphaquant sources --probe --kind daily    # 实测每个日线源通不通（�
 
 ### 面板
 
-组件快照里（`data_guard`）有 `report` / `stats` / `auto_repair`，
+采集服务快照的完整性分区里（`snapshot["guard"]`）有 `report` / `stats` / `auto_repair`，
 引擎 `health_check` 会在"仍有缺口未补上"时把它标为不健康。
 
 组件卡片上还会显示**任务进度**：
 
 ```text
-data_guard            RUNNING
+collection_service    RUNNING   （完整性单元在快照的 guard 分区里）
 数据完整
 数据体检 68 只              62/68 失败 0 进行中
 [████████████████████░░]

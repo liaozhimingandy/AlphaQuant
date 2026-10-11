@@ -622,6 +622,6 @@ hot_rank: 所有数据源均失败 -> akshare_em: ... | xueqiu_hot: ... ||
 | `app/tests/test_source_retry_and_dedup.py` | 重试 N 次后换源、全挂告警、已采集不重复采 |
 | `app/tests/test_source_weights.py` | 权重：初值 1、降权、恢复、排序、落盘 |
 | `app/tests/test_kline_sources.py` | mootdx / a-stock-data 适配器与 daily 链路 |
-| `app/tests/test_data_integrity.py` | 缺口检出、坏数据、自动补全、data_guard 组件 |
+| `app/tests/test_data_integrity.py` | 缺口检出、坏数据、自动补全、采集服务的完整性单元 |
 | `app/tests/test_component_progress.py` | 组件任务进度（已完成/全部）、本地兜底源、`--probe` 诊断 |
 | `app/tests/test_net_transport.py` | 传输层：请求头、通道兜底、僵尸代理摘除、域名熔断、`emapp_hot` 解析 |

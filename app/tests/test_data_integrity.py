@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
 # @FileName    : test_data_integrity.py
-# @Description : 数据完整性校验 + data_guard 组件
+# @Description : 数据完整性校验 + 采集服务的完整性单元
 #
 #                这组测试守的是一句话：**库里少一天数据，系统不许沉默**。
 #
@@ -365,20 +365,41 @@ class TestScan(_DbMixin, unittest.TestCase):
 
 
 class TestDataGuardComponent(unittest.TestCase):
-    """组件生命周期：不阻塞启动、可手动触发、健康检查。"""
+    """完整性单元生命周期：不阻塞启动、可手动触发、健康检查。
+
+    原 ``DataGuardComponent`` 现在是 ``CollectionService`` 的 ``_guard`` 单元：
+    构造参数带 ``guard_`` 前缀，方法带 ``_guard`` 中缀，行为一点没改。
+    """
+
+    #: 旧组件的扁平构造参数 → 服务里完整性单元的参数名
+    _GUARD_KWARGS = {
+        "enabled": "guard_enabled",
+        "lookback_days": "guard_lookback_days",
+        "auto_repair": "guard_auto_repair",
+        "start_delay": "guard_start_delay",
+        "interval": "guard_interval",
+        "max_symbols": "guard_max_symbols",
+        "max_repair": "guard_max_repair",
+    }
 
     def _comp(self, **kw):
-        from app.engine.component.dataguard import DataGuardComponent
+        from app.engine.component import CollectionService
 
-        return DataGuardComponent(**kw)
+        for flat, namespaced in self._GUARD_KWARGS.items():
+            if flat in kw:
+                kw[namespaced] = kw.pop(flat)
+        # K 线单元指向不存在的配置，隔离工程里的 config/collector.json
+        kw.setdefault("kline_config_path", "/nonexistent/collector.json")
+        return CollectionService(**kw)
 
     def test_disabled_component_does_not_start_timer(self):
         comp = self._comp(enabled=False, disabled_reason="回测模式")
         comp.component_config = {}
-        comp.on_initialize()
-        with mock.patch.object(comp, "_run", side_effect=AssertionError("不该跑")):
-            comp.on_start()
-        self.assertIsNone(comp._loop)
+        comp._init_guard()
+        with mock.patch.object(comp, "_run_guard",
+                               side_effect=AssertionError("不该跑")):
+            comp._start_guard()
+        self.assertIsNone(comp._guard_loop)
         self.assertIn("回测模式", comp.disabled_reason)
 
     def test_manual_check_returns_report(self):
@@ -389,7 +410,7 @@ class TestDataGuardComponent(unittest.TestCase):
         """
         from twisted.internet import defer
 
-        import app.engine.component.dataguard as G
+        import app.engine.component.service.collection as C
 
         comp = self._comp(enabled=True, lookback_days=3, auto_repair=False)
         fake_report = mock.MagicMock()
@@ -401,23 +422,23 @@ class TestDataGuardComponent(unittest.TestCase):
 
         with mock.patch("app.engine.integrity.DataIntegrityChecker.scan",
                         return_value=fake_report), \
-             mock.patch.object(G.threads, "deferToThread",
+             mock.patch.object(C.threads, "deferToThread",
                                side_effect=lambda fn: defer.succeed(fn())):
             box = {}
             comp.check_now(["000001"]).addCallback(box.update)
         self.assertEqual(box.get("checked"), 1)
-        self.assertEqual(comp.stats["runs"], 1)
+        self.assertEqual(comp.stats_guard["runs"], 1)
 
     def test_snapshot_shape(self):
         comp = self._comp(enabled=True)
-        snap = comp.snapshot()
+        snap = comp.snapshot()["guard"]
         for key in ("enabled", "auto_repair", "interval", "stats", "report"):
             self.assertIn(key, snap)
         self.assertTrue(snap["assembled"])
 
     def test_health_check_before_first_run(self):
         comp = self._comp(enabled=True)
-        ok, detail = comp.health_check()
+        ok, detail = comp._health_check_guard()
         self.assertTrue(ok)
         self.assertIn("尚未体检", detail)
 
@@ -425,32 +446,36 @@ class TestDataGuardComponent(unittest.TestCase):
         from app.engine.integrity import IntegrityReport
 
         comp = self._comp(enabled=True)
-        comp._report = IntegrityReport(missing_total=3, checked=2)
-        ok, detail = comp.health_check()
+        comp._guard_report = IntegrityReport(missing_total=3, checked=2)
+        ok, detail = comp._health_check_guard()
         self.assertFalse(ok)
         self.assertIn("3", detail)
 
     def test_is_busy_flag(self):
         comp = self._comp(enabled=True)
-        self.assertFalse(comp.is_busy())
-        comp._busy = True
-        self.assertTrue(comp.is_busy())
+        self.assertFalse(comp._is_busy_guard())
+        comp._busy_guard = True
+        self.assertTrue(comp._is_busy_guard())
 
     def test_start_schedules_first_check_instead_of_blocking(self):
         """首检必须延后调度，不能在 on_start 里同步跑（会拖慢启动）。"""
         comp = self._comp(enabled=True, start_delay=20.0, interval=3600.0)
         comp.component_config = {}
-        comp.on_initialize()
+        comp._init_guard()
         with mock.patch("twisted.internet.reactor.callLater") as later, \
-             mock.patch.object(comp, "_tick",
+             mock.patch.object(comp, "_tick_guard",
                                side_effect=AssertionError("不该同步跑")):
-            comp.on_start()
+            comp._start_guard()
         delays = [c[0][0] for c in later.call_args_list]
         self.assertIn(20.0, delays)
 
 
 class TestBuilderAssembly(unittest.TestCase):
-    """引擎装配：数据校验服务要在，且回测模式默认停用。"""
+    """引擎装配：采集服务（含完整性单元）要在，且回测模式默认停用。
+
+    注意装配开关还是三个（``with_collector`` / ``with_ext_data`` /
+    ``with_data_guard``）——合并掉的是**组件**，不是开关粒度。
+    """
 
     def _build(self, **kw):
         from app.engine.builder import build_engine
@@ -470,36 +495,73 @@ class TestBuilderAssembly(unittest.TestCase):
 
     def test_guard_registered(self):
         engine = self._build()
-        comp = engine.get_component("data_guard")
+        comp = engine.get_component("collection_service")
         self.assertIsNotNone(comp, "引擎必须装配数据校验服务")
         self.assertTrue(comp.enabled)
 
-    def test_guard_registered_after_collector(self):
-        """顺序即启动顺序：采集先把数据喂进库，校验才不会误判成缺口。"""
-        engine = self._build(with_collector=True)
-        names = engine.component_names()
-        if "data_collector" in names:
-            self.assertLess(names.index("data_collector"),
-                            names.index("data_guard"))
+    def test_units_start_in_dependency_order(self):
+        """三个单元的启动顺序：K 线 → 日频截面 → 完整性。
 
-    def test_backtest_mode_disables_guard(self):
+        合并前这个顺序由"组件名单的先后"表达（采集组件排在校验组件前面）；
+        合并成同一个服务后名单里只剩一个名字，顺序下沉到服务的 ``on_start``
+        里 —— 所以这里直接验单元次序，而不是验组件次序。
+
+        顺序错了的后果：完整性单元会发现"库里还没有今天的数据"，
+        判定成缺口并急着联网补一轮，而采集其实马上就要采了。
+        """
+        from twisted.internet import defer
+
+        engine = self._build(with_collector=True)
+        comp = engine.get_component("collection_service")
+        order: list = []
+
+        def _record(unit: str):
+            def _fn(*a, **kw):
+                order.append(unit)
+                return defer.succeed(None)
+            return _fn
+
+        comp._start_kline = _record("kline")
+        comp._start_cross = _record("cross")
+        comp._start_guard = _record("guard")
+        comp.on_start()
+        self.assertEqual(order, ["kline", "cross", "guard"])
+
+    def test_backtest_mode_disables_units_not_service(self):
+        """回测模式关掉的是**单元**，不是服务本身。
+
+        合并后"服务是否启用"与"单元是否启用"成了两件事：
+        回测里三个单元都不该跑，但服务**仍然装配** ——
+        否则面板上连"采集合约"那一格都没有，也没法手动补一次数据。
+        这是"装配 ≠ 启用"这条老规矩在三合一之后的延续。
+        """
         engine = self._build(mode="BACKTEST")
-        comp = engine.get_component("data_guard")
+        comp = engine.get_component("collection_service")
         self.assertIsNotNone(comp)
-        self.assertFalse(comp.enabled)
+        self.assertTrue(comp.enabled, "单元停用不该把服务一起摘掉")
+        self.assertFalse(comp.kline_enabled)
+        self.assertFalse(comp.guard_enabled)
         self.assertIn("回测", comp.disabled_reason)
 
     def test_explicit_switch(self):
-        engine = self._build(mode="BACKTEST", with_data_guard=True)
-        self.assertTrue(engine.get_component("data_guard").enabled)
+        """显式开关可以覆盖模式默认值（回测里也能单独开体检）。"""
+        comp = self._build(mode="BACKTEST", with_data_guard=True).get_component(
+            "collection_service")
+        self.assertTrue(comp.guard_enabled)
 
     def test_guard_snapshot_in_engine_snapshot(self):
+        """完整性单元的状态挂在采集服务快照的 ``guard`` 分区里。
+
+        面板那侧的字段名没变（还是 auto_repair / interval / stats …），
+        只是多包了一层 —— 这是"合并"对观测面的全部影响。
+        """
         engine = self._build()
         snap = engine.snapshot()
-        entry = snap["components"]["data_guard"]
+        entry = snap["components"]["collection_service"]
         self.assertTrue(entry["enabled"])
-        self.assertTrue(entry["snapshot"]["assembled"])
-        self.assertIn("auto_repair", entry["snapshot"])
+        guard = entry["snapshot"]["guard"]
+        self.assertTrue(guard["assembled"])
+        self.assertIn("auto_repair", guard)
 
 
 if __name__ == "__main__":

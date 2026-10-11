@@ -111,11 +111,12 @@ def main() -> int:
         with_monitor=False, auto_load_runtime=False, broker_gateway="simulated",
         with_collector=False, symbols=["000001"],
     )
-    gw_comp = engine.get_component("live_gateway")
-    sm = engine.get_component("strategy_manager")
-    store = engine.get_component("trading_store")
-    check("引擎装配：实盘网关已挂上", gw_comp is not None)
-    check("引擎装配：落库组件已挂上", store is not None)
+    # 网关与落库已并入交易服务（网关单元 + 落库单元），所以是同一个组件
+    gw_comp = engine.get_component("trading_service")
+    sm = engine.get_component("strategy")
+    store = gw_comp
+    check("引擎装配：交易服务（含实盘网关）已挂上", gw_comp is not None)
+    check("引擎装配：落库单元已挂上", store is not None)
 
     engine.initialize()
     gw_comp.start()
@@ -149,9 +150,11 @@ def main() -> int:
     cash_after = task.portfolio.account.cash
 
     check("成交回报：被正确路由（无无法归属的回报）",
-          gw_comp.stats["unknown"] == 0, f"unknown={gw_comp.stats['unknown']}")
-    check("成交回报：产生了成交", gw_comp.stats["fills"] >= 1,
-          f"fills={gw_comp.stats['fills']}")
+          # 合并后网关单元的统计在 stats_gateway 里（落库单元另有 stats_store）
+          gw_comp.stats_gateway["unknown"] == 0,
+          f"unknown={gw_comp.stats_gateway['unknown']}")
+    check("成交回报：产生了成交", gw_comp.stats_gateway["fills"] >= 1,
+          f"fills={gw_comp.stats_gateway['fills']}")
     check("持仓更新：仓位变化", pos_after != pos_before or pos_after > 0,
           f"{pos_before} → {pos_after}")
     check("资金更新：现金减少", cash_after < cash_before,

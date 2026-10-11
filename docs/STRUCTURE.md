@@ -6,6 +6,7 @@
 >
 > 配套文档：
 > - [ARCHITECTURE.md](ARCHITECTURE.md) —— 运行时数据流（一根行情怎么变成一笔成交）
+> - [ENGINE_ARCHITECTURE.md](ENGINE_ARCHITECTURE.md) —— 引擎的四类组件与服务化（服务/策略/工作单元/调度）
 > - [DATA_FABRIC.md](DATA_FABRIC.md) —— L2 数据源层的详细设计（Provider/Capability/Router）
 > - [DATA_SOURCES.md](DATA_SOURCES.md) —— 如何新增一个数据源
 > - [DATA_INTEGRITY.md](DATA_INTEGRITY.md) —— 数据完整性校验与自动补全
@@ -176,13 +177,26 @@ storage/
 ```
 engine/
 ├── base/builder/control/event/settings   引擎主体与装配
-├── component/   业务组件：collector / market / news / strategy / dataguard / …
+├── component/   ★ 四类组件体系（下面单独展开）
+│   ├── base.py        IBaseComponent：生命周期 + 进度 + 事件订阅
+│   ├── kinds.py       四种组件基类 + ComponentKind + KIND_LAYER + Cap
+│   ├── registry.py    ServiceRegistry：能力登记 / 拓扑排序 / 依赖注入
+│   ├── service/       服务层：market / collection / trading / risk / news
+│   ├── strategy.py    策略组件
+│   ├── worker.py      工作单元（有并发上限）
+│   └── scheduler.py   调度组件（任务队列 + 周期定时器）
 ├── tasking/     单进程内的多任务容器
 ├── collect/     采集调度：采什么、多久采、当前时点能不能采
 ├── bus/         跨进程文件总线（IPC）
 ├── hub/         多进程编排（supervisor / worker）
 └── integrity.py 数据完整性体检与自动补全
 ```
+
+引擎这一层的完整设计见 **«docs/ENGINE_ARCHITECTURE.md»**。
+一句话版本：以前 11 个组件平铺在一个字典里，谁先启动靠 `builder.py` 的
+注册顺序碰运气；现在按"在引擎里扮演的角色"分成
+**服务 / 策略 / 工作单元 / 调度** 四类，启停顺序由 `depends_on`
+与种类层级算出来，组件互相找人用**能力**而不是魔法字符串。
 
 四层是**正交的**，不是并行实现：
 `collect` 决定何时采 → `tasking` 管理任务 → `engine` 提供事件循环 → `hub` 拉起多个进程。

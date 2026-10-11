@@ -71,11 +71,16 @@ class QuantTask:
         meta: Optional[Dict[str, Any]] = None,
         broker: Any = None,
         gateway: Any = None,
+        global_gate: Any = None,
     ) -> None:
         self.task_id = task_id
         self.symbol = symbol
         self.strategy = strategy
         self.risk_chain = risk_chain or RiskChain()
+        #: **全局**风控闸门（引擎级 RiskService）。与任务级链串联：
+        #: 它管"整个账户还能不能开"，risk_chain 管"这个策略该开多大"。
+        #: 为 None 时退化为只有任务自己的链 —— 单独 new 一个任务做回测时是常态。
+        self.global_gate = global_gate
         self.run_mode = run_mode
         self.warmup_bars = int(warmup_bars)
         self.max_hold_bars = int(max_hold_bars)
@@ -347,6 +352,25 @@ class QuantTask:
     # ============================================================
     # 统一出口：Signal -> 风控 -> 仓位 -> 撮合
     # ============================================================
+    def _reject(self, signal: Signal, rule: str, reason: str) -> None:
+        """产一条 REJECTED 订单并发出去。
+
+        为什么被否决也要造一条订单对象（而不是直接 return）：
+        否决是**应当被审计的事实**。只打日志的话，面板上"今天拦了几笔、
+        因为什么拦"永远是空的，而这两条恰恰是事后复盘风控规则
+        是否过严的唯一依据。
+        """
+        logger.info(f"[{self.task_id}] 信号被风控否决 | {rule}: {reason}")
+        order = self.broker.create_order(
+            self.symbol, signal.side, 0, self.task_id, signal.reason,
+            signal.source.value,
+        )
+        order.status = OrderStatus.REJECTED
+        order.reject_reason = f"{rule}: {reason}"
+        self._book_order(order)
+        self._emit_order(order)
+        return None
+
     def _process_signal(
         self, signal: Signal, ctx: FactorContext, dt: Optional[datetime]
     ) -> Optional[Order]:
@@ -354,27 +378,45 @@ class QuantTask:
         signal.symbol = self.symbol
         signal.ts = dt
 
-        # 1) 风控闸门
+        # 1) 全局风控闸门（引擎级：一键熔断 + 全局规则）
+        #    放在任务级链**之前**：熔断是"现在不要有任何新仓"，
+        #    先跑任务级规则纯属浪费，而且会污染任务自己的否决统计。
+        gate_scale = 1.0
+        gate = self.global_gate
+        if gate is not None:
+            try:
+                gv = gate(signal, self.state, ctx=ctx,
+                          account=self.portfolio.account)
+            except Exception as exc:
+                # 闸门自身出错必须放行：风控崩溃导致"完全不交易"
+                # 比"这一笔没拦住"严重得多。
+                logger.error(f"[{self.task_id}] 全局风控闸门异常，按放行: {exc}")
+                gv = None
+            if gv is not None and not getattr(gv, "allowed", True):
+                return self._reject(
+                    signal, getattr(gv, "rule", "global"), getattr(gv, "reason", "")
+                )
+            if gv is not None:
+                try:
+                    gate_scale = float(getattr(gv, "scale", 1.0) or 1.0)
+                except (TypeError, ValueError):
+                    gate_scale = 1.0
+
+        # 2) 任务级风控链
         verdict = self.risk_chain.check(
             signal, self.state, ctx=ctx, account=self.portfolio.account
         )
         if not verdict.allowed:
-            logger.info(f"[{self.task_id}] 信号被风控否决 | {verdict.rule}: {verdict.reason}")
-            order = self.broker.create_order(
-                self.symbol, signal.side, 0, self.task_id, signal.reason, signal.source.value
-            )
-            order.status = OrderStatus.REJECTED
-            order.reject_reason = f"{verdict.rule}: {verdict.reason}"
-            self._book_order(order)
-            self._emit_order(order)
-            return None
+            return self._reject(signal, verdict.rule, verdict.reason)
+        # 两边都可能要求缩放仓位，取更保守的那个
+        scale = min(float(verdict.scale or 1.0), gate_scale)
 
-        # 2) 仓位计算
+        # 3) 仓位计算
         price = self.state.last_price
         if price <= 0:
             return None
 
-        # 2.5) 已有未结订单时不再重复下单。
+        # 3.5) 已有未结订单时不再重复下单。
         #      回测里订单即时成交，这个判断永远为假、零影响；
         #      实盘里订单会挂一会儿，没有这道保护策略会每根K线都发一单，
         #      13 根K线就是 13 笔委托 —— 全部成交后会建出远超计划的仓位，
@@ -389,13 +431,13 @@ class QuantTask:
             side=signal.side,
             price=price,
             strength=signal.strength,
-            scale=verdict.scale,
+            scale=scale,
         )
         if size <= 0:
             logger.debug(f"[{self.task_id}] 计算出的下单数量为 0，跳过")
             return None
 
-        # 3) 撮合。返回时**未必已成交**（实盘只是报单成功）
+        # 4) 撮合。返回时**未必已成交**（实盘只是报单成功）
         order = self.broker.create_order(
             self.symbol,
             signal.side,
@@ -409,7 +451,7 @@ class QuantTask:
         self.strategy.on_order(order)
         self._emit_order(order)
 
-        # 4) 同步成交（回测/模拟）与异步成交（实盘）在这里分叉
+        # 5) 同步成交（回测/模拟）与异步成交（实盘）在这里分叉
         if order.status in (OrderStatus.FILLED, OrderStatus.PARTIAL):
             # 模拟撮合：submit 返回即成交，立即记账
             self._on_filled_sync(order)

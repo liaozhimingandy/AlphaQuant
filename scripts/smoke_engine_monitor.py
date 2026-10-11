@@ -267,7 +267,7 @@ engine = build_engine(
     auto_load_runtime=False,
 )
 
-SM = engine.get_component("strategy_manager")
+SM = engine.get_component("strategy")
 
 reactor.callLater(0.5, lambda: threads.deferToThread(run_probes).addCallbacks(done, on_error))
 ctx = engine.start()

@@ -12,9 +12,9 @@ from app.common.logging import logger
 
 def main():
     engine = build_engine(mode="BACKTEST")
-    sm = engine.get_component("strategy_manager")
-    news_c = engine.get_component("news_center")
-    market = engine.get_component("market_center")
+    sm = engine.get_component("strategy")
+    news_c = engine.get_component("news_service")
+    market = engine.get_component("market_service")
 
     print(f"\n装载任务数: {len(sm)}")
     print(f"行情中心: {market.snapshot()}")

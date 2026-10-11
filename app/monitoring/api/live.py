@@ -15,7 +15,7 @@ class LiveViewsMixin:
         gw = None
         if self.bound_engine is not None:
             try:
-                gw = self.bound_engine.get_component("live_gateway")
+                gw = self.bound_engine.get_component("trading_service")
             except Exception:
                 gw = None
         if gw is None:
@@ -30,7 +30,7 @@ class LiveViewsMixin:
         gw = None
         if self.bound_engine is not None:
             try:
-                gw = self.bound_engine.get_component("live_gateway")
+                gw = self.bound_engine.get_component("trading_service")
             except Exception:
                 gw = None
         if gw is None:
@@ -50,7 +50,7 @@ class LiveViewsMixin:
         sm = None
         if self.bound_engine is not None:
             try:
-                sm = self.bound_engine.get_component("strategy_manager")
+                sm = self.bound_engine.get_component("strategy")
             except Exception:
                 sm = None
         runtime = getattr(sm, "runtime", None) if sm is not None else None

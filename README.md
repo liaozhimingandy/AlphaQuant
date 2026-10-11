@@ -965,7 +965,7 @@ python main.py pool demo                   # 无网络时用合成数据验证�
 
 ### 常驻采集
 
-由 `ext_data` 组件承担，**非交易日一次都不请求**，日频数据一天只采一次：
+由采集服务（`collection_service`）的日频截面单元承担，**非交易日一次都不请求**，日频数据一天只采一次：
 
 | 数据 | 节奏 |
 | --- | --- |
@@ -1007,14 +1007,30 @@ python main.py ctl add --spec '{"task_id":"rsi-000001","symbol":"000001",
   "strategy":{"type":"combo","entry":{"factor":"rsi","op":"lt","value":35}}}'
 python main.py ctl tasks                       # 确认已生效
 python main.py ctl task pause rsi-000001
-python main.py ctl component disable news_center
+python main.py ctl component disable news_service
 ```
 
 运行时新增的任务会落到 `output/runtime/<namespace>/tasks.json`，下次启动自动重放；
 新增任务的标的会自动纳入行情订阅（否则它永远等不到 K 线）。
 
-完整架构说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（推荐的深入阅读入口）
-与 [`app/readme.md`](app/readme.md)（核心层设计取舍）。
+完整架构说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（推荐的深入阅读入口）、
+[`docs/ENGINE_ARCHITECTURE.md`](docs/ENGINE_ARCHITECTURE.md)（引擎四类组件与服务化）
+与 [`docs/STRUCTURE.md`](docs/STRUCTURE.md)（逐层设计取舍与新旧路径对照）。
+（原先这里指向 `app/readme.md`，那个文件并不存在——链接是悬空的。）
+
+引擎里的东西按角色分四类，**加东西前先看这张图**：
+
+```
+IBaseComponent
+├── ServiceComponent    提供能力：market / collection / trading / risk / news
+├── StrategyComponent   消费行情与风控，产出订单
+├── WorkerComponent     执行一次性作业（有并发上限）
+└── SchedulerComponent  决定"什么时候跑"
+```
+
+判定标准只有一条：**它消费别人的输出吗？** 不消费、只提供 → 服务；
+要消费 → 策略或工作单元。启停顺序由 `depends_on` + 种类层级算出来，
+不靠 `builder.py` 的注册顺序。
 
 ## 回测数据来源
 
@@ -1077,7 +1093,13 @@ app/
 │                           research/pool/hub/broker 八个 *_cmds.py
 └── tests/                  测试
 
-docs/                       文档（STRUCTURE.md 是本目录重构的说明）
+docs/                       文档
+  ARCHITECTURE.md           运行时数据流（推荐深入阅读入口）
+  ENGINE_ARCHITECTURE.md    引擎四类组件与服务化（服务/策略/工作单元/调度）
+  STRUCTURE.md              目录重构说明（含新旧路径对照表）
+  DATA_FABRIC.md            L2 数据源层设计
+  DATA_SOURCES.md           如何新增数据源
+  DATA_INTEGRITY.md         数据完整性校验与自动补全
 strategies/                 用户自定义策略（自动发现，回测与实盘通用）
 config/
   providers.json            数据源 provider / route 配置

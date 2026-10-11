@@ -3,9 +3,33 @@
 # -------------------------------------------------------------------------------
 # @FileName    : builder.py
 # @Description : 引擎装配：把 tasks.json + settings 组装成一台可运行的引擎
-#               这是"后台常驻服务"的入口，也是连接配置层与组件层的唯一地方
+#               这是"后台常驻服务"的入口，也是连接配置层与服务层的唯一地方
 # @Project     : AlphaQuant
 # -------------------------------------------------------------------------------
+"""
+
+装配顺序的变迁
+==============
+
+**重构前**：注册顺序 == 启动顺序。于是 builder 里充满了这种注释::
+
+    # 1) 采集必须在行情中心之前注册：它先起来把数据喂进库
+    # 1.2) 数据校验放在采集**之后**：首检延后 20 秒是留给采集的
+    # 3.5) 实盘网关必须在策略中枢之前：策略 on_start 会把任务挂到网关上
+
+这些约束每一条都是真的，但它们**只存在于注释里**：
+改装配代码的人稍不注意就打乱顺序，而乱序的后果不是报错，
+是"挂载静默失败 / 体检把没采到的数据误判成缺口"。
+
+**重构后**：约束被显式表达出来，由引擎自己算顺序：
+
+  * 服务之间：``depends_on`` 声明 + 拓扑排序（成环直接报错）；
+  * 服务与其它组件：种类层级（调度 → 服务 → 策略 → 工作单元 → 其它）；
+  * 同层内部：注册顺序（只为了日志稳定，不影响正确性）。
+
+所以下面这些 ``register_component`` 的**书写顺序只是可读性**，
+改它不会改变行为 —— 这正是本次重构要的效果。
+"""
 from __future__ import annotations
 
 import json
@@ -13,20 +37,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.common.config import settings
-from app.engine import component
-from app.engine.component import (
-    DataCollectorComponent,
-    DataGuardComponent,
-    ExtDataComponent,
-    LiveGatewayComponent,
-    MarketCenterComponent,
-    NewsCenterComponent,
-    StrategyManagerComponent,
-    TaskSchedulerComponent,
-    TradingStoreComponent,
-)
 from app.engine.base import BaseQuantEngine
 from app.domain.types import RunMode
+from app.engine.component import (
+    CollectionService,
+    MarketService,
+    NewsService,
+    RiskService,
+    SchedulerComponent,
+    StrategyComponent,
+    TradingService,
+    WorkerComponent,
+)
 from app.monitoring.server import MonitorWebComponent
 from app.engine.tasking.spec import parse_task_specs
 from app.common.logging import logger
@@ -144,12 +166,25 @@ def build_engine(
     snapshot_enabled: Optional[bool] = None,
     snapshot_mode: str = "",
     snapshot_min_gap: Optional[float] = None,
+    with_worker: Optional[bool] = None,
+    worker_capacity: Optional[int] = None,
+    risk_rules: Optional[List[Dict[str, Any]]] = None,
     **engine_kwargs: Any,
 ) -> BaseQuantEngine:
     """按配置装配一台引擎。
 
-    组件注册顺序即启停顺序（停止时逆序）：
-      行情中心 → 调度器 → 策略中枢 → 新闻中心 → 监控面板
+    组件分四层注册（**书写顺序不影响启停顺序**，顺序由依赖拓扑算出来）：
+
+    ========  ============================================
+    层        组件
+    ========  ============================================
+    调度      ``SchedulerComponent``
+    服务      ``RiskService`` / ``CollectionService`` /
+              ``MarketService`` / ``TradingService`` / ``NewsService``
+    策略      ``StrategyComponent``
+    工作单元  ``WorkerComponent``
+    观测      ``MonitorWebComponent``
+    ========  ============================================
 
     监控放最后注册，于是它**最先被停止**——先把面板关了再拆业务组件，
     不会出现"面板还在读一个正在被拆掉的引擎"。
@@ -177,84 +212,81 @@ def build_engine(
 
     engine = BaseQuantEngine.create(engine_cfg)
 
-    # 1) 行情采集服务
-    #    必须在行情中心之前注册：这样它先起来把数据喂进库，行情中心才有东西可读。
+    # ============================================================
+    # 调度层
+    # ============================================================
+    engine.register_component(SchedulerComponent())
+
+    # ============================================================
+    # 服务层
+    # ============================================================
+    # 1) 风控服务（要在策略组件之前就绪：策略初始化时就把闸门发给任务运行时）
+    risk_service = RiskService(rules=risk_rules or cfg.get("risk") or [])
+    engine.register_component(risk_service)
+
+    # 2) 采集服务：K 线采集 + 日频截面 + 完整性校验，三者合成一个服务。
     #
     #    **默认装配**（而不是"满足条件才装配"）。这两个概念要分清：
-    #      - 「装配」= 组件挂进引擎，面板能看到它、能改频率、能手动补采
+    #      - 「装配」= 服务挂进引擎，面板能看到它、能改频率、能手动补采
     #      - 「启用」= 定时器真的跑起来去拉数据
     #    以前是"不满足条件就不装配"，结果面板上直接显示"本引擎未装配采集服务"，
     #    用户既看不到采集状态，也没法手动补一次数据 —— 白白丢掉一整块能力。
     #
     #    启用条件：非纯回测模式，且 COLLECTOR_ENABLED 打开。
     #    纯回测（BACKTEST）只读历史，再去联网采集既没意义也拖慢启动，
-    #    所以装配但不启用（面板会显示"已装配 · 回测模式下已停用"，一目了然）。
+    #    所以装配但不启用（面板会显示"已装配 · 回测模式下已停用"）。
     collector_enabled = settings.COLLECTOR_ENABLED and run_mode != RunMode.BACKTEST
     if with_collector is not None:
         collector_enabled = bool(with_collector)
-
-    collector = DataCollectorComponent(
-        symbols=list(collector_symbols or settings.collector_symbol_list() or syms),
-        interval=collector_interval or settings.COLLECTOR_INTERVAL,
-        period=collector_period or settings.COLLECTOR_PERIOD,
-        min_interval=settings.COLLECTOR_MIN_INTERVAL,
-        config_path=collector_config,
-        enabled=collector_enabled,
-        disabled_reason=(
-            "回测模式只读历史数据，不需要联网采集"
-            if run_mode == RunMode.BACKTEST
-            else ("采集服务已被显式关闭（--no-collector / COLLECTOR_ENABLED=false）"
-                  if not collector_enabled else "")
-        ),
+    kline_reason = (
+        "回测模式只读历史数据，不需要联网采集"
+        if run_mode == RunMode.BACKTEST
+        else ("采集服务已被显式关闭（--no-collector / COLLECTOR_ENABLED=false）"
+              if not collector_enabled else "")
     )
-    engine.register_component(collector)
-    enable_collector = collector_enabled
 
-    # 1.2) 数据校验服务（体检 + 缺口自动补全）
-    #      放在采集服务**之后**注册，于是它后启动、先停止。
-    #      为什么要后启动：首检延后 20 秒，是留给采集服务把当天数据喂进库的。
-    #      如果校验先跑，会把"还没来得及采"误判成"缺数据"，
-    #      然后急吼吼去联网补一轮本马上就要采到的数据。
-    #
-    #      纯回测（BACKTEST）默认不启用：回测读的是历史库，今天缺不缺跟它无关，
-    #      而且回测跑完就自动停，体检往往还没开始就被杀了。
-    guard_enabled = settings.DATA_GUARD_ENABLED and run_mode != RunMode.BACKTEST
-    if with_data_guard is not None:
-        guard_enabled = bool(with_data_guard)
-    guard_component = DataGuardComponent(
-        symbols=list(data_guard_symbols or settings.collector_symbol_list() or syms),
-        enabled=guard_enabled,
-        disabled_reason=(
-            "回测模式只读历史数据，不做完整性补全"
-            if run_mode == RunMode.BACKTEST
-            else ("数据校验服务已被显式关闭（--no-data-guard / "
-                  "DATA_GUARD_ENABLED=false）" if not guard_enabled else "")
-        ),
-    )
-    engine.register_component(guard_component)
-
-    # 1.5) 扩展行情采集（资金流 / 筹码 / 涨停池 / 题材）
-    #      和上面的 K 线采集是两类数据：那是逐根K线的量价，这是日频截面。
-    #      回测/回放模式默认不开 —— 那段行情是死的，
-    #      去抓"今天的涨停池"对回放没有任何意义，只会拖慢启动。
+    # 日频截面（资金流/筹码/涨停池/题材）：回测/回放模式默认不开 ——
+    # 那段行情是死的，去抓"今天的涨停池"对回放没有任何意义，只会拖慢启动。
     want_ext = settings.EXT_DATA_ENABLED if with_ext_data is None else bool(with_ext_data)
     if run_mode == RunMode.BACKTEST and with_ext_data is None:
         want_ext = False
-    ext_component = None
-    if want_ext:
-        ext_component = ExtDataComponent(
-            symbols=list(ext_symbols or settings.collector_symbol_list() or syms),
-            interval=ext_interval,
-        )
-        ext_component.set_engine(engine)
-        engine.register_component(ext_component)
 
-    # 2) 行情中心
+    # 完整性校验：纯回测默认不启用。回测读的是历史库，今天缺不缺跟它无关，
+    # 而且回测跑完就自动停，体检往往还没开始就被杀了。
+    guard_enabled = settings.DATA_GUARD_ENABLED and run_mode != RunMode.BACKTEST
+    if with_data_guard is not None:
+        guard_enabled = bool(with_data_guard)
+
+    collection_service = CollectionService(
+        symbols=syms,
+        # K 线单元
+        kline_symbols=list(collector_symbols or settings.collector_symbol_list() or syms),
+        kline_interval=collector_interval or settings.COLLECTOR_INTERVAL,
+        kline_period=collector_period or settings.COLLECTOR_PERIOD,
+        kline_min_interval=settings.COLLECTOR_MIN_INTERVAL,
+        kline_config_path=collector_config,
+        kline_enabled=collector_enabled,
+        # 日频截面单元
+        cross_symbols=list(ext_symbols or settings.collector_symbol_list() or syms),
+        cross_interval=ext_interval,
+        cross_enabled=want_ext,
+        # 完整性单元
+        guard_symbols=list(data_guard_symbols or settings.collector_symbol_list() or syms),
+        guard_enabled=guard_enabled,
+        # 服务级
+        disabled_reason=kline_reason,
+    )
+    # 采集服务要能推导标的（没显式指定时跟随引擎），故注入引擎引用。
+    # 这是唯一的反向引用，且它只读 —— 服务不通过引擎调别的组件。
+    collection_service.set_engine(engine)
+    engine.register_component(collection_service)
+
+    # 3) 行情服务
     #    with_market=False 用于"消费别的服务推过来的行情"的场景：
     #    策略服务自己不该再连行情源，否则会与总线上的 bar 重复驱动同一批策略。
     if with_market:
         engine.register_component(
-            MarketCenterComponent(
+            MarketService(
                 symbols=syms,
                 mode=m_mode,
                 interval=m_interval,
@@ -264,57 +296,58 @@ def build_engine(
             )
         )
 
-    # 3) 调度器（定时任务/异步任务基座）
-    engine.register_component(TaskSchedulerComponent())
+    # 4) 交易服务（网关 + 落库合成一个）
+    #    网关只在 LIVE 模式连真券商；落库在任何模式都工作
+    #    （只读档位、模拟盘也要能留下审计记录）。
+    enable_store = settings.TRADE_PERSIST_ENABLED if with_store is None else with_store
+    trade = TradingService(
+        gateway_name=broker_gateway or "",
+        endpoint_id=broker_endpoint or "",
+        gateway_enabled=(run_mode == RunMode.LIVE),
+        store_enabled=enable_store,
+        engine=engine,
+    )
+    engine.register_component(trade)
 
-    # 3.5) 实盘网关（仅 LIVE 模式）
-    #      必须在策略中枢之前注册：策略中枢 on_start 会把各任务挂到网关上，
-    #      网关没就绪的话挂载会静默失败（回报就路由不回来了）。
-    live_component = None
-    if run_mode == RunMode.LIVE:
-        live_component = LiveGatewayComponent(
-            gateway_name=broker_gateway or "",
-            endpoint_id=broker_endpoint or "",
+    # 5) 资讯服务（可选）
+    enable_news = settings.NEWS_ENABLED if with_news is None else with_news
+    if enable_news:
+        news_cfg = cfg.get("news") or {}
+        engine.register_component(
+            NewsService(
+                sources=build_news_sources(news_cfg),
+                analyzers=build_news_analyzers(news_cfg),
+                interval=float(news_cfg.get("interval") or settings.NEWS_INTERVAL),
+            )
         )
-        engine.register_component(live_component)
 
-    # 4) 策略中枢（持有全部任务）
-    sm = StrategyManagerComponent(tasks=cfg.get("tasks") or [])
+    # ============================================================
+    # 策略层
+    # ============================================================
+    sm = StrategyComponent(tasks=cfg.get("tasks") or [])
     sm.set_engine(engine)
     # 引擎的运行模式下沉给任务：任务 spec 没显式指定 run_mode 时跟随引擎。
     # 不做这件事的后果是 LIVE 起引擎而任务跑模拟撮合 —— 面板一切正常，
     # 但一笔真单都没发出去，用户以为在实盘。
     sm.runtime.run_mode = run_mode
-    if live_component is not None:
-        # 共用一个网关连接：券商不允许同账号多连接。
-        # 用 lambda 延迟取值 —— 建任务的时刻在 initialize 阶段，
-        # 那时网关对象才刚被 live_component 创建出来。
-        sm.runtime.gateway_provider = lambda: live_component.gateway
+    # 共用一个网关连接：券商不允许同账号多连接。
+    # 用 lambda 延迟取值 —— 建任务的时刻在 initialize 阶段，
+    # 那时网关对象才刚被交易服务创建出来。
+    sm.runtime.gateway_provider = lambda: trade.gateway
     engine.register_component(sm)
 
-    # 5) 新闻中心（可选）
-    enable_news = settings.NEWS_ENABLED if with_news is None else with_news
-    if enable_news:
-        sources = build_news_sources(cfg.get("news") or {})
+    # ============================================================
+    # 工作单元
+    # ============================================================
+    enable_worker = settings.WORKER_ENABLED if with_worker is None else bool(with_worker)
+    if enable_worker:
         engine.register_component(
-            NewsCenterComponent(
-                sources=sources,
-                analyzers=build_news_analyzers(cfg.get("news") or {}),
-                interval=float(
-                    (cfg.get("news") or {}).get("interval") or settings.NEWS_INTERVAL
-                ),
-            )
+            WorkerComponent(capacity=worker_capacity)
         )
 
-    # 6) 交易数据落库（默认开）：订单/成交/权益/重要事件 → SQLite
-    #    放在监控面板之前注册：面板的 /api/db/* 一启动就要能查到数据。
-    enable_store = settings.TRADE_PERSIST_ENABLED if with_store is None else with_store
-    if enable_store:
-        engine.register_component(
-            TradingStoreComponent(engine=engine, enabled=True)
-        )
-
-    # 7) 监控面板（可选）：内嵌 Twisted Web + 定时快照
+    # ============================================================
+    # 观测层
+    # ============================================================
     enable_monitor = settings.MONITOR_ENABLED if with_monitor is None else with_monitor
     if enable_monitor:
         engine.register_component(
@@ -330,6 +363,9 @@ def build_engine(
             )
         )
 
+    # ============================================================
+    # 收尾连线
+    # ============================================================
     # 8) 重放"上次运行期间新增的任务"（改配置与运行时增删可以共存）
     if auto_load_runtime:
         try:
@@ -339,37 +375,13 @@ def build_engine(
             logger.warning(f"运行时任务重放失败（忽略）: {exc}")
 
     # 重放/运行时新增的任务也要登记进数据库，否则"这轮跑了哪些任务"查不到
-    store = engine.get_component("trading_store")
-    if store is not None:
-        engine.control.on_task_added = store.register_task
+    if trade is not None:
+        engine.control.on_task_added = trade.register_task
 
-    collector_desc = ""
-    collector = engine.get_component("data_collector")
-    if collector is not None:
-        jobs = len(getattr(getattr(collector, "spec", None), "jobs", []) or [])
-        state = "启用" if collector.spec.enabled else "停用"
-        collector_desc = f" | 采集={state}({jobs} 个任务)"
-    store_desc = ""
-    if store is not None:
-        store_desc = f" | 落库={'开' if store.enabled else '关'}"
-    ext_desc = ""
-    if ext_component is not None:
-        ext_desc = (
-            f" | 扩展数据=开({len(ext_component.symbols)} 只 @ "
-            f"{ext_component.interval:.0f}s)"
-            if ext_component.enabled else " | 扩展数据=关"
-        )
-    guard_desc = ""
-    if guard_component is not None:
-        guard_desc = (
-            f" | 数据校验={'开' if guard_enabled else '关'}"
-            + (f"({guard_component.start_delay:.0f}s后首检，每"
-               f"{guard_component.interval:.0f}s)"
-               if guard_enabled else "")
-        )
+    # ---- 装配摘要日志 ----
+    mmode = (snapshot_mode or settings.MONITOR_SNAPSHOT_MODE).lower()
     monitor_desc = ""
     if enable_monitor:
-        mmode = (snapshot_mode or settings.MONITOR_SNAPSHOT_MODE).lower()
         # 注意 snapshot_enabled 可能是 None（"用默认"），不能直接当假值用 ——
         # 否则日志会写"快照关"，而实际是开着的，排查时会被这条日志带偏。
         snap_on = (
@@ -386,10 +398,19 @@ def build_engine(
         f"引擎装配完成 | 模式={run_mode.value} | 标的={syms if with_market else '（外部总线供给）'} | "
         f"行情模式={m_mode if with_market else 'off'} | 任务数={len(cfg.get('tasks') or [])}"
         + monitor_desc
-        + collector_desc
-        + ext_desc
-        + guard_desc
-        + store_desc
+        + f" | 采集={'开' if collector_enabled else '停'}"
+        f"（K线 {len(collection_service.kline_spec.jobs)} 个任务）"
+        + (f" | 截面数据={'开' if want_ext else '关'}"
+           f"({len(collection_service.cross_symbols)} 只 @ "
+           f"{collection_service.cross_interval:.0f}s)" if want_ext else " | 截面数据=关")
+        + (f" | 完整性校验=开({collection_service.guard_start_delay:.0f}s后首检，每"
+           f"{collection_service.guard_interval:.0f}s)"
+           if guard_enabled else " | 完整性校验=关")
+        + f" | 落库={'开' if enable_store else '关'}"
+        + f" | 券商网关={'开' if run_mode == RunMode.LIVE else '关（非 LIVE）'}"
+        + (f" | 工作单元=开({worker_capacity or settings.WORKER_CAPACITY} 槽)"
+           if enable_worker else " | 工作单元=关")
+        + f" | 全局风控={len(risk_service.chain)} 条"
     )
     return engine
 

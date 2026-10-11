@@ -280,7 +280,7 @@ class ServiceWorker:
             self._write_state_final(False)
             return 1
 
-        sm = self.engine.get_component("strategy_manager")
+        sm = self.engine.get_component("strategy")
         logger.info("=" * 70)
         logger.info(
             f"服务启动 [{self.spec.id}] {self.spec.role} | 任务 {len(sm) if sm else 0} 个 | "

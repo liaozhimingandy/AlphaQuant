@@ -34,6 +34,11 @@ class TaskRuntime:
         #: 用 lambda 而不是直接塞对象：任务是在组件 initialize 阶段才建的，
         #: 那时网关可能刚连上（甚至还没连），先取对象会拿到 None。
         self.gateway_provider: Optional[Callable[[], Any]] = None
+        #: **全局**风控闸门的延迟取值 provider（由策略组件从 RiskService 注入）。
+        #: 任务级风控链管"这个策略该不该开这么大"，
+        #: 全局闸门管"整个账户还能不能开"——两者串联，缺一不可。
+        #: 用 provider 而非直接塞对象，理由同网关：任务建得比服务早。
+        self.risk_gate_provider: Optional[Callable[[], Any]] = None
         #: 引擎级运行模式。任务 spec 没写 run_mode 时跟随它 ——
         #: 否则 LIVE 起引擎而任务跑模拟撮合，是最危险的静默错配。
         self.run_mode: Any = None
@@ -49,6 +54,15 @@ class TaskRuntime:
         except Exception:
             return None
 
+    def current_risk_gate(self) -> Any:
+        """取全局风控闸门。没有注入时返回 None（任务退化为只有自己的链）。"""
+        if self.risk_gate_provider is None:
+            return None
+        try:
+            return self.risk_gate_provider()
+        except Exception:
+            return None
+
     # ============================================================
     # 任务管理
     # ============================================================
@@ -56,6 +70,13 @@ class TaskRuntime:
         if task.task_id in self.tasks:
             raise ValueError(f"任务 ID 重复: {task.task_id}")
         self.tasks[task.task_id] = task
+        # 全局风控闸门在这里下发，于是**任何**进运行时的任务
+        # （配置装载的、运行时新增的、手工构造的）都会被它覆盖到。
+        # 靠 build_task 传参是漏的：运行时新增的任务不走那条路。
+        if getattr(task, "global_gate", None) is None:
+            gate = self.current_risk_gate()
+            if gate is not None:
+                task.global_gate = gate
         # 把订单出口交给任务。实盘的成交回报是**异步**到来的，
         # 那时已经不在 on_bar/on_news 的调用栈里，返回值机制覆盖不到；
         # 只有让任务自己能往外发订单事件，回报驱动的状态变化才进得了事件总线。

@@ -34,14 +34,15 @@ def make_task_spec(task_id: str, symbol: str = "000001", **over) -> dict:
 
 def make_engine(tasks=None, with_market: bool = True) -> BaseQuantEngine:
     from app.engine import component
+    # 重构后：行情中枢 → 行情服务，策略中枢 → 策略组件，任务调度器 → 调度组件
     from app.engine.component import (
-        MarketCenterComponent, StrategyManagerComponent, TaskSchedulerComponent)
+        MarketService, SchedulerComponent, StrategyComponent)
 
     engine = BaseQuantEngine.create({"RUN_MODE": "BACKTEST"})
     if with_market:
-        engine.register_component(MarketCenterComponent(symbols=[], mode="poll"))
-    engine.register_component(TaskSchedulerComponent())
-    engine.register_component(StrategyManagerComponent(tasks=tasks or []))
+        engine.register_component(MarketService(symbols=[], mode="poll"))
+    engine.register_component(SchedulerComponent())
+    engine.register_component(StrategyComponent(tasks=tasks or []))
     return engine
 
 
@@ -74,14 +75,14 @@ class TestControlCenter(TempWorkspaceMixin, unittest.TestCase):
     def test_add_task_registers_market_subscription(self):
         """新任务的标的必须自动纳入行情订阅，否则永远等不到K线。"""
         self.control.add_task(make_task_spec("c-2", "600519"))
-        market = self.engine.get_component("market_center")
+        market = self.engine.get_component("market_service")
         self.assertIn("600519", market.symbols)
 
     def test_add_task_with_watch_symbols(self):
         self.control.add_task(
             make_task_spec("c-3", "000001", watch_symbols=["600000", "000002"])
         )
-        market = self.engine.get_component("market_center")
+        market = self.engine.get_component("market_service")
         self.assertIn("600000", market.symbols)
         self.assertIn("000002", market.symbols)
 
@@ -123,14 +124,14 @@ class TestControlCenter(TempWorkspaceMixin, unittest.TestCase):
     def test_component_states(self):
         states = self.control.component_states()
         names = [s["name"] for s in states]
-        self.assertIn("strategy_manager", names)
-        self.assertIn("market_center", names)
+        self.assertIn("strategy", names)
+        self.assertIn("market_service", names)
 
     def test_disable_enable_component(self):
-        self.assertTrue(self.control.disable_component("market_center"))
-        self.assertFalse(self.engine.get_component("market_center").enabled)
-        self.assertTrue(self.control.enable_component("market_center"))
-        self.assertTrue(self.engine.get_component("market_center").enabled)
+        self.assertTrue(self.control.disable_component("market_service"))
+        self.assertFalse(self.engine.get_component("market_service").enabled)
+        self.assertTrue(self.control.enable_component("market_service"))
+        self.assertTrue(self.engine.get_component("market_service").enabled)
 
     def test_unknown_component_returns_false(self):
         self.assertFalse(self.control.enable_component("nope"))
@@ -173,7 +174,7 @@ class TestControlCenter(TempWorkspaceMixin, unittest.TestCase):
             StandardEvents.CONTROL_COMMAND, lambda action="", detail=None, **kw: seen.append(action)
         )
         self.control.add_task(make_task_spec("c-7"))
-        self.control.disable_component("market_center")
+        self.control.disable_component("market_service")
         self.control.remove_task("c-7")
         self.assertEqual(seen, ["add_task", "disable_component", "remove_task"])
 
@@ -285,7 +286,7 @@ class TestEngineSnapshot(unittest.TestCase):
         self.assertIn("components", snap)
         self.assertEqual(snap["engine"]["mode"], "BACKTEST")
         self.assertEqual(snap["engine"]["status"], "INITIALIZING")
-        for name in ("market_center", "task_scheduler", "strategy_manager"):
+        for name in ("market_service", "scheduler", "strategy"):
             self.assertIn(name, snap["components"])
             self.assertIn("state", snap["components"][name])
             self.assertIn("enabled", snap["components"][name])
@@ -318,7 +319,8 @@ class TestEngineSnapshot(unittest.TestCase):
     def test_component_names_order(self):
         engine = make_engine()
         self.assertEqual(
-            engine.component_names(), ["market_center", "task_scheduler", "strategy_manager"]
+            # 顺序由依赖算出来，不是注册顺序：调度 → 服务 → 策略
+            engine.component_names(), ["scheduler", "market_service", "strategy"]
         )
 
 

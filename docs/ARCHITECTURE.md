@@ -217,66 +217,84 @@
 
 ```
 app/
-├── cli.py                 统一命令行入口（唯一的人机接口）
-├── core/
-│   ├── config.py          全局配置（全部可用环境变量覆盖）
-│   ├── collect/           采集编排：频率解析 / 交易时段 / 任务定义（不依赖 Twisted）
-│   ├── market/
-│   │   ├── types.py       领域模型：Bar/Tick/Signal/Order/Position/Account/News
-│   │   ├── series.py      BarSeries 滚动窗口（revision 供缓存失效判断）
-│   │   └── clean.py       数据清洗：排序/去重/校验/标记
-│   ├── indicator/         指标层（注册表 + 参数化 + 结果缓存）
-│   ├── factor/            因子层（FactorContext 是唯一数据入口）
-│   ├── rule/              规则层（All/Any/Not + 阈值/穿越，声明式构造）
-│   ├── strategy/          策略层（双通道 decide）+ discovery.py（用户策略发现）
-│   ├── risk/              风控层（闸门链）
-│   ├── portfolio/         组合层（账本 + Sizer）
-│   ├── execution/
-│   │   ├── broker.py      模拟撮合（submit 即成交）
-│   │   ├── gateway.py     券商网关接口 + 内置模拟网关 + 网关注册表
-│   │   ├── endpoints.py   券商接入点（网关类型 + 资金账号 + 凭据来源）
-│   │   └── live_broker.py 实盘撮合（回报驱动 + 对账）
-│   ├── task/              任务层（QuantTask + TaskRuntime）
-│   ├── news/              新闻层（RSS → 去重 → 分析）
-│   ├── engine/
-│   │   ├── engine.py      引擎主体（组件生命周期/优雅退出/空闲看门狗）
-│   │   ├── builder.py     装配器：config → 一台可运行的引擎
-│   │   ├── control.py     控制中心（唯一控制面）
-│   │   ├── daemon.py      后台守护（PID/分离进程/停止标记）
-│   │   ├── service_runner.py  被守护进程拉起的服务进程
-│   │   └── components/    全部引擎组件
-│   ├── monitor/           可观测层（面板 HTML / API / 快照 / 回测作业）
-│   ├── bus/               跨进程文件消息总线
-│   └── hub/               多服务编排（supervisor）
-├── db/                    SQLAlchemy 模型（行情 + 交易审计）
-├── repository/            数据仓储（幂等 upsert / 批量异步写）
-└── utils/                 jsonio（原子写）/ logger（分级 + 节流）
+├── common/        config（全部可用环境变量覆盖）/ logging（分级+节流）/ jsonio（原子写）
+├── domain/        领域模型：types / series（滚动窗口）/ clean / calendar / symbol
+├── datasource/    数据源层：provider → adapter → routing → raw → compat → service
+├── storage/       schema（模型）/ engine（会话）/ repo（幂等 upsert、批量异步写）
+├── feature/       指标与因子：indicator / catalog / library / context / mining
+├── alpha/         打分与候选池：pool / score
+├── strategy/      策略层：base（双通道 decide）/ builtin / registry / discovery
+├── risk/          风控层：闸门链 base + builtin + registry
+├── portfolio/     组合层：manager（账本）/ sizer
+├── execution/     broker（模拟撮合）/ gateway（券商网关+内置模拟）
+│                  / endpoints（接入点）/ live_broker（实盘撮合+对账）
+├── news/          新闻层：source（RSS）→ 去重 → analyzer
+├── engine/
+│   ├── base.py            引擎主体（组件生命周期 / 优雅退出 / 空闲看门狗）
+│   ├── builder.py         装配器：config → 一台可运行的引擎
+│   ├── control.py         控制中心（唯一控制面）
+│   ├── tasking/           单进程内的多任务容器（QuantTask + TaskRuntime）
+│   ├── collect/           采集编排：频率解析 / 交易时段 / 任务定义
+│   ├── component/         ★ 四类组件体系（见 3.1）
+│   ├── bus/               跨进程文件消息总线（IPC）
+│   ├── hub/               多进程编排（supervisor / worker）
+│   ├── daemon.py + service_runner.py   后台守护与被拉起的服务进程
+│   └── integrity.py       数据完整性体检与自动补全
+├── monitoring/    server（路由）/ api / snapshot / static（面板 HTML+JS）
+├── cli/           命令行（唯一的人机接口）
+├── research/      回测：runner / adapter（自研策略 → backtrader 桥）/ report
+└── tests/         测试（helpers 提供临时工作区与行情夹具）
 
-strategies/                用户自定义策略（自动发现；升级框架不覆盖）
-config/brokers.json        券商接入点
-config/backtest.json       回测默认参数
+strategies/        用户自定义策略（自动发现；升级框架不覆盖）
+config/brokers.json   券商接入点
+config/backtest.json  回测默认参数
 ```
 
-### 3.1 引擎组件一览（这就是"服务"的真身）
+### 3.1 引擎的四类组件（"服务"的真身）
 
-引擎只认组件，不认业务。所有能力都是组件，按注册顺序启动、逆序停止：
+引擎只认组件，不认业务。但组件不再平级——按**在引擎里扮演的角色**分四类：
 
-| 组件名 | 文件 | 职责 | 何时装配 |
+```
+IBaseComponent
+├── ServiceComponent     提供能力、被别人依赖
+│     ├── MarketService        market.bar_feed / market.quote / market.watchlist
+│     ├── CollectionService    collect.kline / collect.cross / collect.integrity
+│     ├── TradingService       trade.route / trade.account / trade.reconcile / trade.persist
+│     ├── RiskService          risk.gate（下单前拦截 + 一键熔断）
+│     └── NewsService          news.feed
+├── StrategyComponent    消费行情与风控，产出订单
+├── WorkerComponent      执行一次性作业（有并发上限）
+├── SchedulerComponent   决定"什么时候跑"
+└── （PLAIN）Monitor     观测者，不参与上面四种角色
+```
+
+| 服务/组件 | 文件 | 职责 | 何时装配 |
 |---|---|---|---|
-| `data_collector` | `components/collector.py` | 定时把行情拉进库 | **总是**（回测模式装配但停用） |
-| `ext_data` | `components/extdata.py` | 定时同步资金流/筹码/涨停池/题材 | 非回测默认开（`--no-ext-data` 关） |
-| `market_center` | `components/market.py` | 读库/回放 → 发 `BAR_RECEIVED` | 除非外部总线供数 |
-| `live_gateway` | `components/live_gateway.py` | 连券商 / 轮询回报 / 定期对账 | 仅 `LIVE` |
-| `task_scheduler` | `component.py` | 定时任务与异步任务基座 | 总是 |
-| `strategy_manager` | `components/strategy.py` | 持有 TaskRuntime，驱动全部任务 | 总是 |
-| `news_center` | `components/news.py` | 抓新闻 → 分析 → 发 `NEWS_ANALYZED` | 可关 |
-| `trading_store` | `components/trading_store.py` | 订单/成交/权益/事件落 SQLite | 可关 |
-| `monitor` | `monitor/web.py` | 网页面板 + 快照落盘 | 可关 |
-| （后台单例） | `monitor/backtest_api.py` | 回测作业：提交 → 线程池执行 → 结果落库 | 随面板 |
+| `collection_service` | `component/service/collection.py` | K线 + 日频截面 + 完整性（三合一） | **总是**（回测装配但单元停用） |
+| `market_service` | `component/service/market.py` | 读库/回放 → 发 `BAR_RECEIVED` | 除非外部总线供数 |
+| `trading_service` | `component/service/trading.py` | 券商网关 + 交易落库（二合一） | 总是（网关仅 `LIVE` 启用） |
+| `risk_service` | `component/service/risk.py` | 全局风控闸门 + 一键熔断 | 总是 |
+| `news_service` | `component/service/news.py` | 抓新闻 → 分析 → 发 `NEWS_ANALYZED` | 可关 |
+| `scheduler` | `component/scheduler.py` | 任务队列 + 周期定时器 | 总是 |
+| `strategy` | `component/strategy.py` | 持有 TaskRuntime，驱动全部任务 | 总是 |
+| `worker` | `component/worker.py` | 一次性作业的并发上限 | 可关 |
+| `monitor` | `monitoring/server.py` | 网页面板 + 快照落盘 | 可关 |
 
-**"装配"与"启用"是两个概念**：装配 = 组件挂进引擎（面板能看到、能手动触发）；
-启用 = 它的定时器真的在跑。采集服务在回测模式下就是"装配但停用"，
-面板会显示"已装配 · 已停用（回测模式只读历史数据，不需要联网采集）"——看得见原因。
+**三条规矩**，比记住这张表更重要：
+
+1. **组件互相找人用"能力"不用名字**：
+   `engine.service_by_capability(Cap.ORDER_ROUTE)`，不写 `get_component("trading_service")`。
+2. **启停顺序由依赖算出来，不由注册顺序决定**：
+   加依赖就写进 `depends_on`，引擎做拓扑排序（成环直接报错）。
+3. **"装配"与"启用"是两个概念**：装配 = 挂进引擎（面板能看到、能手动触发）；
+   启用 = 定时器真的在跑。采集服务在回测模式下就是"装配但单元停用"，
+   面板会显示"已装配 · 已停用（回测模式只读历史数据，不需要联网采集）"——看得见原因。
+
+   > 三合一之后这句话要再细分一层："**服务**是否装配"与"**单元**是否启用"也是两件事。
+   > 回测里三个单元都不跑，但服务仍然装配，否则面板连"手动补采"的入口都没有。
+
+完整设计（为什么要分四类、依赖注入怎么做、合并是怎么验证的、
+新增服务该放哪）见 **«docs/ENGINE_ARCHITECTURE.md»**。
 
 ---
 
@@ -467,13 +485,18 @@ CLI 的 `click` 默认值、面板 HTML 里的 `value="100000"`、作业 API 的
 资金流、筹码分布、涨停池、题材归属是**日频截面**数据，一天一只票只有一条；
 K线是**时间序列**，一天一只票有几十~几百根。两者的粒度、频率、失败语义全不一样：
 
-| | K线采集（`data_collector`） | 扩展数据（`ext_data`） |
+| | K线单元（`_kline`） | 日频截面单元（`_cross`） |
 |---|---|---|
 | 粒度 | 逐根K线 | 每日一条（资金流/筹码）+ 市场级快照（涨停池/题材） |
 | 频率 | 分钟级 | 10 分钟（个股）/ 1 小时（市场级） |
 | 重试语义 | 抓失败下次再抓即可 | 抓两次是纯浪费；涨停池一次就覆盖全市场 |
 
-硬塞进同一个组件会让两边都难懂，所以是独立的 `ExtDataComponent`。
+硬塞进同一段逻辑会让两边都难懂，所以两者始终**分开实现**。
+
+> 分开实现 ≠ 分成两个组件。引擎侧重构后它们是 `CollectionService` 的
+> **两个单元**（方法带 `_kline` / `_cross` 后缀），共享一个服务壳、
+> 一份快照，但节拍与失败语义完全独立——合并掉的是"两个引擎槽位"，
+> 不是"两套逻辑"。
 它还有一条硬规则：**采完新数据后必须让 `FeatureProvider` 缓存失效**，
 否则策略会一直拿着几小时前的资金流在打分 —— 面板看着在跑，分数其实是旧的。
 
@@ -733,7 +756,7 @@ python main.py snapshot --tasks                     # 最近一次运行的整�
 | 采集频率 | `ctl collector interval 30s` | 采集区块的输入框 |
 | 采集标的 | `ctl collector add/remove` | 采集区块表单 |
 | 立即补采 | `ctl collector now` | 「立即采集」 |
-| 启停组件 | `ctl component disable news_center` | 组件卡片 |
+| 启停组件 | `ctl component disable news_service` | 组件卡片 |
 | 运行模式 | 不支持（模式决定撮合方式，改了会前后不一致） | — |
 | 快照策略 | `ctl snapshot-mode on_event` | 顶栏下拉框 |
 | 立即快照 | `ctl snapshot` | 「立即快照」 |
@@ -1063,8 +1086,8 @@ python main.py pool demo
 ```
 
 面板上有独立的「股票池」页：`/api/pool` 读库、`/api/pool/refresh` 触发刷新。
-采集由 `ext_data` 组件常驻承担，回测模式默认不装（那段行情是死的，
-去抓"今天的涨停池"对回放没有意义）。
+采集由 `collection_service` 的日频截面单元常驻承担，回测模式默认停用
+（那段行情是死的，去抓"今天的涨停池"对回放没有意义）。
 
 ### 10.4 与策略的衔接
 

@@ -163,7 +163,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.critical(f"引擎装配失败: {exc}", exc_info=True)
         return 1
 
-    sm = engine.get_component("strategy_manager")
+    sm = engine.get_component("strategy")
     logger.info("=" * 70)
     logger.info(
         f"后台服务启动 | 任务 {len(sm) if sm else 0} 个 | "
@@ -172,7 +172,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     if not args.no_monitor:
         logger.info(f"监控面板: http://{args.host or settings.MONITOR_HOST}:{args.port or settings.MONITOR_PORT}/")
-    col = engine.get_component("data_collector")
+    col = engine.get_component("collection_service")
     if col is not None:
         from app.engine.collect.spec import humanize_frequency
 

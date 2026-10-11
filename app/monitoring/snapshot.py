@@ -177,7 +177,7 @@ class SnapshotStore:
         tasks: List[Dict[str, Any]] = []
         sm = None
         try:
-            sm = engine.get_component("strategy_manager")
+            sm = engine.get_component("strategy")
         except Exception:
             sm = None
 

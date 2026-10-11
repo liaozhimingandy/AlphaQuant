@@ -52,11 +52,29 @@ class ControlCenter:
         return Path(settings.RUNTIME_DIR) / self.namespace / "tasks.json"
 
     def _sm(self):
-        return self.engine.get_component("strategy_manager")
+        return self.engine.get_component("strategy")
 
     def _runtime(self):
         sm = self._sm()
         return getattr(sm, "runtime", None) if sm is not None else None
+
+    def _submit_job(self, name: str, fn: Any, *args: Any, **kwargs: Any):
+        """把一次性作业交给工作单元（有并发上限），没有工作单元时退回线程池。
+
+        为什么不再直接 ``deferToThread``：面板上"立即采集/立即体检"这类按钮
+        是可以连点的。无上限地丢进线程池，五连点就是五轮联网请求，
+        数据源直接限流，连定时采集一起被拖下水。
+
+        工作单元槽位占满时会返回**已失败**的 Deferred，
+        于是调用方拿到的是明确的"现在忙"，而不是"不知道跑哪去了"。
+        """
+        worker = self.engine.get_component("worker")
+        if worker is not None and hasattr(worker, "submit"):
+            return worker.submit(name, fn, *args, **kwargs)
+
+        from twisted.internet import threads
+
+        return threads.deferToThread(fn, *args, **kwargs)
 
     def _publish(self, event: str, **kwargs: Any) -> None:
         try:
@@ -266,7 +284,7 @@ class ControlCenter:
     # 行情订阅联动
     # ============================================================
     def _watch_symbols(self, task: Any) -> None:
-        market = self.engine.get_component("market_center")
+        market = self.engine.get_component("market_service")
         watch = getattr(market, "watch", None)
         if not callable(watch):
             return
@@ -279,19 +297,26 @@ class ControlCenter:
     # ============================================================
     # 行情采集服务
     # ============================================================
-    #: 采集组件名。与 :class:`DataCollectorComponent.name` 一致
-    COLLECTOR_COMPONENT = "data_collector"
+    #: 采集服务名。三项采集能力（K线 / 日频截面 / 完整性校验）
+    #: 已合并进同一个服务，所以这里只剩一个名字。
+    COLLECTOR_COMPONENT = "collection_service"
 
     def _collector(self):
         return self.engine.get_component(self.COLLECTOR_COMPONENT)
 
     def collector_status(self) -> Dict[str, Any]:
-        """采集服务概览：配置 + 每个任务的运行状态与最近一次结果。"""
+        """采集服务概览：配置 + 每个任务的运行状态与最近一次结果。
+
+        合并后采集服务的快照里含 K线/截面/校验三块，
+        这里**只展开 K 线那块**——面板的"采集"页要的就是这个，
+        把另外两块混进来会让页面出现一堆无关字段。
+        """
         comp = self._collector()
         if comp is None:
             return {"available": False, "reason": "本引擎未装配采集服务"}
-        out = {"available": True}
-        out.update(json_safe(comp.snapshot()))
+        snap = comp.snapshot()
+        out: Dict[str, Any] = {"available": True}
+        out.update(json_safe(snap.get("kline") or snap))
         return out
 
     def collector_set_interval(self, seconds: Any, symbol: str = "",
@@ -352,7 +377,7 @@ class ControlCenter:
         if comp is None:
             return {"ok": False, "error": "本引擎未装配采集服务"}
         jobs = [
-            j for j in comp.spec.jobs
+            j for j in comp.kline_spec.jobs
             if j.enabled and (not symbol or j.symbol == _norm_symbol(symbol))
         ]
         if not jobs:
@@ -360,7 +385,7 @@ class ControlCenter:
 
         if wait:
             try:
-                result = comp._run_forced(jobs)
+                result = comp._run_kline_forced(jobs)
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
             self._audit("collector_now", {"symbol": symbol or "*", "rows": result.get("rows", 0)})
@@ -378,7 +403,11 @@ class ControlCenter:
             logger.error(f"后台采集失败: {msg}")
             return None
 
-        d = comp.collect_now(symbol)
+        # 走工作单元而不是直接 deferToThread：并发有上限，
+        # 连点"立即采集"不会把自己打到数据源限流。
+        d = self._submit_job(
+            f"立即采集 {symbol or '全部'}", comp._run_kline_forced, jobs
+        )
         d.addCallback(_done)
         d.addErrback(_failed)
         return {
@@ -393,6 +422,14 @@ class ControlCenter:
         comp = self._collector()
         if comp is None:
             return defer.succeed({"ok": False, "error": "本引擎未装配采集服务"})
+        jobs = [
+            j for j in comp.kline_spec.jobs
+            if j.enabled and (not symbol or j.symbol == _norm_symbol(symbol))
+        ]
+        if not jobs:
+            return defer.succeed(
+                {"ok": False, "error": f"没有匹配的采集任务: {symbol or '*'}"}
+            )
 
         def _ok(result):
             rows = int(result.get("rows") or 0)
@@ -400,26 +437,34 @@ class ControlCenter:
             self._audit("collector_now", {"symbol": symbol or "*", "rows": rows})
             return {"ok": not errors, **result}
 
-        d = comp.collect_now(symbol)
+        d = self._submit_job(
+            f"立即采集 {symbol or '全部'}", comp._run_kline_forced, jobs
+        )
         d.addCallback(_ok)
         return d
 
     # ============================================================
     # 数据校验服务
     # ============================================================
-    #: 数据校验组件名。与 :class:`DataGuardComponent.name` 一致
-    GUARD_COMPONENT = "data_guard"
+    #: 数据校验能力所在的**服务名**。它现在是采集服务的一个单元，
+    #: 不再是独立组件 —— 所以这里指向的是同一个服务。
+    GUARD_COMPONENT = "collection_service"
 
     def _guard(self):
         return self.engine.get_component(self.GUARD_COMPONENT)
 
     def data_guard_status(self) -> Dict[str, Any]:
-        """数据校验服务概览：最近一次体检报告 + 累计统计。"""
+        """数据校验概览：最近一次体检报告 + 累计统计。
+
+        与 :meth:`collector_status` 同理：从采集服务的快照里
+        只取"完整性校验"那一块，保持面板的字段契约不变。
+        """
         comp = self._guard()
         if comp is None:
             return {"available": False, "reason": "本引擎未装配数据校验服务"}
-        out = {"available": True}
-        out.update(json_safe(comp.snapshot()))
+        snap = comp.snapshot()
+        out: Dict[str, Any] = {"available": True}
+        out.update(json_safe(snap.get("guard") or snap))
         return out
 
     def data_guard_check(self, symbol: str = "", wait: bool = False,

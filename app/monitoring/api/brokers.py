@@ -23,7 +23,7 @@ class BrokerViewsMixin:
         # 标注"当前引擎连的是哪个" —— 光看配置列表判断不出正在用的是谁
         if self.bound_engine is not None:
             try:
-                gw = self.bound_engine.get_component("live_gateway")
+                gw = self.bound_engine.get_component("trading_service")
                 data["in_use"] = getattr(gw, "endpoint_id", "") if gw else ""
             except Exception:
                 data["in_use"] = ""

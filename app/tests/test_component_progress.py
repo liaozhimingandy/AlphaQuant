@@ -107,20 +107,30 @@ class TestComponentProgressApi(unittest.TestCase):
 
 
 class TestExtDataProgress(unittest.TestCase):
-    """扩展行情采集：计划项数必须和实际执行的项数一致。"""
+    """日频截面采集（原 ExtDataComponent）：计划项数必须和实际执行的项数一致。
+
+    它已并入 ``CollectionService`` 的 ``_cross`` 单元：参数带 ``cross_`` 前缀、
+    方法带 ``_cross`` 中缀，进度契约（"计划 == 执行"）不变。
+    """
 
     def _comp(self, **kw):
-        from app.engine.component.extdata import ExtDataComponent
+        from app.engine.component import CollectionService
 
-        c = ExtDataComponent(symbols=["000001", "600000"], **kw)
-        c.enabled = True
+        # K 线单元指向一个不存在的配置：隔离工程里的 config/collector.json
+        c = CollectionService(
+            cross_symbols=["000001", "600000"],
+            cross_enabled=True,
+            kline_config_path="/nonexistent/collector.json",
+            **kw,
+        )
         return c
 
     def test_plan_matches_execution(self):
         """盘后跑一轮，进度必须正好到 100% 且 running=False。"""
-        comp = self._comp(categories=["lhb", "margin"], with_fundamental=True)
-        comp._final_date = None        # 让它把基本面也算进计划
-        plan = comp._plan_items("post")
+        comp = self._comp(cross_categories=["lhb", "margin"],
+                          cross_with_fundamental=True)
+        comp._cross_final_date = None        # 让它把基本面也算进计划
+        plan = comp._cross_plan_items("post")
         self.assertEqual(
             sorted(plan),
             sorted(["fund_flow", "chip", "fundamental", "lhb", "margin",
@@ -136,7 +146,7 @@ class TestExtDataProgress(unittest.TestCase):
              mock.patch("app.alpha.pool.sync_category", side_effect=_ok), \
              mock.patch("app.feature.features.get_provider",
                         side_effect=Exception("no cache")):
-            comp._run_once("post")
+            comp._run_cross_once("post")
 
         p = comp.progress()
         self.assertEqual(p["total"], len(plan))
@@ -154,24 +164,24 @@ class TestExtDataProgress(unittest.TestCase):
         def _ok(*a, **k):
             return {"ok": 2, "failed": []}
 
-        comp = self._comp(categories=[], with_fundamental=False)
+        comp = self._comp(cross_categories=[], cross_with_fundamental=False)
         with mock.patch("app.alpha.pool.sync_fund_flow", side_effect=_bad), \
              mock.patch("app.alpha.pool.sync_chip", side_effect=_ok), \
              mock.patch("app.alpha.pool.sync_category", side_effect=_ok), \
              mock.patch("app.feature.features.get_provider",
                         side_effect=Exception("no cache")):
-            comp._run_once("post")
+            comp._run_cross_once("post")
         p = comp.progress()
         self.assertEqual(p["failed"], 1)
         self.assertGreaterEqual(p["done"], 1)
 
     def test_exception_still_finishes_progress(self):
         """中途炸了也要收尾 —— 否则面板永远显示"进行中"。"""
-        comp = self._comp(categories=[], with_fundamental=False)
+        comp = self._comp(cross_categories=[], cross_with_fundamental=False)
         with mock.patch("app.alpha.pool.sync_fund_flow",
                         side_effect=RuntimeError("炸了")):
             with self.assertRaises(RuntimeError):
-                comp._run_once("post")
+                comp._run_cross_once("post")
         self.assertFalse(comp.progress()["running"])
 
     def test_daily_batch_has_three_items(self):
@@ -181,7 +191,7 @@ class TestExtDataProgress(unittest.TestCase):
              mock.patch("app.alpha.pool.sync_boards", return_value={"ok": 5}), \
              mock.patch("app.alpha.pool.sync_concept_members",
                         return_value={"ok": 3}):
-            comp._run_daily()
+            comp._run_cross_daily()
         p = comp.progress()
         self.assertEqual(p["total"], 3)
         self.assertEqual(p["done"], 3)
@@ -189,12 +199,20 @@ class TestExtDataProgress(unittest.TestCase):
 
 
 class TestCollectorProgress(unittest.TestCase):
-    """行情采集：被"非交易时段"跳过的任务不该算进总数。"""
+    """K 线采集：被"非交易时段"跳过的任务不该算进总数。
+
+    原 ``DataCollectorComponent`` 现在是 ``CollectionService`` 的 ``_kline`` 单元。
+    """
+
+    @staticmethod
+    def _comp():
+        """只装配 K 线单元的采集服务（配置指向不存在的文件，隔离工程配置）。"""
+        from app.engine.component import CollectionService
+
+        return CollectionService(kline_config_path="/nonexistent/collector.json")
 
     def test_skipped_jobs_not_counted(self):
-        from app.engine.component.collector import DataCollectorComponent
-
-        comp = DataCollectorComponent()
+        comp = self._comp()
         job_ok = mock.MagicMock()
         job_ok.interval = 60.0
         job_ok.enabled = True
@@ -206,11 +224,11 @@ class TestCollectorProgress(unittest.TestCase):
         job_skip.keep_days = 0
         job_skip.key = "skip-1d"
 
-        comp.spec.should_run = lambda j: j is job_ok
-        with mock.patch.object(comp, "_collect_one", return_value=5), \
-             mock.patch.object(comp, "_record_success"), \
-             mock.patch.object(comp, "_record_failure"):
-            comp._run_bucket([job_ok, job_skip])
+        comp.kline_spec.should_run = lambda j: j is job_ok
+        with mock.patch.object(comp, "_collect_one_kline", return_value=5), \
+             mock.patch.object(comp, "_record_kline_success"), \
+             mock.patch.object(comp, "_record_kline_failure"):
+            comp._run_kline_bucket([job_ok, job_skip])
 
         p = comp.progress()
         # 只跑 1 个：被跳过的那个不能出现在"全部"里，
@@ -220,48 +238,53 @@ class TestCollectorProgress(unittest.TestCase):
         self.assertFalse(p["running"])
 
     def test_failed_job_counted_as_failed(self):
-        from app.engine.component.collector import DataCollectorComponent
-
-        comp = DataCollectorComponent()
+        comp = self._comp()
         job = mock.MagicMock()
         job.interval = 60.0
         job.enabled = True
         job.keep_days = 0
         job.key = "bad-1d"
-        comp.spec.should_run = lambda j: True
-        with mock.patch.object(comp, "_collect_one",
+        comp.kline_spec.should_run = lambda j: True
+        with mock.patch.object(comp, "_collect_one_kline",
                                side_effect=RuntimeError("网络炸了")), \
-             mock.patch.object(comp, "_record_failure"), \
-             mock.patch.object(comp, "_record_success"):
-            comp._run_bucket([job])
+             mock.patch.object(comp, "_record_kline_failure"), \
+             mock.patch.object(comp, "_record_kline_success"):
+            comp._run_kline_bucket([job])
         self.assertEqual(comp.progress()["failed"], 1)
         self.assertEqual(comp.progress()["done"], 0)
 
 
 class TestDataGuardProgress(unittest.TestCase):
-    """数据校验：逐只回调驱动进度，一轮结束要收尾。"""
+    """数据校验（原 DataGuardComponent）：逐只回调驱动进度，一轮结束要收尾。
+
+    现在是 ``CollectionService`` 的 ``_guard`` 单元。
+    """
+
+    @staticmethod
+    def _comp():
+        from app.engine.component import CollectionService
+
+        return CollectionService(
+            guard_enabled=True, kline_config_path="/nonexistent/collector.json"
+        )
 
     def test_on_step_starts_and_finishes(self):
-        from app.engine.component.dataguard import DataGuardComponent
-
-        comp = DataGuardComponent(enabled=True)
-        comp._on_step(1, 3, False)
+        comp = self._comp()
+        comp._on_guard_step(1, 3, False)
         self.assertTrue(comp.progress()["running"])
         self.assertEqual(comp.progress()["total"], 3)
-        comp._on_step(2, 3, True)        # 这只异常
-        comp._on_step(3, 3, False)
+        comp._on_guard_step(2, 3, True)        # 这只异常
+        comp._on_guard_step(3, 3, False)
         p = comp.progress()
         self.assertEqual((p["done"], p["failed"], p["finished"]), (2, 1, 3))
         self.assertFalse(p["running"])
 
     def test_second_round_restarts(self):
-        from app.engine.component.dataguard import DataGuardComponent
-
-        comp = DataGuardComponent(enabled=True)
-        comp._on_step(1, 2, False)
-        comp._on_step(2, 2, False)
+        comp = self._comp()
+        comp._on_guard_step(1, 2, False)
+        comp._on_guard_step(2, 2, False)
         self.assertEqual(comp.progress()["round"], 1)
-        comp._on_step(1, 4, False)       # 新一轮：总数变了
+        comp._on_guard_step(1, 4, False)       # 新一轮：总数变了
         p = comp.progress()
         self.assertEqual(p["round"], 2)
         self.assertEqual(p["total"], 4)

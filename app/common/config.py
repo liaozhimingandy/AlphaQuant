@@ -162,6 +162,13 @@ class Settings:
     COLLECTOR_MIN_INTERVAL: float = _env_float("COLLECTOR_MIN_INTERVAL", 15.0)
     COLLECTOR_SYMBOLS: str = os.getenv("COLLECTOR_SYMBOLS", "")     # 逗号分隔
 
+    # ---------------- 工作单元（一次性后台作业的并发上限）----------------
+    # 面板上"立即采集 / 立即体检 / 立即回测"这类手动作业走工作单元，
+    # 而不是无上限地 deferToThread —— 连点五次"立即体检"会同时发五轮
+    # 补全请求，把数据源打到限流，连定时采集一起拖下水。
+    WORKER_ENABLED: bool = _env_bool("WORKER_ENABLED", True)
+    WORKER_CAPACITY: int = _env_int("WORKER_CAPACITY", 2)
+
     # ---------------- 监控面板（内嵌 Twisted Web，零额外进程）----------------
     MONITOR_ENABLED: bool = _env_bool("MONITOR_ENABLED", True)
     MONITOR_HOST: str = os.getenv("MONITOR_HOST", "127.0.0.1")

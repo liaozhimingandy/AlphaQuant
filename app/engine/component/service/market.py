@@ -2,19 +2,36 @@
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
 # @FileName    : market.py
-# @Description : 行情中心组件：把数据源的 DataFrame 变成一根根 Bar 推给引擎
-#               支持 replay（回放历史）与 poll（定时抓最新）两种模式
+# @Description : 行情服务：把数据源的 DataFrame 变成一根根 Bar 推给引擎
 # @Project     : AlphaQuant
 # -------------------------------------------------------------------------------
+"""
+
+重构说明
+========
+
+由原 ``MarketCenterComponent`` 提升为 **服务**。
+
+它本来就是服务：不消费任何人的输出，只对外提供行情能力，
+被策略组件与工作单元依赖。之前只是因为和采集、落库混在同一个
+``component/`` 目录里，看起来像同级的东西。
+
+提升为服务后新增了三件以前做不到的事：
+  1. **能力声明** —— ``provides = {BAR_FEED, WATCHLIST}``，
+     依赖方按能力找它，不再硬编码 ``get_component("market_center")``；
+  2. **可单独重启** —— 行情源抽风时重启这一个服务，不用重启整台引擎；
+  3. **可脱离引擎测试** —— 手工 new 一个塞进桩对象即可，
+     以前要构造整台引擎才能测"回放能不能推完"。
+"""
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional
-from collections import deque
 
 from twisted.internet import defer, task, threads
 
-from app.engine.component.base import IBaseComponent
+from app.engine.component.kinds import Cap, RestartPolicy, ServiceComponent
 from app.engine.event import StandardEvents
 from app.domain.clean import clean_frame, default_cleaner
 from app.domain.types import Bar
@@ -55,8 +72,8 @@ def df_to_bars(symbol: str, df) -> List[Bar]:
     return bars
 
 
-class MarketCenterComponent(IBaseComponent):
-    """行情中心。
+class MarketService(ServiceComponent):
+    """行情服务。
 
     - ``replay`` 模式：把历史数据按 interval 逐根推送，推完自动停。
       用于离线验证与回测式演示——不联网也能把整条链路跑通
@@ -64,9 +81,13 @@ class MarketCenterComponent(IBaseComponent):
       用于模拟盘/实盘
 
     两种模式发布的事件完全一样（BAR_RECEIVED），下游无需区分。
+
+    **提供的能力**：``market.bar_feed`` / ``market.watchlist`` / ``market.quote``
     """
 
-    name = "market_center"
+    name = "market_service"
+    provides = frozenset({Cap.BAR_FEED, Cap.WATCHLIST, Cap.SNAPSHOT_QUOTE})
+    restart_policy = RestartPolicy.ON_ERROR
 
     def __init__(
         self,
@@ -105,7 +126,7 @@ class MarketCenterComponent(IBaseComponent):
         if self.mode == "replay":
             self._load_history()
         logger.info(
-            f"行情中心就绪 | 标的: {self.symbols} | 模式: {self.mode} "
+            f"行情服务就绪 | 标的: {self.symbols} | 模式: {self.mode} "
             f"| 间隔: {self.interval}s"
         )
 
@@ -161,7 +182,7 @@ class MarketCenterComponent(IBaseComponent):
         # 否则同一标的会被读两次数据（慢了一倍，还容易踩到数据源限流）
         if self.mode == "replay" and self.context is not None:
             self._load_symbol_history(symbol)
-        logger.info(f"行情中心新增订阅: {symbol} | 当前标的: {self.symbols}")
+        logger.info(f"行情服务新增订阅: {symbol} | 当前标的: {self.symbols}")
         return True
 
     def unwatch(self, symbol: str) -> bool:
@@ -171,16 +192,16 @@ class MarketCenterComponent(IBaseComponent):
             return False
         self.symbols.remove(symbol)
         self._queues.pop(symbol, None)
-        logger.info(f"行情中心取消订阅: {symbol}")
+        logger.info(f"行情服务取消订阅: {symbol}")
         return True
 
     def on_start(self) -> defer.Deferred:
         if self.mode not in ("replay", "poll"):
-            # 行情由外部（如文件总线）供给时，本组件不产生任何推送
-            logger.info(f"行情中心模式 {self.mode!r}：本地行情源关闭，交由外部供给")
+            # 行情由外部（如文件总线）供给时，本服务不产生任何推送
+            logger.info(f"行情模式 {self.mode!r}：本地行情源关闭，交由外部供给")
             return defer.succeed(None)
         if not self.symbols:
-            logger.warning("行情中心未配置标的，跳过启动")
+            logger.warning("行情服务未配置标的，跳过启动")
             return defer.succeed(None)
         self._loop = task.LoopingCall(self._tick)
         self._loop.start(self.interval, now=False)
@@ -214,7 +235,7 @@ class MarketCenterComponent(IBaseComponent):
         if pushed == 0:
             if not self._finished:
                 self._finished = True
-                logger.info("历史行情回放完毕，行情中心停止推送")
+                logger.info("历史行情回放完毕，行情服务停止推送")
                 if self._loop is not None and self._loop.running:
                     self._loop.stop()
         return defer.succeed(None)
@@ -247,7 +268,13 @@ class MarketCenterComponent(IBaseComponent):
         self.stats["bars"] += 1
         self.event_bus.publish(StandardEvents.BAR_RECEIVED, bar=bar)
 
-    # ---------------- 引擎协作 ----------------
+    # ---------------- 能力出口 ----------------
+    def latest_bar(self, symbol: str) -> Optional[Bar]:
+        """``market.quote`` 能力：取一只票的最新一根。（阻塞 IO，走线程池）。"""
+        from app.domain.symbol import normalize_symbol
+
+        return self._fetch_latest(normalize_symbol(str(symbol or "")))
+
     def is_busy(self) -> bool:
         """供引擎空闲看门狗判断：轮询还在跑就说明还有行情要推。
 
@@ -259,17 +286,19 @@ class MarketCenterComponent(IBaseComponent):
     def push(self, bar: Bar) -> None:
         """外部直接推一根行情（测试/手动触发用）。"""
         if self.event_bus is None:
-            raise RuntimeError("组件未初始化")
+            raise RuntimeError("服务未初始化")
         self._emit(bar)
 
     def snapshot(self) -> Dict[str, Any]:
-        return {
+        base = super().snapshot()
+        base.update({
             "symbols": list(self.symbols),
             "mode": self.mode,
             "remaining": {s: len(q) for s, q in self._queues.items()},
             "finished": self._finished,
             "stats": dict(self.stats),
-        }
+        })
+        return base
 
 
-__all__ = ["MarketCenterComponent", "df_to_bars"]
+__all__ = ["MarketService", "df_to_bars"]

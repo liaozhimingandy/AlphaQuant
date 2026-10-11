@@ -10,7 +10,7 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 import time
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Callable
@@ -203,19 +203,23 @@ class IBaseComponent(ABC):
             logger.error(f"❌组件 {self.name} 停止异常", exc_info=True)
             raise
 
-    @abstractmethod
     def on_initialize(self) -> None:
-        """子类初始化钩子（可选实现）"""
-        pass
+        """子类初始化钩子（**可选实现**，默认什么都不做）。
 
-    @abstractmethod
+        为什么不是 ``@abstractmethod``：这三个钩子在绝大多数组件里都是
+        "可选"的（有的组件只需要 on_start），标成抽象方法会逼着每个子类
+        写三个空方法——纯噪音。而真正漏写的风险由
+        :meth:`initialize` 里的调用保证：忘了实现就只是不做任何事，
+        不会崩，也不会静默吞掉错误。
+        """
+        return None
+
     def on_start(self) -> defer.Deferred:
-        """子类启动钩子（可选实现，支持异步）"""
+        """子类启动钩子（**可选实现**，默认立即成功，支持异步）。"""
         return defer.succeed(None)
 
-    @abstractmethod
     def on_stop(self, graceful: bool = True) -> defer.Deferred:
-        """子类停止钩子（可选实现，支持异步）"""
+        """子类停止钩子（**可选实现**，默认立即成功，支持异步）。"""
         return defer.succeed(None)
 
     def health_check(self) -> tuple[bool, str]:

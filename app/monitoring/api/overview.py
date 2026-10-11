@@ -61,7 +61,7 @@ class OverviewViewsMixin:
         gw = None
         if self.bound_engine is not None:
             try:
-                gw = self.bound_engine.get_component("live_gateway")
+                gw = self.bound_engine.get_component("trading_service")
             except Exception:
                 gw = None
         if gw is None:

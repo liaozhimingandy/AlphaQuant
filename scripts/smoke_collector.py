@@ -164,9 +164,9 @@ def run_probes():
 
     st, data = get("/api/overview")
     comps = {c["name"]: c for c in (data.get("components") or [])}
-    check("data_collector 已注册", "data_collector" in comps, f"组件: {list(comps)}")
-    if "data_collector" in comps:
-        c = comps["data_collector"]
+    check("collection_service 已注册", "collection_service" in comps, f"组件: {list(comps)}")
+    if "collection_service" in comps:
+        c = comps["collection_service"]
         check("健康判定有结论", isinstance(c.get("healthy"), bool),
               f"healthy={c.get('healthy')} detail={c.get('health_detail')}")
 
@@ -208,13 +208,14 @@ def main():
         collector_config=str(cfg_path),
     )
 
-    col = engine.get_component("data_collector")
+    col = engine.get_component("collection_service")
     if col is None:
-        print("❌ 采集组件未注册，冒烟中止")
+        print("❌ 采集服务未注册，冒烟中止")
         sys.exit(1)
     print("=" * 62)
-    print(f"引擎已装配 | 采集任务 {len(col.spec.jobs)} 个")
-    for j in col.spec.jobs:
+    # 采集三合一后 K 线任务挂在服务的 kline 单元上
+    print(f"引擎已装配 | 采集任务 {len(col.kline_spec.jobs)} 个")
+    for j in col.kline_spec.jobs:
         print(f"  {j.key}  每 {j.interval}s")
     print("=" * 62)
 
