@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
@@ -32,7 +32,10 @@ from app.db.models import (
     MarketBreadth,
     MarketNews,
     StockFactorValue,
+    StockFlowRank,
     StockFundamental,
+    StockHotRank,
+    StockInfo,
     StockScore,
     StockTheme,
     ThemeFlow,
@@ -85,6 +88,21 @@ def _clean(model: Any, row: Dict[str, Any], fields: Sequence[str]) -> Dict[str, 
             v = _date(v)
         out[f] = v
     return out
+
+
+def _ensure_pool_tables() -> None:
+    """确保人气榜/资金流排名/名称对照三张新表存在。
+
+    用户可能开着引擎直接升级代码，``create_all`` 只建缺失表、不删不改旧表，
+    这里用 ``checkfirst=True`` 在首次访问时补齐，免去"手动跑 init-db"的麻烦。
+    """
+    try:
+        from app.db.database import engine
+
+        for _m in (StockHotRank, StockFlowRank, StockInfo):
+            _m.__table__.create(bind=engine, checkfirst=True)
+    except Exception as exc:  # pragma: no cover - 建表失败不应阻断主流程
+        logger.debug(f"补建股票池表失败（忽略）: {exc}")
 
 
 # ===========================================================================
@@ -526,6 +544,205 @@ def limitup_pool(day: Optional[Any] = None, limit: int = 200) -> List[Dict[str, 
     } for r in rows]
 
 
+def save_hot_rank(df: Any) -> int:
+    """写入人气榜快照（按 date+symbol 覆盖）。"""
+    _ensure_pool_tables()
+    rows = [_clean(StockHotRank, r, ("date", "symbol", "name", "rank", "pct_change"))
+            for r in _rows_to_dicts(df)]
+    rows = [r for r in rows if r.get("symbol") and r.get("date")]
+    for r in rows:
+        r["updated_at"] = datetime.now()
+    with SessionLocal() as s:
+        n = _upsert(s, StockHotRank, rows, ["date", "symbol"])
+        s.commit()
+    return n
+
+
+def hot_pool(day: Optional[Any] = None, limit: int = 500) -> List[Dict[str, Any]]:
+    """读某日人气榜（按排名升序）。库里没有该日数据返回空列表。"""
+    _ensure_pool_tables()
+    d = _date(day) or date.today()
+    with SessionLocal() as s:
+        rows = s.execute(
+            select(StockHotRank).where(StockHotRank.date == d)
+            .order_by(StockHotRank.rank.asc()).limit(int(limit))
+        ).scalars().all()
+    return [{
+        "date": str(r.date), "symbol": r.symbol, "name": r.name,
+        "rank": r.rank, "pct_change": r.pct_change,
+    } for r in rows]
+
+
+def save_flow_rank(df: Any) -> int:
+    """写入资金流排名快照（按 date+symbol 覆盖）。"""
+    _ensure_pool_tables()
+    rows = [_clean(StockFlowRank, r,
+                   ("date", "symbol", "name", "pct_change",
+                    "main_net", "main_net_pct"))
+            for r in _rows_to_dicts(df)]
+    rows = [r for r in rows if r.get("symbol") and r.get("date")]
+    for r in rows:
+        r["updated_at"] = datetime.now()
+    with SessionLocal() as s:
+        n = _upsert(s, StockFlowRank, rows, ["date", "symbol"])
+        s.commit()
+    return n
+
+
+def flow_pool(day: Optional[Any] = None, limit: int = 500) -> List[Dict[str, Any]]:
+    """读某日资金流排名（按主力净流入降序）。库里没有该日数据返回空列表。"""
+    _ensure_pool_tables()
+    d = _date(day) or date.today()
+    with SessionLocal() as s:
+        rows = s.execute(
+            select(StockFlowRank).where(StockFlowRank.date == d)
+            .order_by(StockFlowRank.main_net.desc()).limit(int(limit))
+        ).scalars().all()
+    return [{
+        "date": str(r.date), "symbol": r.symbol, "name": r.name,
+        "pct_change": r.pct_change, "main_net": r.main_net,
+        "main_net_pct": r.main_net_pct,
+    } for r in rows]
+
+
+# ===========================================================================
+# 采集去重查询："库里已经有了，就别再联网拉一遍"
+# ===========================================================================
+# 榜单类（人气榜/资金榜/涨停池）是**市场级**数据：一个交易日一份，
+# 同一天拉第二次拿到的还是同一份。资金流/筹码是**个股-日频**数据，
+# 该股当天已入库就没必要重复请求。没有这层判断，每次刷新都会把
+# 几十只票 × N 个接口重新打一遍，既慢又容易被限流。
+_POOL_MODELS = {
+    "hot": StockHotRank,
+    "flow": StockFlowRank,
+    "limitup": LimitUpPool,
+}
+_DAILY_MODELS = {
+    "fund_flow": FundFlow,
+    "chip": ChipDistribution,
+}
+
+
+def pool_count(kind: str, day: Optional[Any] = None) -> int:
+    """某交易日某类榜单已入库条数。kind: hot / flow / limitup。"""
+    model = _POOL_MODELS.get(kind)
+    if model is None:
+        return 0
+    _ensure_pool_tables()
+    d = _date(day) or date.today()
+    with SessionLocal() as s:
+        n = s.execute(
+            select(func.count()).select_from(model).where(model.date == d)
+        ).scalar()
+    return int(n or 0)
+
+
+def latest_pool(kind: str, day: Optional[Any] = None,
+                limit: int = 500) -> List[Dict[str, Any]]:
+    """取"不晚于 day 的最近一天"已入库的榜单数据。
+
+    为什么需要它：指定交易日（比如回退到的上一个交易日）那天可能压根没采过，
+    但库里存着更早/更晚一天的榜单 —— 那份数据照样能用于选股，
+    总比"库里明明有数据还非要去联网拉一遍"强。
+
+    返回的每行都带 `date`，调用方据此告诉用户"这份数据是哪天的"。
+    """
+    model = _POOL_MODELS.get(kind)
+    if model is None:
+        return []
+    _ensure_pool_tables()
+    d = _date(day) or date.today()
+    with SessionLocal() as s:
+        newest = s.execute(
+            select(func.max(model.date)).where(model.date <= d)
+        ).scalar()
+        if newest is None:
+            return []
+        q = select(model).where(model.date == newest)
+        if model is StockHotRank:
+            q = q.order_by(model.rank.asc())
+        elif model is StockFlowRank:
+            q = q.order_by(model.main_net.desc())
+        else:
+            q = q.order_by(model.continuous.desc())
+        rows = s.execute(q.limit(int(limit))).scalars().all()
+    if model is StockHotRank:
+        return [{"date": str(r.date), "symbol": r.symbol, "name": r.name,
+                 "rank": r.rank, "pct_change": r.pct_change} for r in rows]
+    if model is StockFlowRank:
+        return [{"date": str(r.date), "symbol": r.symbol, "name": r.name,
+                 "pct_change": r.pct_change, "main_net": r.main_net,
+                 "main_net_pct": r.main_net_pct} for r in rows]
+    return [{"date": str(r.date), "symbol": r.symbol, "name": r.name,
+             "industry": r.industry, "continuous": r.continuous} for r in rows]
+
+
+def latest_dates(kind: str, symbols: Sequence[str]) -> Dict[str, str]:
+    """批量查每个 symbol 最近一次入库日期：{symbol: "YYYY-MM-DD"}。
+
+    只有查得到的 symbol 才出现在结果里 —— 调用方据此判断"这只票要不要采"。
+    一次 group_by 拿全，避免逐只票查库（几十只票 = 几十次往返）。
+    """
+    model = _DAILY_MODELS.get(kind)
+    syms = [str(s) for s in (symbols or []) if s]
+    if model is None or not syms:
+        return {}
+    dcol = model.date
+    scol = model.symbol
+    with SessionLocal() as s:
+        rows = s.execute(
+            select(scol, func.max(dcol)).where(scol.in_(syms)).group_by(scol)
+        ).all()
+    return {str(r[0]): str(r[1]) for r in rows if r[0] is not None and r[1] is not None}
+
+
+def save_stock_info(rows: Any) -> int:
+    """写入/更新代码↔名称对照。传 DataFrame / list[dict]（需 symbol、name）。"""
+    _ensure_pool_tables()
+    out = []
+    for r in _rows_to_dicts(rows):
+        sym = r.get("symbol")
+        name = r.get("name")
+        if not sym:
+            continue
+        out.append({
+            "symbol": str(sym), "name": str(name) if name is not None else "",
+            "updated_at": datetime.now(),
+        })
+    if not out:
+        return 0
+    # 同一代码只留最近一条
+    merged: Dict[str, Dict[str, Any]] = {}
+    for r in out:
+        merged[r["symbol"]] = r
+    with SessionLocal() as s:
+        n = _upsert(s, StockInfo, list(merged.values()), ["symbol"])
+        s.commit()
+    return n
+
+
+def resolve_names(symbols: Sequence[str]) -> Dict[str, str]:
+    """批量解析代码→名称。查不到的代码不在返回里（调用方按"未知"处理）。"""
+    if not symbols:
+        return {}
+    _ensure_pool_tables()
+    syms = list(dict.fromkeys(str(s) for s in symbols if s))
+    with SessionLocal() as s:
+        rows = s.execute(
+            select(StockInfo).where(StockInfo.symbol.in_(syms))
+        ).scalars().all()
+    return {r.symbol: (r.name or "") for r in rows}
+
+
+def stock_info_count() -> int:
+    """名称对照表里有多少只票（用于判断是否需要一次性补齐）。"""
+    _ensure_pool_tables()
+    from sqlalchemy import func as _func
+
+    with SessionLocal() as s:
+        return int(s.execute(_func.count(StockInfo.symbol)).scalar() or 0)
+
+
 def themes(day: Optional[Any] = None, kind: str = "", limit: int = 100) -> List[Dict[str, Any]]:
     d = _date(day) or date.today()
     with SessionLocal() as s:
@@ -592,22 +809,37 @@ def _fundamental_dict(r: StockFundamental) -> Dict[str, Any]:
 
 def scores(day: Optional[Any] = None, limit: int = 50,
            min_score: Optional[float] = None,
-           symbol: str = "") -> List[Dict[str, Any]]:
+           symbol: str = "", source: str = "") -> List[Dict[str, Any]]:
     d = _date(day) or date.today()
     with SessionLocal() as s:
         q = select(StockScore).where(StockScore.date == d)
         if symbol:
             q = q.where(StockScore.symbol == symbol)
+        if source:
+            q = q.where(StockScore.source == source)
         if min_score is not None:
             q = q.where(StockScore.total_score >= float(min_score))
         q = q.order_by(StockScore.total_score.desc()).limit(int(limit))
         rows = s.execute(q).scalars().all()
-    return [_score_dict(r) for r in rows]
+    out = [_score_dict(r) for r in rows]
+    _attach_names(out)
+    return out
+
+
+def _attach_names(rows: List[Dict[str, Any]]) -> None:
+    """给评分结果批量补名称（代码↔名称对照表）。查不到的名称留空。"""
+    if not rows:
+        return
+    names = resolve_names([r.get("symbol") for r in rows])
+    for r in rows:
+        r["name"] = names.get(r.get("symbol") or "", "") or ""
 
 
 def score_of(symbol: str, day: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     got = scores(day=day, symbol=symbol, limit=1)
-    return got[0] if got else None
+    if not got:
+        return None
+    return got[0]
 
 
 def _score_dict(r: StockScore) -> Dict[str, Any]:
@@ -645,16 +877,26 @@ def score_dates(limit: int = 30) -> List[str]:
 
 
 __all__ = [
+    "flow_pool",
+    "hot_pool",
     "latest_chip",
+    "latest_dates",
     "latest_fund_flow",
+    "latest_pool",
     "limitup_pool",
+    "pool_count",
+    "resolve_names",
     "save_chip",
+    "save_flow_rank",
     "save_fund_flow",
+    "save_hot_rank",
     "save_limitup",
     "save_scores",
+    "save_stock_info",
     "save_stock_themes",
     "save_themes",
     "score_dates",
+    "stock_info_count",
     "score_of",
     "scores",
     "stock_themes",

@@ -9,9 +9,11 @@
 # @Project     : AlphaQuant
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Callable
+from typing import Any, Dict, Optional, Callable
 
 from twisted.internet import defer
 
@@ -20,7 +22,64 @@ from app.core.engine.settings import EngineContext
 from app.utils.logger import logger
 
 # ======================
-# 1. 组件状态枚举
+# 1. 组件快照进度
+# ======================
+@dataclass
+class Progress:
+    """组件当前这批任务的进度：``已完成 / 全部``。
+
+    为什么组件要自己报进度：面板上"组件 = 一个小卡片 + 一个状态灯"
+    只回答了"活着/挂了"，回答不了"在干嘛、干到哪了"。
+    采集类组件一轮要跑几十只票，跑了 5 分钟还是 5 秒钟，
+    没有进度就只能靠猜 —— 而猜错的典型后果是"以为卡死了，又重启一次"。
+
+    语义约定（面板与快照都按这个解释）：
+      * ``total``  = 本轮任务总数；``done`` = 成功数；``failed`` = 失败数；
+      * ``done + failed`` 可能小于 ``total``（还在跑），也可能因重试略大；
+      * ``running`` 表示这一轮还没结束。
+    """
+    label: str = ""          # 这一轮在做什么，例如 "资金流/筹码 68 只"
+    total: int = 0
+    done: int = 0
+    failed: int = 0
+    round: int = 0           # 第几轮（每 start 一次 +1）
+    running: bool = False
+    started_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+    @property
+    def finished(self) -> int:
+        return self.done + self.failed
+
+    @property
+    def percent(self) -> float:
+        """完成百分比。total=0 时：跑着算 0%，跑完算 100%。"""
+        if self.total <= 0:
+            return 0.0 if self.running else 100.0
+        return round(min(100.0, self.finished / self.total * 100.0), 1)
+
+    @property
+    def elapsed(self) -> float:
+        if not self.started_at:
+            return 0.0
+        return round((self.updated_at or time.time()) - self.started_at, 1)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "label": self.label,
+            "total": self.total,
+            "done": self.done,
+            "failed": self.failed,
+            "finished": self.finished,
+            "round": self.round,
+            "running": self.running,
+            "percent": self.percent,
+            "elapsed": self.elapsed,
+        }
+
+
+# ======================
+# 2. 组件状态枚举
 # ======================
 class ComponentState(Enum):
     UNINITIALIZED = "UNINITIALIZED"  # 未初始化
@@ -53,6 +112,9 @@ class IBaseComponent(ABC):
         self._component_status = ComponentState.UNINITIALIZED
 
         self._subscribed_events: list[tuple[str, Callable]] = []
+
+        # 本轮任务进度（子类用 start_progress / advance_progress 维护）
+        self._progress = Progress()
 
     def initialize(self, context: EngineContext, event_bus: EventBus, component_config: dict = None) -> None:
 
@@ -161,6 +223,40 @@ class IBaseComponent(ABC):
         if not self.enabled:
             return True, "disabled"
         return self._component_status in [ComponentState.RUNNING], self._component_status.value
+
+    # ======================
+    # 任务进度（面板上的"已完成 / 全部"）
+    # ======================
+    def start_progress(self, total: int, label: str = "") -> None:
+        """开新一轮任务。周期性组件每轮开始时调一次，进度随之归零。"""
+        self._progress.round += 1
+        self._progress.total = max(0, int(total or 0))
+        self._progress.done = 0
+        self._progress.failed = 0
+        self._progress.label = str(label or "")
+        self._progress.running = True
+        self._progress.started_at = time.time()
+        self._progress.updated_at = self._progress.started_at
+
+    def advance_progress(self, n: int = 1, failed: bool = False) -> None:
+        """推进进度。``failed=True`` 计到失败数（面板上标红）。"""
+        n = int(n or 0)
+        if n <= 0:
+            return
+        if failed:
+            self._progress.failed += n
+        else:
+            self._progress.done += n
+        self._progress.updated_at = time.time()
+
+    def finish_progress(self) -> None:
+        """本轮结束（成功收尾或异常收尾都该调，否则面板永远显示"进行中"）。"""
+        self._progress.running = False
+        self._progress.updated_at = time.time()
+
+    def progress(self) -> Dict[str, Any]:
+        """给快照/面板用的进度字典。没有任务过的组件 total=0，面板不显示进度条。"""
+        return self._progress.to_dict()
 
     def subscribe_event(self, event_name: str, handler: Callable) -> None:
         """统一事件订阅，自动注册+自动清理"""

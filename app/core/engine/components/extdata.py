@@ -259,11 +259,43 @@ class ExtDataComponent(IBaseComponent):
         """供测试与面板判断是否会发请求。"""
         return self._slot() is not None
 
+    def _plan_items(self, slot: str) -> List[str]:
+        """本轮要跑哪些采集项 —— 进度条的"全部"就是它的长度。
+
+        单独抽出来是因为**计划必须和真正执行的分支完全一致**：
+        少算一项进度条到不了 100%，多算一项永远停在 99%，
+        两种都会让人以为组件卡住了。
+        """
+        final = slot == "post"
+        items: List[str] = []
+        if self.symbols:
+            items += ["fund_flow", "chip"]
+            if self.with_fundamental and (final or self._final_date is None):
+                items.append("fundamental")
+            if final:
+                items += list(self.categories)
+        if final:
+            items += ["macro", "breadth"]
+        return items
+
     def _run_once(self, slot: str = "post") -> Dict[str, Any]:
         """按标的采集资金流、筹码、基本面。**单只失败不影响其它**。
 
         :param slot: ``pre`` 盘前 / ``post`` 盘后定稿 / ``intraday`` 盘中
         """
+        plan = self._plan_items(slot)
+        self.start_progress(
+            len(plan),
+            f"{len(self.symbols)} 只 · {len(plan)} 项"
+            + ("（盘后定稿）" if slot == "post" else ""),
+        )
+        try:
+            return self._run_once_body(slot)
+        finally:
+            # 无论成功还是中途抛异常都要收尾，否则面板永远显示"进行中"
+            self.finish_progress()
+
+    def _run_once_body(self, slot: str) -> Dict[str, Any]:
         from app.core.pool import (
             sync_category,
             sync_chip,
@@ -277,7 +309,9 @@ class ExtDataComponent(IBaseComponent):
 
         if self.symbols:
             r1 = sync_fund_flow(self.symbols)
+            self.advance_progress(1, failed=bool(r1.get("failed")))
             r2 = sync_chip(self.symbols)
+            self.advance_progress(1, failed=bool(r2.get("failed")))
             self.stats["fund_flow_ok"] += r1.get("ok", 0)
             self.stats["chip_ok"] += r2.get("ok", 0)
             self.stats["failed"] += (len(r1.get("failed") or [])
@@ -289,6 +323,7 @@ class ExtDataComponent(IBaseComponent):
             # 盘中的估值随价格跳动，拉到的是未定稿的数，存进去反而污染序列
             if self.with_fundamental and (final or self._final_date is None):
                 r3 = sync_fundamentals(self.symbols)
+                self.advance_progress(1, failed=bool(r3.get("failed")))
                 self.stats["fundamental_ok"] += r3.get("ok", 0)
                 self.stats["failed"] += len(r3.get("failed") or [])
                 report["fundamental"] = r3
@@ -297,14 +332,29 @@ class ExtDataComponent(IBaseComponent):
             # 更新慢或只在特定时点有，所以**只在盘后**采一次
             if final:
                 for cat in self.categories:
-                    r = sync_category(cat, self.symbols)
+                    try:
+                        r = sync_category(cat, self.symbols)
+                    except Exception as exc:
+                        # 一个类别挂了不该让整轮中断（龙虎榜没数据不等于资金流没采到）
+                        self.stats["failed"] += 1
+                        self.advance_progress(1, failed=True)
+                        report[cat] = {"ok": 0, "error": str(exc)[:120]}
+                        continue
+                    self.advance_progress(1, failed=bool(r.get("failed")))
                     self.stats["failed"] += len(r.get("failed") or [])
                     report[cat] = {"ok": r.get("ok", 0)}
 
         # 市场级数据（宏观/宽度）一天一次，也只在盘后
         if final:
             for cat in ("macro", "breadth"):
-                r = sync_category(cat)
+                try:
+                    r = sync_category(cat)
+                except Exception as exc:
+                    self.stats["failed"] += 1
+                    self.advance_progress(1, failed=True)
+                    report[cat] = {"ok": 0, "error": str(exc)[:120]}
+                    continue
+                self.advance_progress(1)
                 report[cat] = {"ok": r.get("ok", 0)}
 
         self.stats["runs"] += 1
@@ -352,28 +402,44 @@ class ExtDataComponent(IBaseComponent):
         from app.core.pool import sync_boards, sync_concept_members, sync_limitup
 
         report: Dict[str, Any] = {}
+        self.start_progress(3, "市场级 · 涨停池/板块/题材")
+        try:
+            return self._run_daily_body()
+        finally:
+            self.finish_progress()
+
+    def _run_daily_body(self) -> Dict[str, Any]:
+        from app.core.pool import sync_boards, sync_concept_members, sync_limitup
+
+        report: Dict[str, Any] = {}
         try:
             r = sync_limitup()
+            self.advance_progress(1, failed=not r.get("ok"))
             self.stats["limitup_ok"] += r.get("ok", 0)
             report["limitup"] = r
         except Exception as exc:
             self.stats["errors"] += 1
+            self.advance_progress(1, failed=True)
             log_throttled("WARNING", f"涨停池同步失败: {exc}", key="extdata-zt")
         try:
             r1 = sync_boards("concept")
             r2 = sync_boards("industry")
+            self.advance_progress(1, failed=not (r1.get("ok") or r2.get("ok")))
             self.stats["boards_ok"] += r1.get("ok", 0) + r2.get("ok", 0)
             report["boards"] = {"concept": r1, "industry": r2}
         except Exception as exc:
             self.stats["errors"] += 1
+            self.advance_progress(1, failed=True)
             log_throttled("WARNING", f"板块同步失败: {exc}", key="extdata-board")
         # 题材成分映射最慢也最没必要频繁做：归属变化很慢，一天一次足够
         try:
             r = sync_concept_members(self.theme_top)
+            self.advance_progress(1, failed=not r.get("ok"))
             self.stats["themes_ok"] += r.get("ok", 0)
             report["themes"] = r
         except Exception as exc:
             self.stats["errors"] += 1
+            self.advance_progress(1, failed=True)
             log_throttled("WARNING", f"题材成分同步失败: {exc}", key="extdata-theme")
         self._last_daily = date.today()
         self.stats["last_daily_at"] = datetime.now().isoformat()

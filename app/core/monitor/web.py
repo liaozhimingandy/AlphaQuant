@@ -94,7 +94,7 @@ class MonitorResource(Resource):
             return self._json(request, {"endpoints": [
                 "/api/overview", "/api/tasks", "/api/tasks/<id>", "/api/orders",
                 "/api/logs", "/api/snapshots", "/api/audit", "/api/health",
-                "/api/collector",
+                "/api/collector", "/api/dataguard", "/api/providers",
             ]})
 
         head = rest[0]
@@ -126,6 +126,42 @@ class MonitorResource(Resource):
             return self._json(request, {"audit": list(c.audit)})
         if head == "collector":
             return self._json(request, c.control.collector_status())
+        if head == "dataguard":
+            # 数据校验报告：缺了哪几天、补回多少、用的哪个源
+            return self._json(request, c.control.data_guard_status())
+        if head == "providers":
+            # 新采集层：能力 / 路由 / 健康分 / 熔断（"谁在、能干什么、现在健康吗"）
+            import app.data.marketx  # noqa: F401  触发数据源装配
+
+            from app.data.providers import PROVIDERS
+
+            return self._json(request, {
+                "routes": PROVIDERS.snapshot(),
+                "capabilities": PROVIDERS.capabilities(),
+                "config": PROVIDERS.config.to_dict(),
+                "used": PROVIDERS.health_snapshot(),
+            })
+        if head == "sources":
+            # 数据源权重与健康度（排障"为什么先试这个源"时看这里）
+            import app.data.marketx  # noqa: F401  确保内置源已注册
+
+            from app.data.sources import REGISTRY
+
+            # hosts 是"网络层实测的域名健康度"：多个源常共用同一域名
+            # （push2 一挂，三个人气榜源一起挂），只看源列表会误判成源不行。
+            from app.data import net
+
+            return self._json(request, {
+                "health": REGISTRY.health(),
+                "weights": REGISTRY.weights(),
+                "used": REGISTRY.used_sources(),
+                "events": REGISTRY.recent_events(30),
+                "hosts": net.host_state(),
+                "proxy": {
+                    "configured": net.proxy_configured(),
+                    "reachable": net.proxy_reachable(),
+                },
+            })
 
         # ---- 回测监控 ----
         if head == "backtest":
@@ -159,10 +195,26 @@ class MonitorResource(Resource):
                 if not sym:
                     return self._json(request, {"error": "缺少 symbol"}, 400)
                 return self._json(request, c.stock_score(sym))
+            dates = c.pool_dates()
+            # 数据日 = 库里最新的评分日；未开盘且数据早于今天 → 标记为历史数据，
+            # 让面板提示"显示为上一个交易日的数据"。
+            data_day = dates[0] if dates else None
+            is_historical = False
+            if data_day:
+                from datetime import date as _d, datetime as _dt
+
+                from app.core.market.calendar import get_calendar
+
+                cal = get_calendar()
+                today_str = _d.today().isoformat()
+                is_historical = (data_day != today_str) and (not cal.is_open(_dt.now()))
             return self._json(request, {
-                "results": c.pool_top(int(self._q(request, "limit", 30) or 30)),
-                "dates": c.pool_dates(),
+                "results": c.pool_top(int(self._q(request, "limit", 30) or 30),
+                                      source=self._q(request, "source", "") or ""),
+                "dates": dates,
                 "config": c.pool_config_view(),
+                "data_day": data_day,
+                "is_historical": is_historical,
             })
 
         # ---- 交易日历 / 市场状态 ----
@@ -407,6 +459,7 @@ class MonitorResource(Resource):
                 body.get("limit"),
                 body.get("sync"),
                 body.get("symbols") or None,
+                body.get("exclusions") or None,
             ))
 
         # POST /api/collector/(now|interval|add|remove|reload)
@@ -431,6 +484,27 @@ class MonitorResource(Resource):
                     return self._json(request, {"ok": False, "error": "缺少 symbol"}, 400)
                 return self._json(request, c.control.apply_command(payload))
             return self._json(request, {"ok": False, "error": f"未知操作: {op}"}, 400)
+
+        # POST /api/dataguard/check —— 立刻体检（可选自动补全）
+        if seg[1] == "dataguard" and len(seg) >= 3 and seg[2] == "check":
+            return self._async(request, c.control.data_guard_check_async(
+                str(body.get("symbol") or ""),
+                auto_repair=body.get("auto_repair"),
+            ))
+
+        # POST /api/sources/reset —— 权重与熔断恢复默认（修完环境问题用）
+        if seg[1] == "sources" and len(seg) >= 3 and seg[2] == "reset":
+            from app.data.sources import REGISTRY
+
+            REGISTRY.reset()
+            # 新链路的健康分/熔断一起清 —— 修完代理端口要能让所有源重新公平竞争
+            try:
+                from app.data.providers import PROVIDERS
+
+                PROVIDERS.reset()
+            except Exception:
+                pass
+            return self._json(request, {"ok": True, "weights": REGISTRY.weights()})
 
         # POST /api/engine/stop
         if seg[1] == "engine" and len(seg) >= 3:
@@ -1254,11 +1328,23 @@ class MonitorWebComponent(IBaseComponent):
             logger.debug(f"股票池配置读取失败: {exc}")
             return {}
 
-    def pool_top(self, limit: int = 30) -> List[Dict[str, Any]]:
+    def pool_top(self, limit: int = 30, source: str = "", day: Any = None
+                 ) -> List[Dict[str, Any]]:
         try:
-            from app.core.pool import StockPool
+            from app.core.pool import PoolConfig, StockPool
+            from app.repository import marketx_repository as R
 
-            return StockPool.top(limit=int(limit))
+            # 不指定日期时，读"库里最新的一个评分日"——
+            # 否则未开盘时分数都按上一交易日存着、列表却读今天，会显示一片空。
+            if day in (None, ""):
+                ds = R.score_dates(1)
+                day = ds[0] if ds else None
+            # 来源为空（前端"（默认）"选项）时，回退到配置里的默认候选池来源，
+            # 让"读取"与"刷新"口径一致：否则读取会把所有来源的分数都捞出来，
+            # 出现"刷新说 11 只、表格却 15 只"的错位。
+            if not source:
+                source = PoolConfig.load().source or ""
+            return StockPool.top(limit=int(limit), source=source, day=day)
         except Exception as exc:
             logger.debug(f"读取股票池失败: {exc}")
             return []
@@ -1519,7 +1605,13 @@ class MonitorWebComponent(IBaseComponent):
     # 用户策略库（界面自定义策略）
     # ============================================================
     def strategies_view(self) -> Dict[str, Any]:
-        """已注册策略 + 用户自定义策略 + 可用因子/风控（界面要靠它渲染表单）。"""
+        """已注册策略 + 用户自定义策略 + 可用因子/风控（界面要靠它渲染表单）。
+
+        注意：界面「策略库」表单里的因子下拉依赖 ``groups``（按类别分组的
+        全量因子目录，带 has_data 标记），不是 ``factors``（只有因子库里的
+        表达式因子）。之前只返回了 factors，导致规则策略的因子下拉只剩
+        "（不选）"一个选项 —— 这里同时把 groups 给上。
+        """
         from app.core.strategy.store import KINDS, get_store
 
         store = get_store()
@@ -1529,11 +1621,14 @@ class MonitorWebComponent(IBaseComponent):
             "path": str(store.path),
         }
         try:
+            from app.core.factor.catalog import CATEGORY_DOCS, factor_catalog
             from app.core.factor import list_factors
             from app.core.risk import list_risks
             from app.core.strategy import list_strategies
 
             out["factors"] = list_factors()
+            out["groups"] = factor_catalog()["categories"]
+            out["group_docs"] = CATEGORY_DOCS
             out["risk_rules"] = list_risks()
             out["registered"] = list_strategies()
         except Exception as exc:
@@ -1640,21 +1735,30 @@ class MonitorWebComponent(IBaseComponent):
             return {}
 
     def refresh_pool(self, source: str = "", limit: Any = None,
-                     sync: Any = None, symbols: Any = None) -> Dict[str, Any]:
+                     sync: Any = None, symbols: Any = None,
+                     exclusions: Any = None, force: Any = None) -> Dict[str, Any]:
         """刷新股票池（工作线程执行）。
 
         面板点一下就可能触发几十只票的联网同步 + 打分，
         同步阻塞会把行情、策略、撮合一起停摆。
+
+        :param force: True = 忽略"库里已有"判断强制重采。默认 False：
+            同一交易日的数据重复拉没有意义，还容易被限流。
         """
         try:
             from app.core.pool import StockPool
 
             pool = StockPool()
+            excl = None
+            if isinstance(exclusions, dict):
+                excl = {k: bool(v) for k, v in exclusions.items()}
             report = pool.refresh(
                 source=source or None,
                 limit=int(limit) if limit else None,
                 do_sync=None if sync is None else bool(sync),
                 symbols=list(symbols) if symbols else None,
+                exclusions=excl,
+                force=bool(force),
             )
             if report.get("error"):
                 return {"ok": False, "error": report["error"]}
@@ -1674,10 +1778,17 @@ class MonitorWebComponent(IBaseComponent):
             from app.core.data.features import get_provider
             from app.core.score.engine import ScoreEngine
             from app.data.datasource import normalize_symbol
+            from app.repository import marketx_repository as R
 
             sym = normalize_symbol(symbol)
             r = ScoreEngine(provider=get_provider(ttl=0)).score(sym)
-            return {"ok": True, "symbol": sym, **r.to_dict()}
+            out = {"ok": True, "symbol": sym, **r.to_dict()}
+            try:
+                names = R.resolve_names([sym])
+                out["name"] = names.get(sym, "") or ""
+            except Exception:
+                out["name"] = ""
+            return out
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

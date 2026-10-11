@@ -40,21 +40,5 @@
       "interval": "5m",
       "keep_days": 30
     }
-  ],
-  "schedule": {
-    "pre_open_minutes": 30,
-    "post_close_minutes": 30,
-    "pre_open_enabled": true,
-    "trading_day_only": true,
-    "intraday_enabled": false,
-    "grace_minutes": 120,
-    "_comment": [
-      "采集时间窗口（可在监控看板「设置」里改）。",
-      "pre_open_minutes   开盘前多少分钟开始采（默认 30 → 9:00）",
-      "post_close_minutes 收盘后延迟多少分钟采定稿数据（默认 30 → 15:30）",
-      "                   早了拿到的是未定稿数据，晚了白白等待。",
-      "intraday_enabled   盘中是否也采日频截面数据（默认关：一天一条的东西",
-      "                   盘中反复拉是浪费，还会被限流）"
-    ]
-  }
+  ]
 }

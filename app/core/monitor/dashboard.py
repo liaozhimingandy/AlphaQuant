@@ -20,10 +20,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --bg:#f5f7fa; --panel:#ffffff; --line:#e3e8ef; --text:#1f2937; --muted:#6b7280;
     --accent:#2563eb; --up:#d92b2b; --down:#0f9d58; --warn:#d97706;
     --ok:#0f9d58; --bad:#d92b2b; --shadow:0 1px 3px rgba(16,24,40,.08),0 1px 2px rgba(16,24,40,.04);
+    --warn-bg:#fef6e7; --warn-fg:#92600a; --warn-bd:#f4d58a;
   }
   @media (prefers-color-scheme: dark){
     :root{ --bg:#0f1420; --panel:#161d2c; --line:#26304a; --text:#e5e9f0; --muted:#94a3b8;
-           --shadow:0 1px 3px rgba(0,0,0,.4); }
+           --shadow:0 1px 3px rgba(0,0,0,.4);
+           --warn-bg:#2a2310; --warn-fg:#f0c674; --warn-bd:#4a3d18; }
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
@@ -57,6 +59,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .comp .top{display:flex;align-items:center;justify-content:space-between;gap:8px}
   .comp .nm{font-weight:600;font-size:12px}
   .comp .det{color:var(--muted);font-size:11px;margin-top:6px;word-break:break-all}
+  /* 组件任务进度："已完成 / 全部" —— 采集类组件一轮跑几十只票，
+     没有进度就只能干等，分不清"在跑"和"卡死" */
+  .comp .prog{margin-top:8px}
+  .comp .prog-txt{display:flex;align-items:baseline;justify-content:space-between;gap:6px;font-size:11px}
+  .comp .prog-txt .lab{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .comp .prog-txt .num{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  .comp .bar{height:4px;border-radius:999px;background:var(--line);margin-top:4px;overflow:hidden}
+  .comp .bar>i{display:block;height:100%;background:var(--ok);transition:width .3s}
+  .comp .bar>i.bad{background:var(--bad)}
+  .comp .prog .fail{color:var(--bad)}
   .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid transparent}
   .pill.run{background:rgba(15,157,88,.12);color:var(--ok);border-color:rgba(15,157,88,.3)}
   .pill.off{background:rgba(107,114,128,.14);color:var(--muted);border-color:rgba(107,114,128,.3)}
@@ -76,6 +88,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   textarea{width:100%;min-height:120px;font:12px/1.5 ui-monospace,Consolas,monospace;padding:10px;
            border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--text);resize:vertical}
   .hint{color:var(--muted);font-size:11px;margin:4px 0 0}
+  .banner{margin:8px 0 0;padding:7px 12px;border-radius:6px;font-size:12px;
+          background:var(--warn-bg);color:var(--warn-fg);border:1px solid var(--warn-bd)}
+  .banner b{color:inherit}
+  .banner.err{background:rgba(217,43,43,.10);color:var(--bad);border:1px solid rgba(217,43,43,.35)}
+  /* 提示条靠 .hidden 收起：上面那条 display:none 只列了页面/表单级 id，
+     没带 .banner，于是"无告警"时仍留着一条黄/红空条占位置。
+     这里单独补规则，且必须在 .banner 之后才能盖掉它的 padding/border。 */
+  .banner.hidden{display:none}
   pre#logs{margin:0;max-height:320px;overflow:auto;font:11.5px/1.55 ui-monospace,Consolas,monospace;
            white-space:pre-wrap;word-break:break-all;color:var(--muted)}
   .drawer{position:fixed;top:0;right:0;bottom:0;width:min(760px,94vw);background:var(--panel);
@@ -93,6 +113,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .toast{background:#111827;color:#fff;padding:9px 14px;border-radius:8px;font-size:12px;opacity:.94;max-width:420px}
   .toast.bad{background:#b91c1c}
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .factor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 14px}
+  .factor-grid .ghead{grid-column:1/-1;font-size:11px;color:var(--muted);font-weight:600;
+    margin:6px 0 2px;padding-bottom:3px;border-bottom:1px dashed var(--line)}
+  .factor-grid label.frow{display:flex;align-items:center;gap:6px;font-size:12px;
+    border:1px solid var(--line);border-radius:6px;padding:4px 7px;background:transparent}
+  .factor-grid label.frow.off{opacity:.45}
+  .factor-grid label.frow input.w{width:54px;margin-left:auto}
+  .factor-grid label.frow .wbox{display:none;margin-left:auto;align-items:center;gap:4px}
+  .factor-grid label.frow.custom .wbox{display:flex}
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
   .seg button{border:0;border-radius:0}
   .seg button.on{background:var(--accent);color:#fff}
@@ -105,7 +134,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tabs button.on{background:var(--bg);border-color:var(--line);color:var(--accent)}
   label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--muted)}
   label input,label select{font-size:12px}
-  main.hidden,#page-backtest.hidden,#page-live.hidden,#page-pool.hidden{display:none}
+  main.hidden,#page-backtest.hidden,#page-live.hidden,#page-pool.hidden,
+  #s-form-rule.hidden,#s-form-score.hidden,#s-form-multi.hidden,
+  #bt-detail.hidden,#bt-spec-wrap.hidden{display:none}
   h3{font-weight:600;color:var(--fg)}
 </style>
 </head>
@@ -265,6 +296,37 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="panel">
+    <h2>数据校验 <span class="muted" id="guard-hint"></span></h2>
+    <div class="body">
+      <div id="guard-status" style="margin-bottom:8px"><span class="muted">加载中…</span></div>
+      <div id="guard-off" class="hint hidden">本引擎未装配数据校验服务。</div>
+      <div id="guard-on">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>标的</th><th>覆盖区间</th><th class="num">行数</th>
+              <th>缺失交易日</th><th class="num">异常行</th>
+              <th class="num">已补</th><th>补全源</th><th>说明</th>
+            </tr></thead>
+            <tbody id="guard-rows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+          <input id="guard-sym" placeholder="标的代码，留空=全部" style="width:170px">
+          <label class="hint" style="display:inline-flex;align-items:center;gap:4px">
+            <input type="checkbox" id="guard-repair" checked> 自动补全
+          </label>
+          <button id="btn-guard-check" class="primary">立即体检</button>
+          <span class="hint" id="guard-msg"></span>
+        </div>
+        <p class="hint">引擎启动后延迟 20 秒首检（留给采集服务先入库），之后每 3600 秒复查。
+        缺失占比过高的标的判定为停牌/退市，只记录不补。
+        <b>只比对日期与价格，不比对成交量</b>（各源成交量单位不同）。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
     <h2>控制指令留痕 <span class="muted" id="audit-hint"></span></h2>
     <div class="body"><div class="table-wrap">
       <table><thead><tr><th>时间</th><th>指令</th><th>细节</th></tr></thead>
@@ -297,6 +359,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section class="panel">
     <h2>新建 / 编辑策略</h2>
     <div class="body">
+      <p class="hint" id="stg-edit-tip"></p>
       <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
         <label>名称<br><input id="s-name" placeholder="my_rule" style="width:150px"></label>
         <label>类型<br>
@@ -306,6 +369,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <option value="multi_factor">多因子加权</option>
           </select>
         </label>
+        <span class="hint" id="s-kind-hint" style="width:100%;margin-top:4px;display:block"></span>
         <label>说明<br><input id="s-desc" placeholder="一句话说明" style="width:200px"></label>
       </div>
 
@@ -342,15 +406,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
       <div id="s-form-multi" class="hidden" style="margin-top:10px">
         <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
-          <label style="flex:1;min-width:260px">因子与权重（JSON 数组）<br>
-            <input id="s-multi-factors" style="width:100%"
-                   value='[{"name":"mom_20","weight":1}]'>
-          </label>
           <label>买入（≥）<br><input id="s-multi-entry" type="number" value="0.55" style="width:100px"></label>
           <label>卖出（≤）<br><input id="s-multi-exit" type="number" value="-0.3" style="width:100px"></label>
+          <label>权重模式<br>
+            <select id="s-multi-mode" style="width:150px">
+              <option value="equal">等权（默认 1）</option>
+              <option value="custom">自定义权重</option>
+            </select></label>
+          <button class="mini" id="btn-s-multi-all">全选</button>
+          <button class="mini" id="btn-s-multi-none">清空</button>
+          <button class="mini" id="btn-s-multi-normalize">权重归一化</button>
         </div>
-        <p class="hint">留空则用因子库里全部启用因子（等权）。权重可以把
-        <code>main.py factor fit</code> 的结果拷进来。</p>
+        <div id="s-multi-factors-box" class="factor-grid"
+             style="margin-top:8px;max-height:300px;overflow:auto;
+                    border:1px solid #e2e8f0;border-radius:6px;padding:8px"></div>
+        <p class="hint">勾选要纳入组合的因子，自定义模式下为每个因子填权重
+        （正数即可，内部会按权重归一化）。不勾选任何因子 = 用因子库全部启用因子（等权）。
+        留灰的因子表示库里暂无数据，勾了也只会得到空值。</p>
+        <input type="hidden" id="s-multi-factors" value="[]">
       </div>
 
 
@@ -506,17 +579,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <label class="row" style="flex-direction:row;gap:4px;align-items:center">
           <input id="pool-sync" type="checkbox" checked> 联网同步
         </label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center"
+               title="默认关闭：库里已有当日数据时跳过重复采集，避免白耗请求额度">
+          <input id="pool-force" type="checkbox"> 强制重采
+        </label>
         <button id="btn-pool-refresh" class="primary">刷新</button>
         <span class="hint" id="pool-msg"></span>
       </div>
+      <div class="row" style="flex-wrap:wrap;gap:14px;align-items:center;margin-top:8px">
+        <span class="hint">剔除条件：</span>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center"><input id="pool-ex-st" type="checkbox" checked> 排除ST股</label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center"><input id="pool-ex-cyb" type="checkbox"> 排除创业板(300)</label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center"><input id="pool-ex-kcb" type="checkbox"> 排除科创板(688)</label>
+        <label class="row" style="flex-direction:row;gap:4px;align-items:center"><input id="pool-ex-bj" type="checkbox"> 排除北交所(8/4)</label>
+        <span class="hint muted" id="pool-ex-note"></span>
+      </div>
       <p class="hint" id="pool-cfg"></p>
       <p class="hint muted" id="pool-market"></p>
+      <div id="pool-datahint" class="banner hidden"></div>
+      <div id="pool-warn" class="banner err hidden"></div>
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>#</th><th>代码</th><th class="num">综合分</th><th>等级</th>
+            <th>#</th><th>代码</th><th>名称</th><th class="num">综合分</th><th>等级</th>
             <th class="num">资金链</th><th class="num">题材</th><th class="num">筹码</th>
-            <th class="num">技术</th><th class="num">涨停</th><th>来源</th><th>操作</th>
+            <th class="num">技术</th><th class="num">涨停</th><th class="num">基本面</th>
+            <th class="num">舆情</th><th class="num">宏观</th><th>来源</th><th>操作</th>
           </tr></thead>
           <tbody id="pool-rows"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
         </table>
@@ -747,21 +835,42 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }).join('');
   }
 
+  // 组件任务进度条：total=0 表示这个组件没有"批次任务"的概念（策略/网关等），
+  // 那就不画进度条，免得每个卡片下面挂一条空的 0/0。
+  function progHtml(p){
+    if(!p || !p.total) return '';
+    var pct = Math.max(0, Math.min(100, p.percent||0));
+    var num = '<span class="num">' + (p.done||0) + '/' + p.total + '</span>';
+    if(p.failed) num += ' <span class="fail">失败 ' + p.failed + '</span>';
+    if(p.running) num += ' <span class="muted">进行中</span>';
+    return '<div class="prog">' +
+      '<div class="prog-txt"><span class="lab">' + esc(p.label||'') + '</span>' +
+      '<span>' + num + '</span></div>' +
+      '<div class="bar"><i class="' + ((p.failed && !p.done) ? 'bad' : '') +
+      '" style="width:' + pct + '%"></i></div></div>';
+  }
+
   function renderComponents(o){
     var cs = o.components || [];
-    $('comp-hint').textContent = '(' + cs.length + ')';
+    var act = 0, tot = 0;
     $('components').innerHTML = cs.map(function(c){
       var state = (c.healthy === false) ? 'err' : (c.enabled ? 'run' : 'off');
       var label = c.enabled ? (c.state||'-') : 'disabled';
+      var p = c.progress || null;
+      if(p && p.total && p.running){ act += (p.done||0) + (p.failed||0); tot += p.total; }
       return '<div class="comp">' +
         '<div class="top"><span class="nm">' + esc(c.name) + '</span>' +
         '<span class="pill ' + state + '">' + esc(label) + '</span></div>' +
         '<div class="det">' + esc(c.health_detail||'') + '</div>' +
+        progHtml(p) +
         '<div class="acts" style="margin-top:8px">' +
         '<button class="mini" data-act="comp" data-name="' + esc(c.name) + '" data-op="' +
         (c.enabled?'disable':'enable') + '">' + (c.enabled?'禁用':'启用') + '</button>' +
         '</div></div>';
     }).join('');
+    // 标题上汇总"当前有任务在跑的组件完成了多少"，一眼看出系统是否在推进
+    $('comp-hint').textContent = '(' + cs.length + ')'
+      + (tot ? ' · 任务 ' + act + '/' + tot : '');
   }
 
   function renderTasks(o){
@@ -860,6 +969,80 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   function loadCollector(){
     api('/api/collector').then(renderCollector).catch(function(e){
       $('col-hint').textContent = '(加载失败: ' + e.message + ')';
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // 数据校验：库里缺了哪几天、补回多少、用的哪个源
+  //
+  // 为什么要单独一块：缺一天的K线不会让任何东西报错，
+  // 只会让回测/信号悄悄偏离。这是唯一能看见它的地方。
+  // ------------------------------------------------------------------
+  function renderGuard(g){
+    var available = !!(g && g.available);
+    $('guard-off').classList.toggle('hidden', available);
+    if(!available){
+      $('guard-hint').textContent = '(未装配)';
+      return;
+    }
+
+    var rep = g.report, st = g.stats || {};
+    var enabled = !!g.enabled;
+    var pills = (st.runs||0)
+      ? ' 累计: 缺口 ' + (st.missing||0) + ' · 已补 ' + (st.repaired||0)
+        + ' · 异常 ' + (st.anomalies||0)
+      : '';
+
+    if(!enabled){
+      $('guard-hint').textContent = '(已装配 · 已停用)';
+      $('guard-status').innerHTML = '<span class="pill off">已停用</span>' +
+        (g.disabled_reason ? ' <span class="muted">' + esc(g.disabled_reason) + '</span>' : '');
+    } else if(!rep){
+      $('guard-hint').textContent = '(待首检)';
+      $('guard-status').innerHTML = '<span class="pill warn">尚未体检</span>' +
+        ' <span class="muted">' + esc(pills || ('每 ' + (g.interval||0) + 's 一次')) + '</span>';
+    } else {
+      $('guard-hint').textContent = '(' + (rep.checked||0) + ' 只 · '
+        + (g.last_check_at||'').replace('T',' ').slice(0,19) + ')';
+      var ok = !!rep.ok;
+      $('guard-status').innerHTML = (ok
+          ? '<span class="pill run">数据完整</span>'
+          : '<span class="pill warn">发现问题</span>') +
+        ' <span class="muted">缺口 ' + (rep.missing_total||0) +
+        ' · 已补 ' + (rep.repaired_total||0) +
+        ' · 异常行 ' + (rep.anomaly_total||0) + '</span>' +
+        (g.auto_repair ? '' : ' <span class="muted">（只体检，未开自动补全）</span>');
+    }
+
+    var rows = (rep && rep.symbols) || [];
+    if(!rows.length){
+      $('guard-rows').innerHTML = '<tr><td colspan="8" class="muted">' +
+        (rep ? '本次体检未发现任何标的的数据' : '等待首次体检…') + '</td></tr>';
+      return;
+    }
+    $('guard-rows').innerHTML = rows.map(function(s){
+      var miss = (s.missing||[]).slice(0,4).join(', ') +
+        ((s.missing||[]).length > 4 ? ' 等 ' + (s.missing||[]).length + ' 天' : '');
+      var note = s.suspended ? '疑似停牌/退市，未补'
+        : (s.error ? s.error.slice(0,46) : (s.ok ? '' : '待补'));
+      return '<tr>' +
+        '<td><b>' + esc(s.symbol) + '</b></td>' +
+        '<td class="muted">' + esc((s.start||'—') + ' ~ ' + (s.end||'—')) + '</td>' +
+        '<td class="num">' + (s.rows||0) + '</td>' +
+        '<td class="' + ((s.missing_count||0) ? 'down' : 'muted') + '">' +
+          esc(miss || '—') + '</td>' +
+        '<td class="num ' + ((s.anomaly_count||0) ? 'down' : 'muted') + '">' +
+          (s.anomaly_count||0) + '</td>' +
+        '<td class="num ' + ((s.repaired||0) ? 'up' : 'muted') + '">' + (s.repaired||0) + '</td>' +
+        '<td class="muted">' + esc(s.source || '') + '</td>' +
+        '<td class="muted">' + esc(note) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  function loadGuard(){
+    api('/api/dataguard').then(renderGuard).catch(function(e){
+      $('guard-hint').textContent = '(加载失败: ' + e.message + ')';
     });
   }
 
@@ -1110,6 +1293,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }).catch(function(e){ toast('扫描失败: ' + e.message, true); });
       return;
     }
+    if(b.id === 'btn-s-multi-all'){ checkAllMulti(true); return; }
+    if(b.id === 'btn-s-multi-none'){ checkAllMulti(false); return; }
+    if(b.id === 'btn-s-multi-normalize'){ normalizeMulti(); return; }
     if(b.id === 'btn-f-validate'){ doValidate(); return; }
     if(b.id === 'btn-f-check'){ doCheck(); return; }
     if(b.id === 'btn-f-save'){ doSave(); return; }
@@ -1127,16 +1313,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     // ---- 股票池 ----
     if(b.id === 'btn-pool-refresh'){
       $('pool-msg').textContent = '刷新中…（联网同步 + 打分，可能需要几十秒）';
+      var excl = {
+        exclude_st: $('pool-ex-st').checked,
+        exclude_cyb: $('pool-ex-cyb').checked,
+        exclude_kcb: $('pool-ex-kcb').checked,
+        exclude_bj: $('pool-ex-bj').checked,
+      };
       post('/api/pool/refresh', {
         source: $('pool-source').value,
         limit: Number($('pool-limit').value) || 30,
         sync: $('pool-sync').checked,
+        force: $('pool-force').checked,
+        exclusions: excl,
       }, 120).then(function(r){
         if(r && r.ok){
-          $('pool-msg').textContent = '完成：' + (r.count || 0) + ' 只';
-          toast('股票池已刷新');
+          var msg = '完成：' + (r.count || 0) + ' 只';
+          if(r.data_day){
+            if(r.is_recent_day) msg += '（数据日 ' + r.data_day + ' · 上一交易日）';
+            else msg += '（数据日 ' + r.data_day + '）';
+          }
+          var ex = r.excluded || {};
+          var exN = (ex.st||0) + (ex.cyb||0) + (ex.kcb||0) + (ex.bj||0);
+          if(exN) msg += '（剔除 ' + exN + ' 只：ST ' + (ex.st||0) +
+            ' · 创业板 ' + (ex.cyb||0) + ' · 科创板 ' + (ex.kcb||0) +
+            ' · 北交所 ' + (ex.bj||0) + '）';
+          // 本次各类型实际用了哪个数据源 —— 采集出问题时一眼能看出数据从哪来
+          var ds = r.data_sources || {};
+          var dsTxt = Object.keys(ds).map(function(k){ return k + '=' + ds[k]; }).join('、');
+          if(dsTxt) msg += '（数据源 ' + dsTxt + '）';
+          var sk = r.skipped || [];
+          if(sk.length) msg += '（跳过重复采集: ' + sk.join('、') + '）';
+          $('pool-msg').textContent = msg;
+          renderPoolWarn(r.warnings || [], sk);
+          toast(r.warnings && r.warnings.length ? '刷新完成，但有告警' : '股票池已刷新',
+                !!(r.warnings && r.warnings.length));
         } else {
           $('pool-msg').textContent = '失败: ' + ((r && r.error) || '未知错误');
+          renderPoolWarn(r && r.warnings ? r.warnings : [], []);
           toast('股票池刷新失败', true);
         }
         loadPool();
@@ -1154,6 +1367,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }).catch(function(e){ toast('删除失败: ' + e.message, true); });
       return;
     }
+    if(poolAct === 'stg-edit'){ editStrategy(b.getAttribute('data-name')); return; }
     if(poolAct === 'factor-del'){
       var fname = b.getAttribute('data-name');
       if(!confirm('确认删除因子 ' + fname + ' ？引用它的策略会立刻失效。')) return;
@@ -1228,6 +1442,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         if(r && r.ok){ toast('配置已热加载'); loadCollector(); }
         else toast('重载失败: ' + ((r && r.error) || ''), true);
       }).catch(function(e){ toast('重载失败: ' + e.message, true); });
+      return;
+    }
+    if(b.id === 'btn-guard-check'){
+      $('guard-msg').textContent = '体检中…';
+      post('/api/dataguard/check', {
+        symbol: $('guard-sym').value.trim(),
+        auto_repair: !!$('guard-repair').checked
+      }).then(function(r){
+        $('guard-msg').textContent = '';
+        if(r && r.ok) toast(r.summary || '体检完成');
+        else toast('体检失败: ' + ((r && r.error) || ''), true);
+        loadGuard();
+      }).catch(function(e){ $('guard-msg').textContent = ''; toast('体检失败: ' + e.message, true); });
       return;
     }
     if(b.id === 'btn-snap'){ act('/api/command', {action:'snapshot'}, '快照落盘'); return; }
@@ -1392,6 +1619,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     return '<span class="pill ' + (m[g]||'off') + '">' + esc(g||'-') + '</span>';
   }
 
+  // 数据日提示：未开盘且数据来自历史交易日时，明确标注"显示为上一交易日数据"
+  function renderPoolDataHint(d){
+    var box = $('pool-datahint');
+    if(!box) return;
+    if(d.is_historical && d.data_day){
+      box.classList.remove('hidden');
+      box.innerHTML = '⚠️ 当前为 <b>非开盘时段</b>，下表展示的是<b>上一个交易日 '
+        + esc(d.data_day) + '</b> 的数据（刷新也是按该交易日重新拉取并打分）。'
+        + '开盘后刷新即更新为当日数据。';
+    } else if(d.data_day){
+      box.classList.add('hidden');
+      box.innerHTML = '';
+    } else {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+    }
+  }
+
+  // 采集告警：数据源全部用尽 / 同步失败时，把"哪个源、为什么"直接摆在表格上方，
+  // 而不是只留一句"候选池为空"让人猜。
+  function renderPoolWarn(warnings, skipped){
+    var box = $('pool-warn');
+    if(!box) return;
+    var html = '';
+    if(warnings && warnings.length){
+      html += '<b>⚠️ 采集告警</b><br>' + warnings.map(function(w){
+        return '· ' + esc(String(w));
+      }).join('<br>');
+    }
+    if(skipped && skipped.length){
+      html += (html ? '<br>' : '') + '<span>跳过重复采集（库内已有当日数据）: '
+        + esc(skipped.join('、')) + '。需要最新数据可勾选「强制重采」。</span>';
+    }
+    if(html){ box.classList.remove('hidden'); box.innerHTML = html; }
+    else { box.classList.add('hidden'); box.innerHTML = ''; }
+  }
+
   function renderPool(d){
     var rows = d.results || [];
     var cfg = d.config || {};
@@ -1403,20 +1667,27 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
     $('pool-hint').textContent = '(' + rows.length + ' 只'
       + (d.dates && d.dates.length ? ' · 最新 ' + d.dates[0] : '') + ')';
+    // 未开盘且数据来自历史交易日：明确提示用户当前看到的是哪天的数据
+    renderPoolDataHint(d);
+    syncPoolExclusions(d.config);
     if(!rows.length){
-      $('pool-rows').innerHTML = '<tr><td colspan="14" class="muted">还没有评分。' +
+      $('pool-rows').innerHTML = '<tr><td colspan="15" class="muted">还没有评分。' +
         '点「刷新」生成；本机无网络可先在命令行跑 <code>main.py pool demo</code> 看效果。</td></tr>';
       return;
     }
-    $('pool-rows').innerHTML = rows.map(function(r){
+    $('pool-rows').innerHTML = rows.map(function(r, i){
       var dm = r.dims || {};
       var cells = DIM_KEYS.map(function(k){
         var v = dm[k];
         return '<td class="num">' + (v == null ? '<span class="muted">—</span>' : v.toFixed(0)) + '</td>';
       }).join('');
       var tot = r.total == null ? '<span class="muted">—</span>' : r.total.toFixed(1);
-      return '<tr><td>' + (r.rank||'-') + '</td>' +
+      // 序号按**当前筛选后的表格顺序**从 1 重新编，不用库里的 rank：
+      // rank 是入库那次全市场打分时的名次，一旦按 source/日期/上限筛选过，
+      // 它就会跳号（出现 3、7、19…），看着像"少了票"。
+      return '<tr><td class="num muted">' + (i + 1) + '</td>' +
         '<td><b>' + esc(r.symbol) + '</b></td>' +
+        '<td class="muted">' + esc(r.name||'') + '</td>' +
         '<td class="num">' + tot + '</td>' +
         '<td>' + gradePill(r.grade) + '</td>' + cells +
         '<td class="muted">' + esc(r.source||'') + '</td>' +
@@ -1425,32 +1696,61 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
 
   function loadPool(){
-    api('/api/pool?limit=' + (Number($('pool-limit').value) || 30)).then(renderPool)
+    var src = $('pool-source').value;
+    var url = '/api/pool?limit=' + (Number($('pool-limit').value) || 30);
+    if(src) url += '&source=' + encodeURIComponent(src);
+    api(url).then(renderPool)
       .catch(function(e){ $('pool-hint').textContent = '(加载失败: ' + e.message + ')'; });
+  }
+
+  // 后端配置里的剔除开关 → 同步到面板勾选框（config/pool.json 改了也能反映）
+  function syncPoolExclusions(cfg){
+    cfg = cfg || {};
+    $('pool-ex-st').checked = cfg.exclude_st !== false;
+    $('pool-ex-cyb').checked = !!cfg.exclude_cyb;
+    $('pool-ex-kcb').checked = !!cfg.exclude_kcb;
+    $('pool-ex-bj').checked = !!cfg.exclude_bj;
+    var on = [];
+    if($('pool-ex-st').checked) on.push('ST');
+    if($('pool-ex-cyb').checked) on.push('创业板');
+    if($('pool-ex-kcb').checked) on.push('科创板');
+    if($('pool-ex-bj').checked) on.push('北交所');
+    $('pool-ex-note').textContent = on.length ? '已开启剔除：' + on.join('、') : '未开启任何剔除';
   }
 
   // ================= 策略库 =================
   var STG_KIND_CN = {declarative:'规则', score:'综合评分', multi_factor:'多因子'};
+  var STG_KINDS = {};          // kind -> {name, doc}（来自后端）
+  var STG_BY_NAME = {};        // name -> 完整策略对象（点「编辑」时回填）
 
   function renderStrategies(d){
+    STG_KINDS = d.kinds || STG_KINDS;
     var rows = d.user || [];
     $('stg-hint').textContent = '(' + rows.length + ' 条 · ' + (d.path||'') + ')';
+    STG_BY_NAME = {};
     if(!rows.length){
       $('stg-rows').innerHTML = '<tr><td colspan="5" class="muted">还没有自定义策略。' +
         '在下面选个类型填几个参数就能存一条。</td></tr>';
     }else{
       $('stg-rows').innerHTML = rows.map(function(s){
+        STG_BY_NAME[s.name] = s;
+        var kindDoc = (STG_KINDS[s.kind] && STG_KINDS[s.kind].doc) ?
+          '<div class="muted">' + esc(STG_KINDS[s.kind].doc) + '</div>' : '';
         return '<tr><td><b>' + esc(s.name) + '</b></td>' +
           '<td>' + esc(STG_KIND_CN[s.kind] || s.kind) + '</td>' +
-          '<td class="muted">' + esc(s.description||'') + '</td>' +
+          '<td class="muted">' + esc(s.description||'') + kindDoc + '</td>' +
           '<td><code>' + esc(JSON.stringify(s.spec).slice(0,70)) + '</code></td>' +
-          '<td><button class="mini danger" data-act="stg-del" data-name="' +
+          '<td class="acts">' +
+            '<button class="mini" data-act="stg-edit" data-name="' + esc(s.name) + '">编辑</button>' +
+            '<button class="mini danger" data-act="stg-del" data-name="' +
             esc(s.name) + '">删除</button></td></tr>';
       }).join('');
     }
     // 因子下拉候选：**按类别分组**的 optgroup，而不是一长串平铺的名字
     FACTOR_GROUPS = d.groups || [];
     buildFactorOptions();
+    buildMultiTable();
+    syncKindForm();
   }
 
   var FACTOR_GROUPS = [];
@@ -1529,6 +1829,145 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     $('s-form-rule').classList.toggle('hidden', k !== 'declarative');
     $('s-form-score').classList.toggle('hidden', k !== 'score');
     $('s-form-multi').classList.toggle('hidden', k !== 'multi_factor');
+    var meta = STG_KINDS[k];
+    $('s-kind-hint').textContent = meta ? (meta.name + '：' + (meta.doc||'')) : '';
+    if(k === 'multi_factor'){ buildMultiTable(); syncMultiMode(); }
+  }
+
+  // -------- 多因子：因子 + 权重 勾选表格 --------
+  function buildMultiTable(preset){
+    var box = $('s-multi-factors-box');
+    if(!box) return;
+    // 没传 preset 时，保留当前已勾选的因子与权重（切换类型再切回来不丢）
+    if(preset == null){
+      preset = {};
+      box.querySelectorAll('label.frow').forEach(function(lab){
+        if(lab.querySelector('.chk').checked){
+          preset[lab.querySelector('.chk').value] = Number(lab.querySelector('.w').value) || 1;
+        }
+      });
+    }
+    var html = '';
+    FACTOR_GROUPS.forEach(function(g){
+      if(!g.factors.length) return;
+      html += '<div class="ghead">' + esc(g.key) + '</div>';
+      g.factors.forEach(function(f){
+        var w = (f.name in preset) ? preset[f.name] : '';
+        var off = (f.has_data === false) ? ' off' : '';
+        var noData = (f.has_data === false) ? '（无数据）' : '';
+        html += '<label class="frow' + off + '" title="' + esc(f.description||'') + '">' +
+          '<input type="checkbox" class="chk" value="' + esc(f.name) + '"' +
+            (w !== '' ? ' checked' : '') + '>' +
+          '<span>' + esc(f.name) + '</span>' +
+          '<span class="muted" style="font-size:10px">' + noData + '</span>' +
+          '<span class="wbox"><input type="number" class="w" step="0.1" min="0" ' +
+            'value="' + (w === '' ? '1' : w) + '"></span>' +
+          '</label>';
+      });
+    });
+    box.innerHTML = html || '<p class="muted">没有可用因子。</p>';
+    // 勾选状态变化 → 切换权重框可见 / 同步隐藏 input
+    box.querySelectorAll('label.frow').forEach(function(lab){
+      var chk = lab.querySelector('.chk');
+      chk.addEventListener('change', syncMultiMode);
+    });
+    syncMultiMode();
+  }
+
+  function syncMultiMode(){
+    var custom = $('s-multi-mode').value === 'custom';
+    var box = $('s-multi-factors-box');
+    if(!box) return;
+    box.querySelectorAll('label.frow').forEach(function(lab){
+      // 自定义模式下**所有**因子行都显示权重框（未勾选的权重仅作占位，
+      // collectMultiFactors 只收集已勾选的）。等权模式全部隐藏。
+      lab.classList.toggle('custom', custom);
+    });
+  }
+
+  function collectMultiFactors(){
+    var out = [];
+    $('s-multi-factors-box').querySelectorAll('label.frow').forEach(function(lab){
+      var chk = lab.querySelector('.chk');
+      if(!chk.checked) return;
+      var name = chk.value;
+      var wEl = lab.querySelector('.w');
+      var w = (wEl && wEl.value !== '') ? Number(wEl.value) : 1.0;
+      if(!isFinite(w) || w < 0) w = 1.0;
+      out.push({name: name, weight: w});
+    });
+    $('s-multi-factors').value = JSON.stringify(out);
+    return out;
+  }
+
+  function checkAllMulti(on){
+    $('s-multi-factors-box').querySelectorAll('label.frow').forEach(function(lab){
+      lab.querySelector('.chk').checked = on;
+    });
+    syncMultiMode();
+  }
+
+  function normalizeMulti(){
+    var box = $('s-multi-factors-box');
+    var sum = 0;
+    box.querySelectorAll('label.frow').forEach(function(lab){
+      if(!lab.querySelector('.chk').checked) return;
+      var w = Number(lab.querySelector('.w').value) || 0;
+      sum += Math.abs(w);
+    });
+    if(sum <= 0){ toast('没有勾选的因子或权重全为0', true); return; }
+    box.querySelectorAll('label.frow').forEach(function(lab){
+      if(!lab.querySelector('.chk').checked) return;
+      var wEl = lab.querySelector('.w');
+      wEl.value = (Number(wEl.value) / sum).toFixed(3);
+    });
+    toast('已按权重归一化（合计=1）');
+  }
+
+  function editStrategy(name){
+    var s = STG_BY_NAME[name];
+    if(!s) return;
+    $('s-name').value = s.name;
+    $('s-desc').value = s.description || '';
+    $('s-kind').value = s.kind;
+    syncKindForm();
+    var spec = s.spec || {};
+    if(s.kind === 'score'){
+      $('s-entry-score').value = spec.entry_score != null ? spec.entry_score : 70;
+      $('s-exit-score').value = spec.exit_score != null ? spec.exit_score : 55;
+    } else if(s.kind === 'multi_factor'){
+      $('s-multi-entry').value = spec.entry != null ? spec.entry : 0.55;
+      $('s-multi-exit').value = spec.exit != null ? spec.exit : -0.3;
+      var preset = {};
+      (spec.factors || []).forEach(function(f){
+        if(typeof f === 'string') preset[f] = 1.0;
+        else if(f && f.name) preset[f.name] = (f.weight != null ? f.weight : 1.0);
+      });
+      $('s-multi-mode').value = Object.keys(preset).length ? 'custom' : 'equal';
+      buildMultiTable(preset);
+    } else {
+      // declarative：还原入场/出场规则
+      fillRules('s-in-rules', spec.entry);
+      fillRules('s-out-rules', spec.exit);
+    }
+    $('stg-edit-tip').textContent = '正在编辑：' + name;
+    $('page-strategy').scrollIntoView();
+    toast('已载入策略 ' + name + ' 到上方表单');
+  }
+
+  function fillRules(boxId, node){
+    var box = $(boxId);
+    if(!box) return;
+    box.innerHTML = '';
+    if(!node || node === 'never') return;
+    // 组合节点 {combine:[...]} 或单条 {factor,op,value}
+    if(node.combine && Array.isArray(node.rules)){
+      if(boxId === 's-in-rules') $('s-in-combine').value = node.combine;
+      else $('s-out-combine').value = node.combine;
+      node.rules.forEach(function(r){ addRuleRow(boxId, r); });
+    } else {
+      addRuleRow(boxId, node);
+    }
   }
 
   function currentSpec(){
@@ -1538,9 +1977,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               exit_score: Number($('s-exit-score').value)};
     }
     if(k === 'multi_factor'){
-      var raw = $('s-multi-factors').value.trim();
-      var facs = [];
-      if(raw){ try{ facs = JSON.parse(raw); }catch(e){ return null; } }
+      var facs = collectMultiFactors();
+      if(facs === null){ return null; }
       return {factors: facs,
               entry: Number($('s-multi-entry').value),
               exit: Number($('s-multi-exit').value)};
@@ -1828,7 +2266,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     api('/api/pool/score/' + encodeURIComponent(sym)).then(function(d){
       if(!d || d.ok === false){ toast((d && d.error) || '加载失败', true); return; }
       $('pool-detail').classList.remove('hidden');
-      $('pool-d-title').textContent = d.symbol + ' 评分明细';
+      $('pool-d-title').textContent = d.symbol + (d.name ? (' ' + d.name) : '') + ' 评分明细';
       $('pool-d-hint').textContent = (d.date || '') + ' · ' +
         (d.total == null ? '无法评分' : (d.total + ' 分（' + d.grade + '）'));
       var kv = [];
@@ -1849,9 +2287,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
 
   // ==================== 回测页面 ====================
-  function loadStrategies(){
+  function loadBtStrategies(){
     // 从后端能力清单取，不硬编码 —— 否则新增策略后下拉框里看不到，
     // 用户手填又会遇到"未注册的策略"。
+    // 注意：本函数只服务「回测」页的 bt-strategy 下拉，千万别再叫
+    // loadStrategies —— 那个名字被策略库页的加载器占用了，同名会互相覆盖。
     api('/api/strategies').then(function(d){
       CAPS = d || {};
       var sel = $('bt-strategy');
@@ -1999,6 +2439,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     if(btTimer){ clearInterval(btTimer); btTimer = null; }
     if(page === 'backtest'){
       loadBacktest();
+      loadBtStrategies();   // 填充 bt-strategy 下拉（能力清单 / 默认参数）
       // 回测页 3 秒刷一次足够：作业是分钟级的
       btTimer = setInterval(loadBacktest, 3000);
     }
@@ -2024,6 +2465,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
     if(el.id === 'bt-strategy'){ toggleSpecBox(); return; }
     if(el.id === 's-kind'){ syncKindForm(); return; }
+    if(el.id === 'pool-source'){ loadPool(); return; }
+    if(el.id === 's-multi-mode'){ syncMultiMode(); return; }
     if(!el.classList || !el.classList.contains('ci')) return;
     var sym = el.getAttribute('data-sym'), per = el.getAttribute('data-per');
     var val = el.value.trim();
@@ -2041,11 +2484,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       .then(function(d){ drawChart($('d-chart'), d.equity_curve||[]); }).catch(function(){}); }
   });
 
-  refresh(); loadLogs(); loadCollector(); loadLive(); loadStrategies();
+  refresh(); loadLogs(); loadCollector(); loadGuard(); loadLive();
+  loadStrategies(); loadBtStrategies();
   $('bt-end').value = new Date().toISOString().slice(0,10);
   timer = setInterval(refresh, REFRESH);
   setInterval(loadLogs, 5000);
   setInterval(loadCollector, 5000);
+  // 体检一小时才跑一次，页面按 5s 刷纯属浪费请求；30s 足够跟上手动触发
+  setInterval(loadGuard, 30000);
 })();
 </script>
 </body>

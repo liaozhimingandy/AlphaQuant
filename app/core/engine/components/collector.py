@@ -262,22 +262,38 @@ class DataCollectorComponent(IBaseComponent):
         n = self._run_counts.get(key, 0) + 1
         self._run_counts[key] = n
 
+        # 先筛出本轮真正要跑的任务：被"非交易时段"跳过的不算任务，
+        # 否则进度条会显示 3/10 然后卡住不动（那 7 个压根没打算跑）。
+        todo: List[CollectJob] = []
         for job in jobs:
             if not self.spec.should_run(job):
                 self.stats["out_of_session"] += 1
                 continue
-            self.stats["runs"] += 1
-            try:
-                rows = self._collect_one(job)
-            except DataFetchError as exc:
-                self._record_failure(job, exc)
-            except Exception as exc:
-                logger.error(f"采集 {job.key} 异常: {exc}", exc_info=True)
-                self._record_failure(job, exc)
-            else:
-                self._record_success(job, rows)
-                if job.keep_days > 0 and n % _RETENTION_EVERY_N_RUNS == 0:
-                    self._evict(job)
+            todo.append(job)
+        if not todo:
+            return
+
+        self.start_progress(len(todo),
+                            f"{humanize_frequency(key)} · {len(todo)} 个采集任务")
+        try:
+            for job in todo:
+                self.stats["runs"] += 1
+                try:
+                    rows = self._collect_one(job)
+                except DataFetchError as exc:
+                    self._record_failure(job, exc)
+                    self.advance_progress(1, failed=True)
+                except Exception as exc:
+                    logger.error(f"采集 {job.key} 异常: {exc}", exc_info=True)
+                    self._record_failure(job, exc)
+                    self.advance_progress(1, failed=True)
+                else:
+                    self._record_success(job, rows)
+                    self.advance_progress(1)
+                    if job.keep_days > 0 and n % _RETENTION_EVERY_N_RUNS == 0:
+                        self._evict(job)
+        finally:
+            self.finish_progress()
 
     def _collect_one(self, job: CollectJob) -> int:
         from app.data.service import MarketDataService

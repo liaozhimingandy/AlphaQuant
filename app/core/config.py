@@ -89,6 +89,30 @@ class Settings:
     DATA_FETCH_MAX_RETRY: int = _env_int("DATA_FETCH_MAX_RETRY", 3)
     # 两次请求之间的最小间隔（秒），防止被数据源限流封 IP
     DATA_FETCH_MIN_INTERVAL: float = _env_float("DATA_FETCH_MIN_INTERVAL", 0.3)
+    # 数据源初始权重覆盖，JSON 对象，例如 '{"mootdx":0.5,"tushare":2}'。
+    # 不配就是全部 1（顺序完全由 DATA_SOURCE_PRIORITY 决定）；
+    # 运行时会根据成败自动调整，并落盘到 data/source_weights.json。
+    DATA_SOURCE_WEIGHTS: str = os.getenv("DATA_SOURCE_WEIGHTS", "")
+
+    # ---------------- 数据校验服务（启动后体检 + 自动补全）----------------
+    # 为什么要单开一个组件：库里缺一根K线，回测不会报错，只会**悄悄少一段行情**，
+    # 策略信号因此漂移，而这种错根本没人会去查 SQL。
+    DATA_GUARD_ENABLED: bool = _env_bool("DATA_GUARD_ENABLED", True)
+    #: 组件启动后延迟多少秒跑首次体检。给采集服务留出首批入库时间，
+    #: 也避免几个组件在启动瞬间同时打数据源。
+    DATA_GUARD_START_DELAY: float = _env_float("DATA_GUARD_START_DELAY", 20.0)
+    #: 体检周期（秒）。日线一天才变一次，一小时一次足够。
+    DATA_GUARD_INTERVAL: float = _env_float("DATA_GUARD_INTERVAL", 3600.0)
+    #: 每只标的回溯多少天找缺口。太大没意义（老缺口补不回来），太小查不出问题。
+    DATA_GUARD_LOOKBACK_DAYS: int = _env_int("DATA_GUARD_LOOKBACK_DAYS", 120)
+    #: 是否自动补采（关掉 = 只体检不修，先看报告再决定）
+    DATA_GUARD_AUTO_REPAIR: bool = _env_bool("DATA_GUARD_AUTO_REPAIR", True)
+    #: 单次体检最多查多少只标的（防止 5000 只全表扫描把启动卡住）
+    DATA_GUARD_MAX_SYMBOLS: int = _env_int("DATA_GUARD_MAX_SYMBOLS", 50)
+    #: 单次体检最多补多少只（控制联网请求量）
+    DATA_GUARD_MAX_REPAIR: int = _env_int("DATA_GUARD_MAX_REPAIR", 20)
+    #: 校验哪些数据表。逗号分隔，可选: daily / fund_flow / chip
+    DATA_GUARD_CHECKS: str = os.getenv("DATA_GUARD_CHECKS", "daily,fund_flow,chip")
 
     # ---------------- 回测默认值 ----------------
     DEFAULT_CASH: float = _env_float("DEFAULT_CASH", 100000.0)
@@ -261,6 +285,14 @@ class Settings:
     # 默认使用哪个接入点（留空则用 brokers.json 里 default_endpoint 指定的那个）
     BROKER_ENDPOINT: str = os.getenv("BROKER_ENDPOINT", "")
 
+    # ---------------- 数据源编排（Provider / Capability / Router）----------------
+    # 谁启用、优先级多少、每种能力按什么顺序尝试、重试与熔断参数 —— 全在这个文件里。
+    # 运行时实测健康分占 70%、这里配置的优先级占 30%，顺序会自动向"当前真能用的源"收敛。
+    # 删掉文件或写错格式都只退化成内置默认值，不会让取数链起不来。
+    PROVIDERS_CONFIG: str = os.getenv(
+        "PROVIDERS_CONFIG", (BASE_DIR / "config" / "providers.json").as_posix()
+    )
+
     @classmethod
     def collector_symbol_list(cls) -> list[str]:
         return [s.strip() for s in cls.COLLECTOR_SYMBOLS.split(",") if s.strip()]
@@ -268,6 +300,36 @@ class Settings:
     @classmethod
     def priority_list(cls) -> list[str]:
         return [s.strip() for s in cls.DATA_SOURCE_PRIORITY.split(",") if s.strip()]
+
+    @classmethod
+    def data_source_weights(cls) -> dict[str, float]:
+        """数据源初始权重覆盖（``DATA_SOURCE_WEIGHTS``）。
+
+        解析失败返回空 dict —— 配置写错不该让整个取数链起不来，
+        退化成"全部权重 1"即可。
+        """
+        raw = (cls.DATA_SOURCE_WEIGHTS or "").strip()
+        if not raw:
+            return {}
+        try:
+            import json
+
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, float] = {}
+        for key, value in parsed.items():
+            try:
+                out[str(key).strip()] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    @classmethod
+    def data_guard_check_list(cls) -> list[str]:
+        return [s.strip() for s in cls.DATA_GUARD_CHECKS.split(",") if s.strip()]
 
     @classmethod
     def symbol_list(cls) -> list[str]:

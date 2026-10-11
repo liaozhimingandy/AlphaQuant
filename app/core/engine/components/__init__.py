@@ -14,9 +14,11 @@ from .collector import DataCollectorComponent, parse_interval
 from .trading_store import TradingStoreComponent
 from .live_gateway import LiveGatewayComponent
 from .extdata import ExtDataComponent
+from .dataguard import DataGuardComponent
 
 __all__ = [
     "IBaseComponent",
+    "DataGuardComponent",
     "TimerComponent",
     "MarketCenterComponent",
     "df_to_bars",

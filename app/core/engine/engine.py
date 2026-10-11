@@ -408,6 +408,13 @@ class BaseQuantEngine(IQuantEngine):
                     entry["snapshot"] = json_safe(snap_fn())
                 except Exception as exc:
                     entry["snapshot_error"] = str(exc)
+            # 任务进度（"已完成 / 全部"）：没有跑过任务的组件 total=0，面板据此不显示进度条
+            prog_fn = getattr(comp, "progress", None)
+            if callable(prog_fn):
+                try:
+                    entry["progress"] = prog_fn()
+                except Exception as exc:  # pragma: no cover - 防御
+                    entry["progress"] = {"total": 0, "error": str(exc)}
             components[name] = entry
 
         try:

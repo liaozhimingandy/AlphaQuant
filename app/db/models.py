@@ -501,6 +501,69 @@ class StockScore(Base):
     )
 
 
+class StockHotRank(Base):
+    """人气榜快照（日频）。
+
+    人气榜/资金流排名是**实时榜单**，之前每次选择候选池都要现场联网拉，
+    代理一抽风就整页 0 条、且拉到的数据不落库、下次还得再拉。
+    这里按 (date, symbol) 落库，刷新时先读库、库空再联网补拉，
+    从而让"未开盘/代理间歇失败"时仍能拿到上一次的榜单。
+    """
+
+    __tablename__ = "stock_hot_rank"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, nullable=False)
+    symbol = Column(String(20), index=True, nullable=False)
+    name = Column(String(64))
+    rank = Column(Integer)
+    pct_change = Column(Float)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("date", "symbol", name="uk_hot_date_symbol"),
+    )
+
+
+class StockFlowRank(Base):
+    """资金流排名快照（日频，按主力净流入排序）。
+
+    见 :class:`StockHotRank` 的说明：同样是为了"落库兜底"，
+    让资金榜候选池在代理间歇失败时也能读到历史榜单。
+    """
+
+    __tablename__ = "stock_flow_rank"
+
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, index=True, nullable=False)
+    symbol = Column(String(20), index=True, nullable=False)
+    name = Column(String(64))
+    pct_change = Column(Float)
+    main_net = Column(Float)
+    main_net_pct = Column(Float)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("date", "symbol", name="uk_flow_date_symbol"),
+    )
+
+
+class StockInfo(Base):
+    """标的名称对照表（symbol -> name）。
+
+    评分结果只存代码不存名称，"600042 是哪只票"根本看不出来。
+    这里集中维护一份代码↔名称对照：全市场快照（``stock_zh_a_spot_em``）
+    一次就能把全部 A 股名称灌进来，候选池同步时顺手也补。读取评分时
+    按代码查名称回填，查不到就是"未知"（多半是脏数据/退市/幻想代码）。
+    """
+
+    __tablename__ = "stock_info"
+
+    symbol = Column(String(20), primary_key=True)
+    name = Column(String(64))
+    updated_at = Column(DateTime)
+
+
 class StockFactorValue(Base):
     """通用因子值（个股 × 日期 × 类别 × 指标名）。
 

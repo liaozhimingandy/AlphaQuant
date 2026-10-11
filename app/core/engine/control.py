@@ -8,6 +8,7 @@
 # -------------------------------------------------------------------------------
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
@@ -234,6 +235,12 @@ class ControlCenter:
             except Exception as exc:
                 entry["healthy"] = None
                 entry["health_detail"] = str(exc)
+            prog_fn = getattr(comp, "progress", None)
+            if callable(prog_fn):
+                try:
+                    entry["progress"] = prog_fn()
+                except Exception as exc:  # pragma: no cover - 防御
+                    entry["progress"] = {"total": 0, "error": str(exc)}
             out.append(entry)
         return out
 
@@ -394,6 +401,93 @@ class ControlCenter:
             return {"ok": not errors, **result}
 
         d = comp.collect_now(symbol)
+        d.addCallback(_ok)
+        return d
+
+    # ============================================================
+    # 数据校验服务
+    # ============================================================
+    #: 数据校验组件名。与 :class:`DataGuardComponent.name` 一致
+    GUARD_COMPONENT = "data_guard"
+
+    def _guard(self):
+        return self.engine.get_component(self.GUARD_COMPONENT)
+
+    def data_guard_status(self) -> Dict[str, Any]:
+        """数据校验服务概览：最近一次体检报告 + 累计统计。"""
+        comp = self._guard()
+        if comp is None:
+            return {"available": False, "reason": "本引擎未装配数据校验服务"}
+        out = {"available": True}
+        out.update(json_safe(comp.snapshot()))
+        return out
+
+    def data_guard_check(self, symbol: str = "", wait: bool = False,
+                         auto_repair: Optional[bool] = None) -> Dict[str, Any]:
+        """立刻体检一次（可自动补全）。
+
+        :param wait: True=同步等待（CLI 用）；False=后台跑，结果去 API 看
+        :param auto_repair: 覆盖组件配置。None=跟随组件（默认开）
+        """
+        comp = self._guard()
+        if comp is None:
+            return {"ok": False, "error": "本引擎未装配数据校验服务"}
+        syms = [s.strip() for s in symbol.split(",") if s.strip()] or None
+
+        def _ok(result: Dict[str, Any]) -> Dict[str, Any]:
+            self._audit("data_guard_check", {
+                "symbol": symbol or "*",
+                "missing": result.get("missing_total", 0),
+                "repaired": result.get("repaired_total", 0),
+            })
+            return {"ok": True, **result}
+
+        if wait:
+            d = comp.check_now(syms, auto_repair=auto_repair)
+            box: Dict[str, Any] = {}
+
+            def _capture(value):
+                box.update(value)
+                return value
+
+            d.addCallback(_capture)
+            # CLI 是同步上下文：这里只能等。校验本来就慢，
+            # 用户是明确点了"立刻体检"，等是有预期的。
+            deadline = time.time() + 300.0
+            while not box and time.time() < deadline:
+                time.sleep(0.05)
+            if not box:
+                return {"ok": False, "error": "体检超时（300s）"}
+            return _ok(box)
+
+        d = comp.check_now(syms, auto_repair=auto_repair)
+        d.addCallback(_ok)
+        d.addErrback(lambda f: {"ok": False, "error": str(
+            f.getErrorMessage() if hasattr(f, "getErrorMessage") else f)})
+        return {
+            "ok": True, "accepted": True,
+            "note": "已在后台体检，结果见 /api/dataguard",
+        }
+
+    def data_guard_check_async(self, symbol: str = "",
+                               auto_repair: Optional[bool] = None):
+        """异步版体检，返回 Deferred —— 面板路由用它等真实结果。"""
+        from twisted.internet import defer
+
+        comp = self._guard()
+        if comp is None:
+            return defer.succeed({"ok": False, "error": "本引擎未装配数据校验服务"})
+        syms = [s.strip() for s in symbol.split(",") if s.strip()] or None
+        d = comp.check_now(syms, auto_repair=auto_repair)
+
+        def _ok(result):
+            self._audit("data_guard_check", {
+                "symbol": symbol or "*",
+                "missing": result.get("missing_total", 0),
+                "repaired": result.get("repaired_total", 0),
+            })
+            return {"ok": True, **result}
+
         d.addCallback(_ok)
         return d
 

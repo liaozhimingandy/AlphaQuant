@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.engine.component import TaskSchedulerComponent
 from app.core.engine.components import (
     DataCollectorComponent,
+    DataGuardComponent,
     ExtDataComponent,
     LiveGatewayComponent,
     MarketCenterComponent,
@@ -137,6 +138,8 @@ def build_engine(
     with_ext_data: Optional[bool] = None,
     ext_symbols: Optional[List[str]] = None,
     ext_interval: Optional[float] = None,
+    with_data_guard: Optional[bool] = None,
+    data_guard_symbols: Optional[List[str]] = None,
     snapshot_enabled: Optional[bool] = None,
     snapshot_mode: str = "",
     snapshot_min_gap: Optional[float] = None,
@@ -205,6 +208,29 @@ def build_engine(
     )
     engine.register_component(collector)
     enable_collector = collector_enabled
+
+    # 1.2) 数据校验服务（体检 + 缺口自动补全）
+    #      放在采集服务**之后**注册，于是它后启动、先停止。
+    #      为什么要后启动：首检延后 20 秒，是留给采集服务把当天数据喂进库的。
+    #      如果校验先跑，会把"还没来得及采"误判成"缺数据"，
+    #      然后急吼吼去联网补一轮本马上就要采到的数据。
+    #
+    #      纯回测（BACKTEST）默认不启用：回测读的是历史库，今天缺不缺跟它无关，
+    #      而且回测跑完就自动停，体检往往还没开始就被杀了。
+    guard_enabled = settings.DATA_GUARD_ENABLED and run_mode != RunMode.BACKTEST
+    if with_data_guard is not None:
+        guard_enabled = bool(with_data_guard)
+    guard_component = DataGuardComponent(
+        symbols=list(data_guard_symbols or settings.collector_symbol_list() or syms),
+        enabled=guard_enabled,
+        disabled_reason=(
+            "回测模式只读历史数据，不做完整性补全"
+            if run_mode == RunMode.BACKTEST
+            else ("数据校验服务已被显式关闭（--no-data-guard / "
+                  "DATA_GUARD_ENABLED=false）" if not guard_enabled else "")
+        ),
+    )
+    engine.register_component(guard_component)
 
     # 1.5) 扩展行情采集（资金流 / 筹码 / 涨停池 / 题材）
     #      和上面的 K 线采集是两类数据：那是逐根K线的量价，这是日频截面。
@@ -332,6 +358,14 @@ def build_engine(
             f"{ext_component.interval:.0f}s)"
             if ext_component.enabled else " | 扩展数据=关"
         )
+    guard_desc = ""
+    if guard_component is not None:
+        guard_desc = (
+            f" | 数据校验={'开' if guard_enabled else '关'}"
+            + (f"({guard_component.start_delay:.0f}s后首检，每"
+               f"{guard_component.interval:.0f}s)"
+               if guard_enabled else "")
+        )
     monitor_desc = ""
     if enable_monitor:
         mmode = (snapshot_mode or settings.MONITOR_SNAPSHOT_MODE).lower()
@@ -353,6 +387,7 @@ def build_engine(
         + monitor_desc
         + collector_desc
         + ext_desc
+        + guard_desc
         + store_desc
     )
     return engine

@@ -294,3 +294,94 @@ class TestDeclarativeSpec(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUserStrategyStore(TempWorkspaceMixin, unittest.TestCase):
+    """策略库：多因子权重 + 三种类型 to_task_strategy 转换。
+
+    对应面板「策略库」的修复：之前 factors 只能手写 JSON 数组，
+    现在改为可勾选 + 填权重的分组表格，spec.factors 是
+    [{"name": ..., "weight": ...}] 列表。这里验证它能正确落库与转换。
+    """
+
+    def _store(self) -> "StrategyStore":
+        from app.core.strategy.store import StrategyStore
+
+        s = StrategyStore(str(self.workdir() / "config" / "strategies.json"))
+        s.load(force=True)
+        return s
+
+    def test_multi_factor_weights_roundtrip(self):
+        from app.core.strategy.store import KIND_MULTI
+
+        store = self._store()
+        ok, msg, s = store.add(
+            name="my_multi", kind=KIND_MULTI,
+            spec={
+                "factors": [
+                    {"name": "mom_20", "weight": 2.0},
+                    {"name": "vol_ratio", "weight": 0.5},
+                ],
+                "entry": 0.55, "exit": -0.3,
+            },
+            description="动量+量能",
+        )
+        self.assertTrue(ok, msg)
+
+        # 重新加载，确认落盘后权重不被吞
+        store2 = self._store()
+        loaded = store2.get("my_multi")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.kind, KIND_MULTI)
+        self.assertEqual(
+            loaded.spec["factors"],
+            [{"name": "mom_20", "weight": 2.0},
+             {"name": "vol_ratio", "weight": 0.5}],
+        )
+
+        ts = loaded.to_task_strategy()
+        self.assertEqual(ts["type"], "multi_factor")
+        self.assertEqual(ts["params"]["entry"], 0.55)
+        self.assertEqual(ts["params"]["exit"], -0.3)
+        self.assertEqual(
+            ts["params"]["factors"],
+            [{"name": "mom_20", "weight": 2.0},
+             {"name": "vol_ratio", "weight": 0.5}],
+        )
+
+    def test_multi_factor_empty_factors_ok(self):
+        """不勾选任何因子 = 用因子库全部启用因子（等权）。"""
+        from app.core.strategy.store import KIND_MULTI
+
+        store = self._store()
+        ok, _, s = store.add(
+            name="all_eq", kind=KIND_MULTI,
+            spec={"factors": [], "entry": 0.55, "exit": -0.3},
+        )
+        self.assertTrue(ok)
+        ts = s.to_task_strategy()
+        self.assertEqual(ts["params"]["factors"], [])
+
+    def test_score_and_rule_to_task(self):
+        from app.core.strategy.store import KIND_SCORE, KIND_RULE
+
+        store = self._store()
+        ok, _, sc = store.add("sc", KIND_SCORE, {"entry_score": 72, "exit_score": 50})
+        self.assertTrue(ok)
+        self.assertEqual(sc.to_task_strategy()["params"]["entry_score"], 72)
+
+        ok, _, ru = store.add("ru", KIND_RULE, {
+            "entry": {"factor": "mom_20", "op": "gt", "value": 3},
+        })
+        self.assertTrue(ok)
+        self.assertEqual(ru.to_task_strategy()["type"], "declarative")
+
+    def test_exit_must_be_below_entry(self):
+        from app.core.strategy.store import KIND_MULTI
+
+        store = self._store()
+        ok, msg, _ = store.add("bad", KIND_MULTI,
+                               {"factors": [], "entry": 0.1, "exit": 0.5})
+        self.assertFalse(ok)
+        self.assertIn("exit", msg.lower())
+

@@ -561,6 +561,40 @@ python main.py ctl collector reload              # 改了 json 后热加载
 
 > 分钟线依赖 akshare 的东方财富接口。若你的网络访问不了，日线（baostock）照常可用。
 
+### 采集层是怎么组织的（Provider / Capability / Router）
+
+数据源换过很多轮，每次都改因子是不可接受的。所以采集层按
+**能力（Capability）+ 数据源（Provider）+ 路由（Router）+ 标准模型（Canonical）** 拆开：
+
+```
+因子/策略 ──▶ DataService ──▶ DataRouter ──▶ Provider(akshare/baostock/东财/雪球/腾讯/通达信)
+                                  │                        │
+                          能力匹配→排序→熔断→校验       Adapter：外部格式 → 标准模型
+                                                            │
+                                                    RAW（原始响应存档，可审计/重放）
+```
+
+- **按能力而不是按源设计**：mootdx 没有人气榜不是缺陷，是它没声明 `HOT_RANK`，
+  路由压根不会调它（`NOT_SUPPORTED`，不是失败）。
+- **熔断是能力级的**：akshare 的日线被拦 ≠ 它的人气榜不能用，
+  熔断键是 `(provider, capability, route)`。
+- **失败要分类**：限流/被封/超时要冷却重试，"这只票没数据"是中性事件（不惩罚源），
+  "接口改版"不重试直接换源。
+- **取到了不代表取对了**：过一遍质量校验（high ≥ max(open,close) 等），
+  不通过按 `QUALITY_ERROR` 换下一个源。
+- **标准模型 + 血缘**：`Kline` 带 `source/provider/fetched_at/raw_id`，
+  一路能追回"这个价格是哪次请求、哪个源给的"。
+- **顺序可配置**：`config/providers.json` 声明每种能力按什么顺序试；
+  运行时按 `0.7×实测健康分 + 0.3×配置优先级` 自动向"当前真能用的源"收敛。
+
+```bash
+python main.py providers                  # 路由 / 能力 / 健康分 / 熔断状态
+python main.py providers --probe          # 逐条路由实打一次，一眼看出是谁挂了
+python main.py providers --capability hot_rank
+```
+
+详见 [docs/DATA_FABRIC.md](docs/DATA_FABRIC.md)。
+
 ## 周均线体系
 
 `python main.py factors` 里可以看到这一组：

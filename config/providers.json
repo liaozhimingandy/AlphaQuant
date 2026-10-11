@@ -1,0 +1,60 @@
+{
+  "_comment": "数据源编排。providers = 数据源身份的开关与优先级(0~100)；routes = 每种能力按什么顺序尝试；router = 重试/熔断/质量校验参数。运行时实测健康分占 70%、这里配置的优先级占 30%，所以顺序会自动向'当前真能用的源'收敛。想全部恢复默认，删掉本文件即可。",
+  "providers": {
+    "baostock": {
+      "enabled": true,
+      "priority": 90,
+      "_note": "自有服务器、无需 token，日线最稳 —— 但如果它慢，健康分会自动把它排到后面"
+    },
+    "akshare": {
+      "enabled": true,
+      "priority": 80,
+      "_note": "能力最多；底层多为东财接口，被限流时会自动降分"
+    },
+    "eastmoney": {
+      "enabled": true,
+      "priority": 100,
+      "_note": "人气榜走 emappdata 域名（实测不受 push2 被拦影响），所以排第一"
+    },
+    "xueqiu": {
+      "enabled": true,
+      "priority": 70,
+      "_note": "与东财不同风控面，东财被拦时的人气榜备份"
+    },
+    "astockdata": {
+      "enabled": true,
+      "priority": 60,
+      "_note": "腾讯日线（web.ifzq.gtimg.cn），无成交额列"
+    },
+    "mootdx": {
+      "enabled": true,
+      "priority": 55,
+      "_note": "通达信：TCP/本地文件，可完全离线；只给不复权"
+    },
+    "tushare": {
+      "enabled": true,
+      "priority": 50,
+      "_note": "需 TUSHARE_TOKEN；没 token 会按'无数据'跳过，不降分"
+    },
+    "local": {
+      "enabled": true,
+      "priority": 10,
+      "_note": "本地库兜底，恒排最后且只在其它源全挂后才尝试"
+    }
+  },
+  "routes": {
+    "daily_kline": ["baostock_daily", "akshare_daily", "astockdata", "mootdx"],
+    "hot_rank": ["emapp_hot", "xueqiu_hot", "akshare_em", "akshare_spot"],
+    "flow_rank": ["akshare_flow"],
+    "fund_flow": ["akshare", "tushare"]
+  },
+  "router": {
+    "retries": 3,
+    "backoff_base": 0.5,
+    "circuit_threshold": 3,
+    "cooldown": 300.0,
+    "quality_check": true,
+    "raw_enabled": true,
+    "raw_max_rows": 200
+  }
+}

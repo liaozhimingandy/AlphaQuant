@@ -11,16 +11,18 @@
     "sync_fundamental  刷新时是否同步基本面（季频数据，每只票 2 次请求；",
     "                  候选池很大时设 false 会快很多）"
   ],
-
   "source": "limitup",
   "limit": 30,
   "sync": true,
   "sync_fundamental": true,
   "theme_top": 10,
   "min_score": null,
-
   "watch": [
     "000001",
     "600519"
-  ]
+  ],
+  "exclude_st": false,
+  "exclude_cyb": false,
+  "exclude_kcb": false,
+  "exclude_bj": false
 }
