@@ -651,13 +651,21 @@ def ctl_runtime_pools(port) -> None:
     if not data.get("ok"):
         click.secho(f"❌ {data.get('error')}", fg="red")
         return
+    # 能力声明在**路由表**里，不在池快照里（池只管槽位，不管资格）。
+    # 之前直接读 p['task_types'] 永远读不到，于是这一栏一直是空的。
+    caps = {}
+    for row in ((data.get("router") or {}).get("pools") or []):
+        caps[row.get("pool", "")] = row.get("task_types") or []
     for p in (data.get("pools") or {}).get("pools") or []:
         click.secho(
             f"{p.get('pool','')}（{p.get('label','')}）队列={p.get('queue','')} "
             f"并发={p.get('capacity')} 在跑={p.get('inflight')}",
             fg="cyan",
         )
-        for t in p.get("task_types") or []:
+        types = caps.get(p.get("pool", "")) or []
+        if not types:
+            click.echo("    · （该池未声明任何任务类型）")
+        for t in types:
             click.echo(f"    · {t}")
 
 
@@ -745,6 +753,120 @@ def ctl_runtime_rule(action, name, port) -> None:
             click.echo(f"可选规则: {', '.join(data['known'])}")
         return
     click.secho(f"✅ 规则 {name} 已{'启用' if action == 'on' else '停用'}", fg="green")
+
+
+@ctl_runtime_group.command(name="dead-clear", help="清空死信（运维处理完这批之后用）")
+@_ctl_port
+def ctl_runtime_dead_clear(port) -> None:
+    data = _api(port, "/api/runtime/dead/clear", {})
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    click.secho(f"✅ 已清空 {data.get('cleared', 0)} 条死信", fg="green")
+
+
+@ctl_runtime_group.command(name="maint", help="维护计划：日志清理 / 归档 / 定期校验")
+@_ctl_port
+def ctl_runtime_maint(port) -> None:
+    data = _api(port, "/api/maintenance")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    click.secho(
+        f"维护计划 {data.get('enabled', 0)}/{data.get('total', 0)} 启用 | "
+        f"检查节拍 {data.get('tick_seconds')}s | 配置 {data.get('config_path')}",
+        fg="cyan", bold=True,
+    )
+    for j in data.get("jobs") or []:
+        flag = "✅" if j.get("enabled") else "⏸ "
+        when = (f"每天 {j.get('at')}") if j.get("schedule") == "daily" \
+            else f"每 {j.get('interval_sec')}s"
+        click.echo(
+            f"{flag} {j.get('name',''):<12}{when:<16}"
+            f"下次 {j.get('next_run_iso') or '未启用':<21}"
+            f"已跑 {j.get('runs', 0)} 次"
+        )
+        if j.get("params"):
+            click.echo(f"     参数 {j['params']}")
+
+
+@ctl_runtime_group.command(name="maint-run", help="立刻执行一次维护任务（不看周期与开关）")
+@click.argument("name")
+@_ctl_port
+def ctl_runtime_maint_run(name, port) -> None:
+    data = _api(port, "/api/maintenance/run", {"name": name})
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        if data.get("known"):
+            click.echo(f"可选: {', '.join(data['known'])}")
+        return
+    click.secho(
+        f"✅ 已触发 {data.get('job')} → {data.get('task_type')}（走规则表建任务，非直接执行）",
+        fg="green",
+    )
+
+
+# ============================== 日志 ==============================
+@ctl_group.group(name="log", help="日志：运行时查看与切换级别")
+def ctl_log_group() -> None:
+    """日志级别**不用重启服务**就能改。
+
+    排查线上问题时最尴尬的是"想看 DEBUG 就得重启，而重启正好把
+    要排查的那个状态冲掉"。
+    """
+
+
+@ctl_log_group.command(name="show", help="当前生效的日志配置")
+@_ctl_port
+def ctl_log_show(port) -> None:
+    data = _api(port, "/api/logging")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    click.secho(
+        f"控制台 {data.get('console')} | 文件 {data.get('file')} | "
+        f"节流窗口 {data.get('throttle_window')}s",
+        fg="cyan", bold=True,
+    )
+    click.echo(
+        f"目录 {data.get('dir')} | 保留 {data.get('retention')} | "
+        f"轮转 {data.get('rotation')}"
+    )
+    th = data.get("throttled") or {}
+    click.echo(
+        f"节流条目 {th.get('buckets', 0)} 个，已压缩 {th.get('pending', 0)} 次"
+        + (" | 已有持久化配置" if data.get("persisted") else " | 来自环境变量/默认值")
+    )
+
+
+@ctl_log_group.command(name="level", help="切换日志级别（不用重启）")
+@click.argument("level", type=click.Choice(
+    ["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
+    case_sensitive=False))
+@click.option("--file", "file_level", default=None,
+              help="文件级别；省略表示跟随控制台，--file '' 也表示跟随")
+@click.option("--window", "window", default=None, type=float,
+              help="重复日志节流窗口（秒）")
+@click.option("--no-persist", is_flag=True, help="只本次生效，不写入配置")
+@_ctl_port
+def ctl_log_level(level, file_level, window, no_persist, port) -> None:
+    body = {
+        "console": level.upper(),
+        "throttle_window": window,
+        "persist": not no_persist,
+    }
+    if file_level is not None:
+        body["file"] = file_level
+    data = _api(port, "/api/logging/level", body)
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    click.secho(
+        f"✅ 控制台={data.get('console')} 文件={data.get('file')} "
+        f"节流={data.get('throttle_window')}s"
+        + ("" if no_persist else "（已持久化，重启仍生效）"),
+        fg="green",
+    )
 
 
 # ============================== 远程控制 ==============================

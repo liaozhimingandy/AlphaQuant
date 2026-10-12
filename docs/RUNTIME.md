@@ -218,11 +218,29 @@ start_timer(interval, event_name, timer_id)     scheduler.py:661
 
 > 定时器只负责**发事件**，发完就完事；事件变成什么任务由规则表决定。
 > 所以改"某个定时该干什么"请改 `scheduling/defaults.py` 的规则，不要改定时器。
->
-> 现在规则表里已经有 `system.maintenance.due → 日志清理 + 快照归档` 两条规则，
-> 但**还没有任何定时器发这个事件**（存量节拍只有 `TIMER_3MIN` 一条）。
-> 接上时只需 `start_timer(interval=3600, event_name=EventType.SYSTEM_MAINTENANCE_DUE)`，
-> 规则那边一行都不用动——这正是"事件与任务分开"换来的好处。
+
+#### 运维节拍：为什么是 tick + due 两个事件
+
+维护任务（日志清理 / 快照归档 / 定期校验）曾有一个安静的缺陷：
+规则表里有三条 `system.maintenance.due` 规则，但**没有任何东西发这个事件** ——
+三条规则是死配置，日志清理从来没跑过。它不报错、不告警，只是"该做的没做"。
+
+现在补上了时间源（`app/runtime/maintenance.py`）：
+
+```
+start_timer(30s, "system.maintenance.tick")    scheduler.py:on_start
+  └─ MaintenancePlanner.tick()                 maintenance.py
+       └─ 哪个 job 到点了？（周期来自 config/maintenance.json）
+            └─ publish system.maintenance.due {job, params}
+                 └─ 规则表按 job 名过滤 → 建任务 → maintenance 池
+```
+
+拆成两个事件是为了让"节拍在跑"和"该干活了"在事件流里能分开看：
+**有 tick 没 due** = 没到点或计划被停用；**有 due 没任务** = 规则被关了。
+一个事件也能做，但那样排障时只能看到"到点了"，看不出"到的是哪个点"。
+
+配置在 `config/maintenance.json`，面板「运行时 → 维护计划」改完即生效。
+详见 [EVENT_TASK.md](EVENT_TASK.md) §七。
 
 > **注意一处名实不符**：`on_start` 注册的 `TIMER_3MIN` 事件传的 `interval=5`（秒），
 > 当前**没有任何规则订阅它**，只是保留了默认节拍。接真实消费者时记得把
@@ -361,6 +379,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | 账户查询 | `trading.py:337` | `max(5, 30)` |
 | 权益采样 | `trading.py:758` | `max(1, ...)` |
 | 停止标志轮询 | `service_runner.py:90` | 0.5s |
+| 运维节拍 | `scheduler.py:on_start`（`maintenance_tick`） | 30s |
 | 定时器事件源 | `scheduler.py:661` `start_timer` | 各自定义（默认 `TIMER_3MIN`@5s） |
 | 调度分发循环 | `scheduler.py:366` `_dispatch_loop` | `tick_interval`（callLater 自递归） |
 
@@ -409,6 +428,8 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | `DATA_COLLECTED` | `CollectionService` | `TradingService` → 落库 |
 | `COMPONENT_ERROR` | `engine.py` 初始化 / 启动流程 | `TradingService` → 落库 |
 | `TIMER_3MIN` | `SchedulerComponent.on_start` | 暂无订阅者 |
+| `system.maintenance.tick` | `SchedulerComponent.on_start` | `SchedulerComponent._on_maintenance_tick` → `MaintenancePlanner.tick()` |
+| `system.maintenance.due` | `MaintenancePlanner` | 规则表（按 `job` 名分流成清理/归档/校验任务） |
 
 **新增的引擎事件**（事件驱动改造引入，驱动任务调度）：
 `engine.started` / `engine.ready` / `engine.stopping` / `engine.stopped` /

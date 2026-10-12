@@ -58,10 +58,18 @@ python main.py hub status --tasks              # hub + 各服务状态 + 所有�
 # 8. 事件 / 任务 / 执行池的运行时观测（详见 docs/EVENT_TASK.md）
 python main.py ctl runtime status              # 池占用、队列积压、死信、统计
 python main.py ctl runtime pools               # 8 个池的容量与在跑任务
-python main.py ctl runtime rules               # 21 条调度规则及其开关状态
+python main.py ctl runtime rules               # 22 条调度规则及其开关状态
 python main.py ctl runtime dead                # 死信：没处理器 / 无池可领的任务
+python main.py ctl runtime dead-clear          # 处理完这批死信后清掉
+python main.py ctl runtime maint               # 维护计划（清理/归档/校验）与下次执行时间
+python main.py ctl runtime maint-run validate  # 立刻跑一次（不看周期与开关）
 python main.py ctl runtime dispatch --task-type factor.calculate --params '{"symbols":["000001"]}'
 python main.py ctl runtime rule off kline_updated_factor   # 临时关掉一条规则
+
+# 9. 日志级别：运行中切换，不用重启（排查线上问题时最怕重启把现场冲掉）
+python main.py ctl log show                    # 当前档位与节流统计
+python main.py ctl log level DEBUG --file INFO # 控制台 DEBUG、文件只留 INFO
+python main.py ctl log level INFO --no-persist # 只本次生效，不写进配置
 ```
 
 可用能力清单：`python main.py strategies` / `factors` / `rules`
@@ -69,7 +77,7 @@ python main.py ctl runtime rule off kline_updated_factor   # 临时关掉一条�
 ## 网页监控面板
 
 引擎自带一个**零依赖的网页面板**（Twisted Web 挂在引擎自己的 reactor 上），
-浏览器打开 `http://127.0.0.1:8787/` 即可。面板分成**三个页面**：
+浏览器打开 `http://127.0.0.1:8787/` 即可。面板分成**五个页面**：
 
 ### 实盘监控页
 
@@ -105,6 +113,20 @@ python main.py ctl runtime rule off kline_updated_factor   # 临时关掉一条�
 - **作业列表**：每个回测作业的状态、耗时、失败原因
 - **历史结果**：从 SQLite 读，重启不丢。收益/回撤/夏普/成交/胜率一览
 - **回测详情**：权益曲线 + 完整指标 JSON
+
+### 运行时页
+
+回答"现在系统在做什么"——服务互相直接调用时这个问题无解，有了队列与状态机
+之后它是"读一张表"：
+
+- **执行池**：8 个池各一张卡片（占用条 + 完成/失败/超时/满槽拒收计数）。
+  池之间是**独立线程池**，回测跑满也吃不掉行情的线程
+- **队列积压**：每个队列的积压量，连同它对应的池与容量一起显示
+- **在跑任务 / 调度规则**（可逐条开关）/ **能力路由表** / **死信**（可清空）
+- **手动投递任务**：任务类型下拉直接取已注册处理器；没注册的类型会被明确拒绝
+- **维护计划**：日志清理 / 快照归档 / 运行校验 的开关、周期（每天 HH:MM 或每 N 秒）、
+  参数与「立即执行」。清理与归档**默认只报告不删**，要真的删必须显式勾选
+- **日志等级**：控制台级 / 文件级 / 重复日志节流窗口，可勾"重启后仍生效"
 
 面板读的是**引擎内存里的真状态**（不是二手副本），控制指令直接进 `ControlCenter`，
 与 CLI / hub 共用同一套语义，行为不会漂移。端口被占用时面板会降级为不可用，
@@ -1100,10 +1122,11 @@ app/
 │
 ├── runtime/                ── 运行时层：怎么跑，不含业务 ──
 │   ├── scheduler.py        调度中枢：订阅事件 → 建任务 → 投队列 → 领活
+│   ├── maintenance.py      维护计划：清理/归档/校验的周期与参数（时间源）
 │   ├── executor.py         WorkerComponent（旧作业执行器）
 │   ├── event_bus.py        薄转发兼容层（真身在 events/）
 │   ├── events/             事件契约层：types(常量唯一真源) / schema(EngineEvent) / bus
-│   ├── scheduling/         调度层：rules(规则) / router(能力路由) / defaults(21 条规则)
+│   ├── scheduling/         调度层：rules(规则) / router(能力路由) / defaults(22 条规则)
 │   ├── tasking/            任务层：models(EngineTask 八态) / store(队列+幂等+死信)
 │   │                       + runtime/spec/QuantTask（作业实例）
 │   ├── workers/            执行层：pools(8 个分池线程池) / registry / handlers(15 个)

@@ -530,11 +530,19 @@ def handle_log_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     from app.common.config import settings
 
     params = task.params or {}
-    retention = int(params.get("retention_days") or 7)
+    # 不能写 ``params.get("retention_days") or 7``：0 是假值，
+    # 一个配错的"保留 0 天"会被悄悄换成保留 7 天，反而多留了一周。
+    raw_retention = params.get("retention_days")
+    retention = 7 if raw_retention is None else int(raw_retention)
     apply_delete = bool(params.get("apply"))
+    # 单次最多删多少。没有上限的话，一个配错的保留天数会在一拍之内
+    # 把整个日志目录清空 —— 而那一拍里你连"正在删"的日志都看不到。
+    max_files = int(params.get("max_files") or 500)
     root = Path(str(getattr(settings, "LOG_DIR", "") or ""))
     if not root or not root.is_dir():
         return {"removed": 0, "note": "日志目录不存在或不可读"}
+    if retention < 1:
+        return {"removed": 0, "note": f"保留天数 {retention} 过小，已拒绝执行（至少 1 天）"}
 
     cutoff = datetime.now() - timedelta(days=retention)
     stale, freed = [], 0
@@ -553,7 +561,7 @@ def handle_log_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
 
     removed = 0
     if apply_delete:
-        for item in stale:
+        for item in stale[:max_files]:
             try:
                 Path(item["path"]).unlink()
                 removed += 1
@@ -566,39 +574,80 @@ def handle_log_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
         "removed": removed,
         "freed_bytes": freed,
         "apply": apply_delete,
+        "max_files": max_files,
+        "truncated": len(stale) > max_files,
         "sample": stale[:10],
     }
 
 
 def handle_archive(task: EngineTask, ctx: Any) -> Dict[str, Any]:
-    """快照归档。**默认只统计不移动**（理由同日志清理）。"""
+    """快照归档：把过期快照**移进** ``snapshots/archive/``。
+
+    默认只统计不移动（理由同日志清理：移动也是不可逆的批量文件操作）。
+    确认后传 ``apply=True`` —— 目标是同一个 output 目录下的 archive/，
+    **不跨盘、不删除**，所以撤销只需把文件挪回去。
+
+    归档区本身在扫描时会被排除，否则第二次运行会把已归档的文件
+    再"归档"一遍（原地移动），报告上看到的数量会莫名其妙。
+    """
+    import shutil
     from datetime import datetime, timedelta
     from pathlib import Path
 
     from app.common.config import settings
 
     params = task.params or {}
-    before_days = int(params.get("before_days") or 30)
+    raw_days = params.get("before_days")
+    before_days = 30 if raw_days is None else int(raw_days)
     apply_move = bool(params.get("apply"))
-    root = Path(str(getattr(settings, "OUTPUT_DIR", "") or "")) / "snapshots"
+    max_files = int(params.get("max_files") or 1000)
+
+    base = Path(str(getattr(settings, "OUTPUT_DIR", "") or ""))
+    root = Path(str(getattr(settings, "SNAPSHOT_DIR", "") or (base / "snapshots")))
     if not root.is_dir():
         return {"archived": 0, "note": "快照目录不存在"}
+    if before_days < 1:
+        return {"archived": 0, "note": f"归档天数 {before_days} 过小，已拒绝执行（至少 1 天）"}
 
+    archive_root = root / "archive"
     cutoff = datetime.now() - timedelta(days=before_days)
     old = []
     for f in root.rglob("*.json"):
+        if archive_root in f.parents:      # 已归档的不重复处理
+            continue
         try:
             if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
                 old.append({"path": str(f), "size": f.stat().st_size})
         except OSError:
             continue
 
+    moved, moved_bytes, failed = 0, 0, []
+    if apply_move:
+        for item in old[:max_files]:
+            src = Path(item["path"])
+            try:
+                rel = src.relative_to(root)
+            except ValueError:
+                continue
+            dst = archive_root / rel
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved += 1
+                moved_bytes += int(item["size"])
+            except Exception as exc:
+                failed.append({"path": str(src), "error": str(exc)})
+
     return {
         "before_days": before_days,
         "candidates": len(old),
-        "archived": 0,
+        "archived": moved,
+        "moved_bytes": moved_bytes,
+        "failed": failed[:10],
         "apply": apply_move,
-        "note": "归档策略未启用（默认只统计）；确认后传 apply=True 并实现目标存储",
+        "max_files": max_files,
+        "target": str(archive_root),
+        "note": "" if apply_move else "只统计未移动（默认）；勾选『真的归档』后才会移入 archive/",
         "sample": old[:10],
     }
 

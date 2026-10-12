@@ -177,6 +177,10 @@ class TaskStore:
         with self._lock:
             self._running.pop(task.task_id, None)
             task.mark_failed(error)
+            # "失败"必须无条件累加：重试和进死信是**失败之后**的去向，
+            # 不是"没失败"。少了这一句，面板上的失败数永远是 0，
+            # 而失败恰恰是最该被看见的那个数。
+            self.stats["failed"] += 1
             if task.can_retry():
                 task.mark_retrying()
                 self.stats["retried"] += 1
@@ -215,9 +219,26 @@ class TaskStore:
                 return False
             task.mark_cancelled()
             self._running.pop(task_id, None)
+            self._drop_from_queue(task)
             self._release_dedup(task)
             self.stats["cancelled"] += 1
             return True
+
+    def _drop_from_queue(self, task: EngineTask) -> None:
+        """把任务从它的队列里摘掉。
+
+        :meth:`pop` 会惰性丢弃终态任务，所以**不摘也不会执行错**；
+        但"队列积压 N 条"这个数会一直把已取消的算进去，
+        面板上就出现"积压 3 条但其实没事可做"。取消必须真的出队。
+        """
+        heap = self._queues.get(task.queue)
+        if not heap:
+            return
+        kept = [t for t in heap if t.task_id != task.task_id]
+        if len(kept) == len(heap):
+            return
+        kept.sort()
+        self._queues[task.queue] = kept
 
     def _release_dedup(self, task: EngineTask) -> None:
         if task.dedup_key and self._dedup.get(task.dedup_key) == task.task_id:
@@ -254,6 +275,36 @@ class TaskStore:
                 if t.status is TaskState.DEAD_LETTER
             ]
             return [t.to_dict() for t in items[-max(0, int(limit)):]]
+
+    def dead_letter_count(self) -> int:
+        """当前**尚未处理**的死信条数。
+
+        与 ``stats["dead_letter"]`` 的区别：后者是"历史上共进过多少死信"
+        的累计计数，清空死信不该把它归零（那是发生过的事实）；
+        而健康判定要看的是"现在还有几条没处理"，所以用这个方法。
+        """
+        with self._lock:
+            return sum(
+                1 for t in self._tasks.values() if t.status is TaskState.DEAD_LETTER
+            )
+
+    def clear_dead_letters(self) -> int:
+        """清空死信队列。
+
+        死信是**给运维看的待办清单**，不是账本：处理完就该清掉，
+        否则它会一直挂着，面板上的"死信 N 条"永远退不回去，
+        健康判定也跟着一直是"有死信"，告警就失去意义了。
+
+        :return: 清掉的条数
+        """
+        with self._lock:
+            dead = [
+                tid for tid, t in self._tasks.items()
+                if t.status is TaskState.DEAD_LETTER
+            ]
+            for tid in dead:
+                self._tasks.pop(tid, None)
+            return len(dead)
 
     def pending_tasks(self) -> "List[EngineTask]":
         """待执行的任务**对象**（区别于 :meth:`pending` 返回的字典）。"""

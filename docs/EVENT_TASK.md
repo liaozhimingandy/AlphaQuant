@@ -255,7 +255,25 @@ Python 没有安全的线程强杀。这里的超时是**记账层面**的：
 | `collection_requested_news` | `data.collection.requested` | `news.collect` | research | 5 | 2 |
 | `maintenance_due_cleanup` | `system.maintenance.due` | `maintenance.log_cleanup` | maintenance | 9 | 0 |
 | `maintenance_due_archive` | `system.maintenance.due` | `maintenance.archive` | maintenance | 9 | 0 |
+| `maintenance_due_validate` | `system.maintenance.due` | `maintenance.validate` | maintenance | 9 | 0 |
 | `recovery_requested` | `engine.recovery.requested` | `system.recover` | system | 1 | 1 |
+
+#### 运维规则的 job 分流
+
+三条运维规则共用同一个事件，靠事件的 `job` 字段分流：
+
+```
+system.maintenance.tick（每 30s，调度器定时器）
+      └─> MaintenancePlanner.tick()  哪个计划到点了？
+            └─> system.maintenance.due {job:"log_cleanup", params:{...}}
+                  └─> _job_is("log_cleanup") 命中 → 只建清理任务
+```
+
+**拆成 tick 和 due 两个事件**是为了让"节拍在跑"和"该干活了"在事件流里能分开看：
+有 tick 没 due = 没到点或没启用；有 due 没任务 = 规则被关了。
+
+没带 `job` 名的裸事件视为**全部命中** —— 手工发一个裸的 `maintenance.due`
+是想"把运维活都跑一遍"，这符合直觉，不该静默什么都不做。
 
 ### 编排原则（每条都对应一类真实事故）
 
@@ -280,7 +298,72 @@ Python 没有安全的线程强杀。这里的超时是**记账层面**的：
 
 ---
 
-## 七、最小闭环
+## 七、维护计划与日志级别
+
+### 维护计划：周期运维的时间源
+
+`system.maintenance.due` 有三条规则，但它需要一个**时间源**才不会是死配置 ——
+`app/runtime/maintenance.py` 就是这个时间源：
+
+```
+scheduler 定时器 ──每 30s──> system.maintenance.tick
+                                    │
+                        MaintenancePlanner.tick()
+                                    │  哪个计划到点了？
+                                    └─> system.maintenance.due {job, params}
+                                              │
+                                    规则表（按 job 名过滤）──> 任务 ──> maintenance 池
+```
+
+**计划器不发任务，只发"该干活了"这个事实**。建任务仍然归规则表管，
+所以维护任务同样享有队列、幂等、重试、死信那一整套，和采集/因子任务一致。
+
+配置在 `config/maintenance.json`，面板「运行时 → 维护计划」改完即生效并落盘：
+
+| 任务 | 默认 | 周期 | 参数 |
+|---|---|---|---|
+| `log_cleanup` 日志清理 | 启用 | 每天 03:10 | `retention_days=7`、`apply=false` |
+| `archive` 快照归档 | **停用** | 每天 03:40 | `before_days=30`、`apply=false` |
+| `validate` 运行校验 | 启用 | 每 3600s | — |
+
+周期两种：**每天 HH:MM** 或 **每 N 秒**。日任务有 5 分钟"错过宽限"：
+到点后 5 分钟内仍会补跑一次（检查是 30s 一拍，"03:10" 实际在 03:10:xx 被看到），
+超过就算错过、顺延明天 —— 补跑维护任务收益极低，不值得为此在启动时制造一轮文件扫描。
+
+#### 安全默认与硬拦截
+
+- **清理与归档都默认只报告不删**。`apply=false` 时处理器只列出清单。
+  "定时任务自动删文件"是运维事故高发区：配错一天就删掉一周日志。
+- 真要删也有上限：清理单次最多 500 个文件，归档 1000 个。
+- 控制面 `_guard_destructive` 会**再拦一道**：保留天数 < 1 天、周期 < 300 秒
+  直接拒绝保存，不让危险配置有机会落到执行器里。
+- 保留天数用 `params.get(k); 7 if v is None else int(v)` 取值 ——
+  不能写 `or 7`，否则配错的"保留 0 天"会被悄悄换成保留 7 天。
+
+### 日志级别：运行中可切换
+
+级别原本只能靠环境变量在启动时定，于是排查线上问题就得重启服务，
+**而重启恰恰会把你要排查的那个状态冲掉**。
+
+`app/common/logging.py` 现在记住每个 sink 的完整配置，`set_level()` 用
+"remove 掉再按原配置 add 回来"的方式热切换（loguru 没有公开的改级别接口）。
+配置里带着 rotation/retention/format，重建不会打断轮转。
+
+优先级：**面板/CLI 改过的（`config/logging.json`）> 环境变量 `LOG_LEVEL`**。
+
+```bash
+python main.py ctl log show            # 当前档位
+python main.py ctl log level DEBUG     # 控制台 DEBUG，文件跟随
+python main.py ctl log level DEBUG --file INFO --window 3
+python main.py ctl log level INFO --no-persist   # 只本次生效
+```
+
+注意 `is_debug()` 现在读的是**当前生效**级别而不是启动时的环境变量：
+否则面板把级别调到 DEBUG 之后，日志节流还在按启动时的判断继续压日志。
+
+---
+
+## 八、最小闭环
 
 以一次 5 分钟 K 线更新为例：
 
@@ -322,7 +405,7 @@ def execute_approved(...)    # 事件链路调用
 
 ---
 
-## 八、运维入口
+## 九、运维入口
 
 ### CLI
 
@@ -331,6 +414,9 @@ python main.py ctl runtime status      # 队列积压与执行池占用
 python main.py ctl runtime pools       # 各池能力声明与占用
 python main.py ctl runtime rules       # 规则表（什么事件会生成什么任务）
 python main.py ctl runtime dead        # 死信列表
+python main.py ctl runtime dead-clear  # 清空死信（处理完这批之后用）
+python main.py ctl runtime maint       # 维护计划与下次执行时间
+python main.py ctl runtime maint-run validate   # 立刻跑一次（不看周期/开关）
 
 # 手动投递一个引擎任务
 python main.py ctl runtime dispatch \
@@ -340,27 +426,51 @@ python main.py ctl runtime dispatch \
 
 # 临时掐断一条自动链路（不用改代码、不用重启）
 python main.py ctl runtime rule off factor_snapshot_strategy
+
+# 日志级别（不用重启）
+python main.py ctl log show
+python main.py ctl log level DEBUG --file INFO
 ```
 
 ### HTTP
 
 ```
-GET  /api/runtime           任务系统全景（队列/池/规则/处理器/死信）
-POST /api/runtime/dispatch  {"task_type": "...", "params": {...}}
-POST /api/runtime/rule      {"name": "...", "enabled": false}
+GET  /api/runtime                任务系统全景（队列/池/规则/处理器/死信/维护计划）
+POST /api/runtime/dispatch       {"task_type": "...", "params": {...}}
+POST /api/runtime/rule           {"name": "...", "enabled": false}
+POST /api/runtime/dead/clear     {}                       清空死信
+GET  /api/maintenance            维护计划与运行态
+POST /api/maintenance/save       {"jobs": {...}}          保存并生效
+POST /api/maintenance/run        {"name": "log_cleanup"}  立即执行
+GET  /api/logging                当前生效的日志配置
+POST /api/logging/level          {"console":"DEBUG","file":"INFO","persist":true}
 ```
+
+### 面板
+
+监控面板新增 **运行时** 页（最后一个 tab），一屏回答"现在系统在做什么"：
+
+- 执行池卡片（占用条 + 完成/失败/超时/满槽拒收计数）
+- 队列积压（对应池与容量一起显示，积压 > 10 打标）
+- 在跑任务、调度规则（可逐条开关）、能力路由表、死信（可清空）
+- 手动投递任务（任务类型下拉直接取已注册处理器）
+- 维护计划（周期/时刻/参数/立即执行）
+- 日志等级（控制台/文件/节流窗口，可勾"重启后仍生效"）
 
 ### 引擎快照
 
-`SchedulerComponent.snapshot()` 把队列、执行池、路由、规则、处理器、统计全部带出来，
-面板与 `/api/runtime` 共用这一份数据，不会出现"两边说的不一样"。
+`SchedulerComponent.snapshot()` 把队列、执行池、路由、规则、处理器、统计、
+维护计划全部带出来，面板与 `/api/runtime` 共用这一份数据，
+不会出现"两边说的不一样"。
 
 `health_check()` 在死信里含交易类任务时返回**不健康**：
 那意味着一笔该下的单没下出去，或者存在一笔状态不确定的单。
+非交易类死信只是提示（仍返回健康），且**清掉之后提示必须消失** ——
+否则告警一旦响过就永久响下去，运维再也不会看它。
 
 ---
 
-## 九、如何扩展
+## 十、如何扩展
 
 ### 加一种任务类型（三步）
 
@@ -410,9 +520,17 @@ scheduler.rules.register(Rule(
 `condition` 抛异常按**不跑**处理（记日志 + 跳过），
 不会让同事件的其它规则跟着失效。
 
+### 加一个维护任务
+
+维护任务**不需要**新规则 —— 在 `app/runtime/maintenance.py` 的 `DEFAULT_JOBS`
+里加一项即可，规则表已有 `maintenance_due_*` 三条按 job 名分流。
+新任务的 `params` 会原样透传给处理器（`_maintenance_params`）。
+
+前提是它的任务类型已有处理器，否则会进死信（这是刻意的：明确失败好过假成功）。
+
 ---
 
-## 十、可靠性现状
+## 十一、可靠性现状
 
 | 机制 | 状态 | 说明 |
 |---|---|---|
@@ -421,8 +539,11 @@ scheduler.rules.register(Rule(
 | 任务状态机 | ✅ | `TaskState` 八态，含死信 |
 | 超时、重试、死信 | ✅ | 指数退避 + 抖动；超时为记账层面 |
 | 任务优先级 | ✅ | 1（下单）… 9（清理） |
-| 资源隔离 | ✅ | 六池独立线程池，互不挤占 |
+| 资源隔离 | ✅ | 八池独立线程池，互不挤占 |
 | 处理器缺失可见 | ✅ | 直接进死信，不假成功 |
+| 维护任务周期可配 | ✅ | `config/maintenance.json`，保存即生效 |
+| 危险维护配置拦截 | ✅ | 保留天数 < 1 天 / 周期 < 300 秒 直接拒绝 |
+| 日志级别热切换 | ✅ | 不用重启；可持久化 |
 | **Outbox / 可靠投递** | ❌ | 事件目前只在内存广播，进程重启即丢 |
 | **任务持久化** | ❌ | 队列与在途任务全是内存态，重启后需靠 `system.recover` 重建 |
 | **执行器心跳与租约** | ❌ | 单进程内不需要；跨进程后必须补 |
@@ -435,7 +556,7 @@ scheduler.rules.register(Rule(
 
 ---
 
-## 十一、测试
+## 十二、测试
 
 `app/tests/test_event_task_runtime.py`（45 项）钉住的是**架构不变式**：
 
@@ -447,5 +568,17 @@ scheduler.rules.register(Rule(
 - 没有处理器的任务必须进死信；
 - 完整闭环：K 线更新 → 因子任务 → 因子快照 → 策略任务。
 
-任何一条破了，系统都能"看起来在跑"而实际什么都没做 ——
-那正是这类架构最危险的失败模式。
+`app/tests/test_maintenance_logging.py`（38 项）钉住的是**周期性运维与可观测性**：
+
+- 日任务到点后第一拍必须触发（回归：曾因"时刻过了就顺延明天"永远不触发）；
+- 错过太久不补跑，今天跑过不再重复；
+- 裸的 `maintenance.due`（无 job）= 三个运维任务都建；带 job 只建对应的那个；
+- 默认配置里**不能**有任何"会删东西"的开关；
+- 保留天数 0、周期 10 秒必须被拒绝；
+- 归档真的移动文件，且归档区不重复处理；
+- 日志级别切了之后 `is_debug()` 要跟着变；
+- 取消任务必须真的出队（否则"队列积压"把没事可做的任务算进去）；
+- 清空死信后健康提示必须消失，但累计计数保留。
+
+这两组共同的立场：**宁可明确失败，也不要"看起来在跑"**。
+周期性运维的失败不会报错、不会告警，只是"该做的事一直没做"。

@@ -1,0 +1,41 @@
+{
+  "_note": "维护任务计划（面板『运行时 → 维护计划』写入，保存即生效）",
+  "jobs": {
+    "log_cleanup": {
+      "task_type": "maintenance.log_cleanup",
+      "label": "日志清理",
+      "enabled": true,
+      "schedule": "daily",
+      "at": "03:10",
+      "interval_sec": 86400,
+      "params": {
+        "retention_days": 7,
+        "apply": false
+      },
+      "description": "扫描并清理超过保留天数的日志文件；未勾选『真的删除』时只列出清单"
+    },
+    "archive": {
+      "task_type": "maintenance.archive",
+      "label": "快照归档",
+      "enabled": false,
+      "schedule": "daily",
+      "at": "03:40",
+      "interval_sec": 86400,
+      "params": {
+        "before_days": 30,
+        "apply": false
+      },
+      "description": "把超过天数的运行快照移入 archive/；默认关闭，需先确认归档目标"
+    },
+    "validate": {
+      "task_type": "maintenance.validate",
+      "label": "运行校验",
+      "enabled": true,
+      "schedule": "interval",
+      "at": "03:10",
+      "interval_sec": 3600,
+      "params": {},
+      "description": "校验日志目录、数据目录与数据库可用性（只读，不删任何东西）"
+    }
+  }
+}

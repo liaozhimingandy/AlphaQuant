@@ -582,22 +582,165 @@ class ControlCenter:
         return sch
 
     def runtime_system(self) -> Dict[str, Any]:
-        """任务系统全景：队列积压 / 执行池占用 / 规则 / 处理器 / 死信。"""
+        """任务系统全景：队列积压 / 执行池占用 / 规则 / 处理器 / 死信 / 维护计划。"""
         sch = self._event_scheduler()
         if sch is None:
             return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
         return {
             "ok": True,
             "stats": dict(sch.stats),
+            "store": sch.store.snapshot(),
             "queues": sch.store.queues(),
             "pending": sch.store.pending_count(),
             "running": sch.store.running_count(),
+            "running_tasks": sch.store.running(30),
             "pools": sch.pools.snapshot(),
             "router": sch.router.snapshot(),
             "rules": sch.rules.snapshot(),
             "handlers": sch.handlers.snapshot(),
             "dead_letters": sch.store.dead_letters(30),
+            "dead_letter_count": sch.store.dead_letter_count(),
+            "maintenance": sch.maintenance.snapshot(),
         }
+
+    def clear_dead_letters(self) -> Dict[str, Any]:
+        """清空死信队列（运维处理完这批之后用）。
+
+        死信是待办清单不是账本 —— 处理完还挂着，健康判定会一直报
+        "有死信"，告警就失去意义了。累计计数保留在 ``stats`` 里，
+        清掉的只是"还有几条没处理"。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        cleared = sch.store.clear_dead_letters()
+        self._audit("clear_dead_letters", {"cleared": cleared})
+        return {"ok": True, "cleared": cleared}
+
+    # ============================================================
+    # 维护计划（日志清理 / 归档 / 校验）
+    # ============================================================
+    def maintenance_view(self) -> Dict[str, Any]:
+        """维护计划与它的运行态（下次执行时间、上次结果）。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        return {"ok": True, **sch.maintenance.snapshot()}
+
+    def maintenance_save(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """保存维护计划。改完立刻生效并落盘（重启仍在）。
+
+        安全约束在这里**再拦一道**：清理/归档的 ``apply`` 不会因为
+        手滑配错就变成真删 —— 见 :meth:`_guard_destructive`。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        guard = self._guard_destructive(payload)
+        if guard is not None:
+            return guard
+        try:
+            snap = sch.maintenance.update(payload or {})
+        except Exception as exc:
+            return {"ok": False, "error": f"保存失败: {exc}"}
+        self._audit("maintenance_save", {"jobs": sorted(
+            (payload or {}).get("jobs", payload or {}).keys())})
+        return {"ok": True, **snap}
+
+    @staticmethod
+    def _guard_destructive(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """拦截危险的维护配置。
+
+        :return: None = 放行；否则是要直接返回给调用方的错误响应。
+
+        两条规定都是真实事故的形状：
+          1. 保留天数/归档天数 < 1 → 一拍清空整个目录；
+          2. 清理周期短于 1 小时 → 每天扫几十遍，日志被自己的清理日志刷满。
+        """
+        raw = (payload or {}).get("jobs")
+        if not isinstance(raw, dict):
+            raw = dict(payload or {})
+        for name, cfg in raw.items():
+            if not isinstance(cfg, dict):
+                continue
+            params = cfg.get("params") or {}
+            for key in ("retention_days", "before_days"):
+                if key in params:
+                    try:
+                        if int(params[key]) < 1:
+                            return {
+                                "ok": False,
+                                "error": f"{name}.{key} 必须 >= 1 天（收到 {params[key]}）",
+                            }
+                    except (TypeError, ValueError):
+                        return {"ok": False, "error": f"{name}.{key} 不是整数"}
+            sched = str(cfg.get("schedule") or "").lower()
+            if sched == "interval":
+                try:
+                    if int(cfg.get("interval_sec") or 0) < 300:
+                        return {
+                            "ok": False,
+                            "error": f"{name} 的周期必须 >= 300 秒（太快会把日志刷满）",
+                        }
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"{name}.interval_sec 不是整数"}
+        return None
+
+    def maintenance_run(self, name: str) -> Dict[str, Any]:
+        """立刻跑一次维护任务（不看周期与开关 —— 手动就是要立刻跑）。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        result = sch.maintenance.run_now(str(name or ""))
+        if result.get("ok"):
+            self._audit("maintenance_run", {"job": name})
+        return result
+
+    # ============================================================
+    # 日志级别（运行中可调，不用重启）
+    # ============================================================
+    def logging_view(self) -> Dict[str, Any]:
+        """当前生效的日志配置。"""
+        from app.common.logging import current_levels
+
+        return {"ok": True, **current_levels()}
+
+    def set_log_level(
+        self,
+        console: Optional[str] = None,
+        file: Optional[str] = None,
+        throttle_window: Optional[float] = None,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        """运行中切换日志级别。
+
+        排查线上问题时最尴尬的是"想看 DEBUG 就得重启，而重启正好把
+        要排查的那个状态冲掉"。这里让它热切换，并可选持久化。
+        """
+        from app.common.logging import _LEVELS, set_level
+
+        if console is not None:
+            lv = str(console).strip().upper()
+            if lv and lv not in _LEVELS:
+                return {"ok": False, "error": f"非法级别: {console}", "levels": list(_LEVELS)}
+            console = lv or None
+        if file is not None and file != "":
+            lv = str(file).strip().upper()
+            if lv not in _LEVELS:
+                return {"ok": False, "error": f"非法级别: {file}", "levels": list(_LEVELS)}
+            file = lv
+        try:
+            result = set_level(
+                console=console, file=file,
+                throttle_window=throttle_window, persist=bool(persist),
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"切换失败: {exc}"}
+        self._audit("set_log_level", {
+            "console": result.get("console"), "file": result.get("file"),
+            "throttle_window": result.get("throttle_window"), "persist": bool(persist),
+        })
+        return {"ok": True, **result}
 
     def dispatch_task(
         self,

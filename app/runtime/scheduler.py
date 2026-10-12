@@ -58,6 +58,7 @@ from app.engine.context import RunMode
 from app.runtime.events import EventType, StandardEvents
 from app.runtime.events.schema import EngineEvent
 from app.runtime.events.types import TaskType
+from app.runtime.maintenance import TICK_SECONDS, MaintenancePlanner
 from app.runtime.scheduling import (
     CapabilityRouter,
     RuleRegistry,
@@ -107,6 +108,15 @@ class SchedulerComponent(SchedulerBase):
         self.rules = RuleRegistry()
         if with_default_rules:
             self.rules.register_all(build_default_rules())
+
+        # ---- 周期维护（日志清理 / 归档 / 校验）----
+        # 维护任务的时间源：没有它，``system.maintenance.due`` 没人发，
+        # 那三条运维规则就只是三行配置，永远不会被触发。
+        self.maintenance = MaintenancePlanner()
+        # 这里绑的是**惰性**发布器：事件总线此刻可能还没有（组件未初始化），
+        # 到真正发事件时才解析 self.bus。否则"启动前手动跑一次维护"会因为
+        # 拿不到总线而失败，而报错还只是干巴巴的一句"发布失败"。
+        self.maintenance.bind(lambda *a, **kw: self.bus.publish(*a, **kw))
 
         # ---- 执行 ----
         self.pools = PoolManager(capacities=capacities, enabled=pools)
@@ -229,6 +239,14 @@ class SchedulerComponent(SchedulerBase):
             event_name=StandardEvents.TIMER_3MIN,
             timer_id="default_3min",
         )
+        # 3.5) 运维节拍：计划器拿到 tick 后自己判断"哪个维护任务到点了"，
+        #      再发 system.maintenance.due。计划不发任务，只发"该干活了"。
+        self._bind_maintenance()
+        self.start_timer(
+            interval=TICK_SECONDS,
+            event_name=EventType.SYSTEM_MAINTENANCE_TICK,
+            timer_id="maintenance_tick",
+        )
         # 4) 启动分发循环
         self._dispatch_call = reactor.callLater(
             self.tick_interval, self._dispatch_loop
@@ -298,6 +316,26 @@ class SchedulerComponent(SchedulerBase):
         """为每条规则关注的事件挂一个监听器。"""
         for event_type in self.rules.event_types():
             self.subscribe_event(event_type, self._make_listener(event_type))
+
+    def _bind_maintenance(self) -> None:
+        """把维护计划器接到事件总线上。
+
+        计划器通过 ``bus.publish`` 发事件，而不是直接 ``submit_engine_task``：
+        维护任务同样要过"规则 → 队列 → 池"这条正规链路，
+        否则它会绕过死信与重试，坏了也没人知道。
+        """
+        bus = self.bus
+        if bus is not None:
+            self.subscribe_event(
+                EventType.SYSTEM_MAINTENANCE_TICK, self._on_maintenance_tick
+            )
+
+    def _on_maintenance_tick(self, **kwargs: Any) -> None:
+        """运维节拍 → 检查哪些维护任务到点了。"""
+        try:
+            self.maintenance.tick()
+        except Exception as exc:
+            logger.error(f"维护计划检查失败: {exc}")
 
     def _make_listener(self, event_type: str) -> Callable[..., Any]:
         """生成一个**知道自己订阅了什么事件**的监听器。
@@ -756,13 +794,16 @@ class SchedulerComponent(SchedulerBase):
             "handlers": self.handlers.snapshot(),
             "rules": self.rules.snapshot(),
             "timers": sorted(self._timers.keys()),
+            "maintenance": self.maintenance.snapshot(),
         })
         return base
 
     def health_check(self) -> Tuple[bool, str]:
         if not self.enabled:
             return True, "disabled"
-        dead = self.store.stats.get("dead_letter", 0)
+        # 用"当前还有几条"而不是累计计数：死信被运维清掉之后，
+        # 健康度就该恢复正常，否则告警一旦响过就永久响下去。
+        dead = self.store.dead_letter_count()
         if dead:
             detail = f"死信 {dead} 条"
             # 死信里含交易类任务是**必须立刻处理**的事件：

@@ -87,6 +87,7 @@ class MonitorResource(Resource):
                 "/api/overview", "/api/tasks", "/api/tasks/<id>", "/api/orders",
                 "/api/logs", "/api/snapshots", "/api/audit", "/api/health",
                 "/api/collector", "/api/dataguard", "/api/providers",
+                "/api/runtime", "/api/maintenance", "/api/logging",
             ]})
 
         head = rest[0]
@@ -120,6 +121,12 @@ class MonitorResource(Resource):
             # 任务系统全景：队列积压 / 执行池占用 / 规则 / 死信。
             # 事件驱动架构里"现在系统在做什么"只靠这一屏回答。
             return self._json(request, c.control.runtime_system())
+        if head == "maintenance":
+            # 维护计划：开关 / 周期 / 参数 / 下次执行时间
+            return self._json(request, c.control.maintenance_view())
+        if head == "logging":
+            # 当前生效的日志级别（面板据此显示"我现在是什么档位"）
+            return self._json(request, c.control.logging_view())
         if head == "collector":
             return self._json(request, c.control.collector_status())
         if head == "dataguard":
@@ -508,6 +515,29 @@ class MonitorResource(Resource):
         if seg[1] == "runtime" and len(seg) >= 3 and seg[2] == "rule":
             return self._json(request, c.control.set_rule_enabled(
                 str(body.get("name") or ""), bool(body.get("enabled", True))))
+
+        # POST /api/runtime/dead/clear —— 清空死信（运维处理完这批之后用）
+        if seg[1] == "runtime" and len(seg) >= 4 and seg[2] == "dead" and seg[3] == "clear":
+            return self._json(request, c.control.clear_dead_letters())
+
+        # POST /api/maintenance/save —— 保存维护计划（开关/周期/参数）
+        if seg[1] == "maintenance" and len(seg) >= 3 and seg[2] == "save":
+            return self._json(request, c.control.maintenance_save(body))
+
+        # POST /api/maintenance/run —— 立刻跑一次某个维护任务
+        if seg[1] == "maintenance" and len(seg) >= 3 and seg[2] == "run":
+            return self._json(request, c.control.maintenance_run(
+                str(body.get("name") or body.get("job") or "")))
+
+        # POST /api/logging/level —— 运行中切换日志级别（不用重启）
+        if seg[1] == "logging" and len(seg) >= 3 and seg[2] == "level":
+            raw_window = body.get("throttle_window")
+            return self._json(request, c.control.set_log_level(
+                console=body.get("console") or body.get("level"),
+                file=body.get("file") if "file" in body else None,
+                throttle_window=None if raw_window is None else float(raw_window),
+                persist=bool(body.get("persist", True)),
+            ))
 
         # POST /api/dataguard/check —— 立刻体检（可选自动补全）
         if seg[1] == "dataguard" and len(seg) >= 3 and seg[2] == "check":

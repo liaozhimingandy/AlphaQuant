@@ -136,6 +136,10 @@ class EventType:
     SYSTEM_EVENT_PUBLISH_FAILED = "system.event.publish.failed"
     SYSTEM_MARKET_SESSION_CHANGED = "system.market.session.changed"
     SYSTEM_DATA_STALENESS_DETECTED = "system.data.staleness.detected"
+    #: 运维节拍。由维护计划器按固定间隔发出，计划器收到后自己判断
+    #: "哪个维护任务到点了"，再发 :attr:`SYSTEM_MAINTENANCE_DUE`。
+    #: 拆成两个事件是为了让"节拍"和"该干活了"在事件流里能分开看。
+    SYSTEM_MAINTENANCE_TICK = "system.maintenance.tick"
     SYSTEM_MAINTENANCE_DUE = "system.maintenance.due"
 
 
@@ -184,6 +188,7 @@ EVENT_CATEGORIES: Dict[str, Tuple[str, ...]] = {
         EventType.SYSTEM_DATABASE_DEGRADED,
         EventType.SYSTEM_EVENT_PUBLISH_FAILED, EventType.SYSTEM_MARKET_SESSION_CHANGED,
         EventType.SYSTEM_DATA_STALENESS_DETECTED, EventType.SYSTEM_MAINTENANCE_DUE,
+        EventType.SYSTEM_MAINTENANCE_TICK,
         EventType.COMPONENT_ENABLED, EventType.COMPONENT_DISABLED,
         EventType.SNAPSHOT_SAVED, EventType.CONTROL_COMMAND,
     ),

@@ -125,6 +125,32 @@ def _not_executed(event: EngineEvent, ctx: Any) -> bool:
     return not bool((event.data or {}).get("executed"))
 
 
+def _job_is(*names: str) -> ConditionFn:
+    """条件：``system.maintenance.due`` 带的是这几个维护任务之一。
+
+    运维窗口是一个**广播**事件（"到点了"），到底该跑清理还是归档由
+    事件的 ``job`` 字段决定 —— 计划器已经判断过一轮了，规则只做过滤。
+
+    **没带 job 名时视为全部命中**：手工/外部发一个裸的 ``maintenance.due``
+    是想"把运维活都跑一遍"，这符合直觉，不该静默什么都不做。
+    """
+    wanted = {str(n).lower() for n in names}
+
+    def _cond(event: EngineEvent, ctx: Any) -> bool:
+        job = str((event.data or {}).get("job") or "").strip().lower()
+        return True if not job else job in wanted
+    return _cond
+
+
+def _maintenance_params(event: EngineEvent, ctx: Any) -> Dict[str, Any]:
+    """运维事件 → 任务参数：把计划器配的参数原样透传给处理器。"""
+    data = event.data or {}
+    params = dict(data.get("params") or {})
+    params["job"] = str(data.get("job") or "")
+    params["reason"] = str(data.get("reason") or event.event_type)
+    return params
+
+
 # =============================================================================
 # 参数 / 幂等键 工具
 # =============================================================================
@@ -478,21 +504,50 @@ def build_default_rules() -> List[Rule]:
         ),
 
         # ---------------- 运维 ----------------
+        # 事件源是 MaintenancePlanner（config/maintenance.json 驱动）。
+        # 三条规则共用同一个事件，靠 job 名分流 —— 计划器决定"该不该跑"，
+        # 规则表决定"跑成什么任务"，职责不重叠。
         Rule(
             name="maintenance_due_cleanup",
             event_type=EventType.SYSTEM_MAINTENANCE_DUE,
             task_type=TaskType.MAINTENANCE_LOG_CLEANUP,
+            condition=_job_is("log_cleanup"),
+            params_fn=_maintenance_params,
+            dedup_fn=lambda e, c: normalize_key(
+                dedup_key(TaskType.MAINTENANCE_LOG_CLEANUP,
+                          (e.data or {}).get("job") or "any")
+            ),
             priority=Priority.IDLE,
             timeout_seconds=600.0,
-            description="运维窗口到点 → 清理过期日志",
+            description="运维窗口到点 → 清理过期日志（周期与保留天数由维护计划配置）",
         ),
         Rule(
             name="maintenance_due_archive",
             event_type=EventType.SYSTEM_MAINTENANCE_DUE,
             task_type=TaskType.MAINTENANCE_ARCHIVE,
+            condition=_job_is("archive"),
+            params_fn=_maintenance_params,
+            dedup_fn=lambda e, c: normalize_key(
+                dedup_key(TaskType.MAINTENANCE_ARCHIVE,
+                          (e.data or {}).get("job") or "any")
+            ),
             priority=Priority.IDLE,
             timeout_seconds=1800.0,
-            description="运维窗口到点 → 归档历史快照",
+            description="运维窗口到点 → 归档历史快照（默认关闭，需先在面板启用）",
+        ),
+        Rule(
+            name="maintenance_due_validate",
+            event_type=EventType.SYSTEM_MAINTENANCE_DUE,
+            task_type=TaskType.MAINTENANCE_VALIDATE,
+            condition=_job_is("validate"),
+            params_fn=_maintenance_params,
+            dedup_fn=lambda e, c: normalize_key(
+                dedup_key(TaskType.MAINTENANCE_VALIDATE,
+                          (e.data or {}).get("job") or "any")
+            ),
+            priority=Priority.IDLE,
+            timeout_seconds=300.0,
+            description="运维窗口到点 → 校验目录与数据库可用性（只读）",
         ),
         Rule(
             name="recovery_requested",

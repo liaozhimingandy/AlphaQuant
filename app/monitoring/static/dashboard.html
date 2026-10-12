@@ -124,6 +124,7 @@
   label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--muted)}
   label input,label select{font-size:12px}
   main.hidden,#page-backtest.hidden,#page-live.hidden,#page-pool.hidden,
+  #page-runtime.hidden,#page-factor.hidden,#page-strategy.hidden,
   #s-form-rule.hidden,#s-form-score.hidden,#s-form-multi.hidden,
   #bt-detail.hidden,#bt-spec-wrap.hidden{display:none}
   h3{font-weight:600;color:var(--fg)}
@@ -163,6 +164,7 @@
   <button data-page="pool">选股 · 股票池</button>
   <button data-page="strategy">策略库</button>
   <button data-page="backtest">回测监控</button>
+  <button data-page="runtime">运行时</button>
 </nav>
 
 <main id="page-live">
@@ -705,6 +707,160 @@
   </section>
 </main>
 
+<!-- ==================== 运行时：线程池 / 队列 / 规则 / 维护 ==================== -->
+<main id="page-runtime" class="hidden">
+  <section id="rt-kpis" class="kpis"></section>
+
+  <section class="panel">
+    <h2>执行池 <span class="muted" id="rt-pools-hint"></span></h2>
+    <div class="body">
+      <div class="comp-grid" id="rt-pools"></div>
+      <p class="hint">每个池是<b>独立</b>的线程池：回测跑满也吃不掉行情的线程，
+      批量因子算不完也不会拖慢撤单。占用条满格不代表有问题 ——
+      那是"这个池正在满负荷干活"，只有<b>长期满格且队列持续积压</b>才需要扩容。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>队列积压 <span class="muted" id="rt-queue-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table style="min-width:640px">
+        <thead><tr>
+          <th>队列</th><th class="num">积压</th><th>执行池</th>
+          <th class="num">池容量</th><th class="num">池在跑</th>
+        </tr></thead>
+        <tbody id="rt-queue-rows"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel">
+    <h2>在跑的任务 <span class="muted" id="rt-running-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>任务</th><th>类型</th><th>队列</th><th class="num">尝试</th>
+          <th>关联事件</th><th>开始</th>
+        </tr></thead>
+        <tbody id="rt-running-rows"><tr><td colspan="6" class="muted">空闲</td></tr></tbody>
+      </table>
+    </div>
+    <div class="body"><p class="hint">这一屏回答的是"现在系统在做什么"。
+    服务互相直接调用时这个问题无解（调用栈一闪而过，不留痕迹），
+    有了队列与状态机之后它变成"读一张表"。</p></div>
+  </section>
+
+  <section class="panel">
+    <h2>调度规则 <span class="muted" id="rt-rules-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>规则</th><th>事件</th><th>任务</th><th>队列</th>
+          <th class="num">优先级</th><th class="num">重试</th><th>开关</th><th>说明</th>
+        </tr></thead>
+        <tbody id="rt-rule-rows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="body"><p class="hint">这张表是系统里<b>全部自动流转</b>的唯一清单。
+    想关掉某条链路（比如补历史数据时不想让它自动跑策略），直接在这里关，
+    不用改代码也不用重启。</p></div>
+  </section>
+
+  <section class="panel">
+    <h2>能力路由 <span class="muted" id="rt-router-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table style="min-width:820px">
+        <thead><tr>
+          <th>执行池</th><th>队列</th><th class="num">容量</th><th>能处理的任务类型</th>
+        </tr></thead>
+        <tbody id="rt-router-rows"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel">
+    <h2>死信 <span class="muted" id="rt-dead-hint"></span></h2>
+    <div class="body">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>时间</th><th>任务类型</th><th>队列</th><th class="num">尝试</th>
+            <th>错误</th><th>关联事件</th>
+          </tr></thead>
+          <tbody id="rt-dead-rows"><tr><td colspan="6" class="muted">无死信</td></tr></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-rt-dead-clear" class="danger">清空死信</button>
+        <span class="hint">死信是<b>待办清单</b>不是账本：处理完就该清掉，
+        否则健康判定会一直报"有死信"。累计发生过多少仍记在统计里。</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>手动投递任务 <span class="muted">走完整链路：队列 → 路由 → 执行池 → 处理器</span></h2>
+    <div class="body">
+      <div class="row" style="align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <label>任务类型<br><select id="rt-task-type" style="width:230px"></select></label>
+        <label>优先级<br>
+          <select id="rt-priority" style="width:110px">
+            <option value="1">CRITICAL</option>
+            <option value="3" selected>HIGH</option>
+            <option value="5">NORMAL</option>
+            <option value="7">LOW</option>
+            <option value="9">IDLE</option>
+          </select>
+        </label>
+        <label>幂等键（可选）<br><input id="rt-dedup" placeholder="留空=不去重" style="width:180px"></label>
+        <div style="flex:1;min-width:300px">
+          <label>参数 (JSON)</label>
+          <textarea id="rt-params" spellcheck="false" style="min-height:88px">{}</textarea>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btn-rt-dispatch" class="primary">投递</button>
+        <span class="hint" id="rt-dispatch-msg"></span>
+      </div>
+      <p class="hint" id="rt-dispatch-hint"></p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>维护计划 <span class="muted" id="rt-maint-hint"></span></h2>
+    <div class="body">
+      <div id="rt-maint-jobs" style="display:flex;flex-direction:column;gap:12px"></div>
+      <div class="row" style="margin-top:12px">
+        <button id="btn-rt-maint-save" class="primary">保存维护计划</button>
+        <span class="hint" id="rt-maint-msg"></span>
+      </div>
+      <p class="hint">周期两种：<b>每天 HH:MM</b> 或 <b>每 N 秒</b>。保存即生效并落盘
+      （<code>config/maintenance.json</code>），重启仍在。
+      <b>清理与归档默认只报告不删</b> —— "定时任务自动删文件"是运维事故高发区，
+      要真的删请显式勾选。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>日志等级 <span class="muted" id="rt-log-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <label>控制台级别<br><select id="rt-log-console" style="width:130px"></select></label>
+        <label>文件级别<br><select id="rt-log-file" style="width:130px"></select></label>
+        <label>重复日志节流窗口（秒）<br>
+          <input id="rt-log-window" type="number" min="0" step="0.5" style="width:110px">
+        </label>
+        <label class="hint" style="display:inline-flex;align-items:center;gap:4px">
+          <input type="checkbox" id="rt-log-persist" checked> 重启后仍生效
+        </label>
+        <button id="btn-rt-log-apply" class="primary">应用</button>
+        <span class="hint" id="rt-log-msg"></span>
+      </div>
+      <p class="hint" id="rt-log-detail"></p>
+    </div>
+  </section>
+</main>
+
 <aside id="drawer" class="drawer hidden">
   <header>
     <h1><span class="dot"></span><span id="d-title">任务详情</span></h1>
@@ -1209,6 +1365,38 @@
     // ---- 页面切换 ----
     var page = b.getAttribute('data-page');
     if(page){ switchPage(page); return; }
+
+    // ---- 运行时页 ----
+    if(b.id === 'btn-rt-dispatch'){ doDispatch(); return; }
+    if(b.id === 'btn-rt-maint-save'){ doSaveMaintenance(); return; }
+    if(b.id === 'btn-rt-log-apply'){ doApplyLogLevel(); return; }
+    if(b.id === 'btn-rt-dead-clear'){
+      if(!confirm('确认清空死信？已处理的死信清掉后健康判定才会恢复正常。')) return;
+      post('/api/runtime/dead/clear', {}).then(function(r){
+        toast(r && r.ok ? ('已清空 ' + (r.cleared||0) + ' 条') : ('失败: ' + ((r&&r.error)||'')), !(r&&r.ok));
+        loadRuntime();
+      }).catch(function(e){ toast('清空失败: ' + e.message, true); });
+      return;
+    }
+    var rule = b.getAttribute('data-rule');
+    if(rule){
+      post('/api/runtime/rule', {name: rule, enabled: b.getAttribute('data-on') === '1'})
+        .then(function(r){
+          toast(r && r.ok ? ('规则 ' + rule + ' 已' + (r.enabled ? '启用' : '关闭')) :
+                ('失败: ' + ((r&&r.error)||'')), !(r&&r.ok));
+          loadRuntime();
+        }).catch(function(e){ toast('操作失败: ' + e.message, true); });
+      return;
+    }
+    var mrun = b.getAttribute('data-mrun');
+    if(mrun){
+      post('/api/maintenance/run', {name: mrun}).then(function(r){
+        toast(r && r.ok ? ('已触发 ' + mrun) : ('失败: ' + ((r&&(r.error))||'')), !(r&&r.ok));
+        RT_MAINT_DIRTY = false;
+        loadRuntime();
+      }).catch(function(e){ toast('触发失败: ' + e.message, true); });
+      return;
+    }
 
     // ---- 实盘操作 ----
     if(b.id === 'btn-reconcile'){
@@ -2415,6 +2603,374 @@
     }).catch(function(e){ toast('加载回测详情失败: ' + e.message, true); });
   }
 
+  // ==================== 运行时页 ====================
+  var rtTimer = null, RT_JOBS = [], RT_LEVELS = [], RT_MAINT_DIRTY = false;
+
+  function kpiCards(cards){
+    return cards.map(function(c){
+      return '<div class="kpi"><div class="k">' + esc(c[0]) + '</div>' +
+             '<div class="v ' + (c[2]||'') + '">' + esc(c[1]) + '</div>' +
+             '<div class="s">' + esc(c[3]||'') + '</div></div>';
+    }).join('');
+  }
+
+  function loadRuntime(){
+    api('/api/runtime').then(function(d){
+      if(!d || d.ok === false){
+        $('rt-pools').innerHTML = '<div class="muted">' +
+          esc((d && d.error) || '运行时不可用') + '</div>';
+        return;
+      }
+      renderRtKpis(d);
+      renderRtPools(d);
+      renderRtQueues(d);
+      renderRtRunning(d);
+      renderRtRules(d);
+      renderRtRouter(d);
+      renderRtDead(d);
+      renderRtTaskTypes(d);
+    }).catch(function(e){
+      $('rt-pools').innerHTML = '<div class="muted">加载失败: ' + esc(e.message) + '</div>';
+    });
+    // 自动刷新只更新"看"的部分。维护计划是可编辑表单，用户改到一半
+    // 被 5s 一次的轮询重绘掉是最招人烦的那类 bug，所以脏了就不重绘。
+    if(!RT_MAINT_DIRTY) loadMaintenance();
+    loadLogging();
+  }
+
+  function renderRtKpis(d){
+    var st = d.stats || {}, ss = (d.store && d.store.stats) || {};
+    var pools = (d.pools && d.pools.pools) || [];
+    var inflight = 0, cap = 0;
+    pools.forEach(function(p){ inflight += p.inflight||0; cap += p.capacity||0; });
+    $('rt-kpis').innerHTML = kpiCards([
+      ['待执行', d.pending||0, d.pending > 20 ? 'down' : '', '队列里排队中'],
+      ['在跑', d.running||0, '', '已派给执行池'],
+      ['池占用', inflight + ' / ' + cap, inflight >= cap ? 'down' : '', '在跑 / 总槽位'],
+      ['已建任务', st.tasks_created||0, '', '被幂等挡下 ' + (st.tasks_deduped||0)],
+      ['成功 / 失败', (ss.success||0) + ' / ' + (ss.failed||0),
+       (ss.failed||0) ? 'down' : '', '重试 ' + (ss.retried||0) + ' 次'],
+      ['死信', d.dead_letter_count||0, (d.dead_letter_count||0) ? 'down' : '',
+       '累计进过 ' + (ss.dead_letter||0) + ' 条'],
+      ['事件', st.events_seen||0, '', '回声 ' + (st.events_echo||0) + ' 已拦截'],
+    ]);
+  }
+
+  function renderRtPools(d){
+    var pools = (d.pools && d.pools.pools) || [];
+    $('rt-pools-hint').textContent = pools.length + ' 个池 · 共 ' +
+      ((d.pools && d.pools.total_inflight) || 0) + ' 个任务在跑';
+    if(!pools.length){ $('rt-pools').innerHTML = '<div class="muted">无</div>'; return; }
+    $('rt-pools').innerHTML = pools.map(function(p){
+      var s = p.stats || {};
+      var pct = p.capacity ? Math.min(100, Math.round((p.inflight||0) / p.capacity * 100)) : 0;
+      var busy = (p.inflight||0) >= p.capacity && p.capacity > 0;
+      return '<div class="comp">' +
+        '<div class="top"><span class="nm">' + esc(p.label || p.pool) + '</span>' +
+        '<span class="pill ' + (busy ? 'warn' : ((p.inflight||0) ? 'run' : 'off')) + '">' +
+        (p.inflight||0) + ' / ' + (p.capacity||0) + '</span></div>' +
+        '<div class="prog"><div class="prog-txt"><span class="lab">占用</span>' +
+        '<span class="num">' + pct + '%</span></div>' +
+        '<div class="bar"><i class="' + (busy ? 'bad' : '') + '" style="width:' + pct + '%"></i></div></div>' +
+        '<div class="det">池 <code>' + esc(p.pool) + '</code> · 队列 <code>' + esc(p.queue||'-') + '</code></div>' +
+        '<div class="det">完成 ' + (s.succeeded||0) + ' · 失败 ' + (s.failed||0) +
+        ' · 超时 ' + (s.timeout||0) + ' · 满槽拒收 ' + (s.rejected||0) + '</div>' +
+        ((p.running && p.running.length)
+          ? '<div class="det">在跑: ' + p.running.slice(0,4).map(function(t){
+              return '<code>' + esc(String(t).slice(0,18)) + '</code>'; }).join(' ') +
+            (p.running.length > 4 ? ' …' : '') + '</div>'
+          : '') +
+        '</div>';
+    }).join('');
+  }
+
+  function renderRtQueues(d){
+    var qs = d.queues || {};
+    var poolOf = ((d.router||{}).pool_of_queue) || {};
+    var byName = {};
+    ((d.pools||{}).pools||[]).forEach(function(p){ byName[p.pool] = p; });
+    var names = Object.keys(qs).sort();
+    var total = 0; names.forEach(function(n){ total += qs[n]||0; });
+    $('rt-queue-hint').textContent = '合计积压 ' + total;
+    if(!names.length){
+      $('rt-queue-rows').innerHTML = '<tr><td colspan="5" class="muted">无队列</td></tr>'; return;
+    }
+    $('rt-queue-rows').innerHTML = names.map(function(n){
+      var p = byName[poolOf[n]] || null;
+      var pending = qs[n]||0;
+      return '<tr><td><code>' + esc(n) + '</code>' +
+        (pending > 10 ? ' <span class="pill warn">积压</span>' : '') + '</td>' +
+        '<td class="num">' + pending + '</td>' +
+        '<td>' + esc(p ? (p.label||p.pool) : (poolOf[n] || '-')) + '</td>' +
+        '<td class="num">' + (p ? (p.capacity||0) : '-') + '</td>' +
+        '<td class="num">' + (p ? (p.inflight||0) : '-') + '</td></tr>';
+    }).join('');
+  }
+
+  function renderRtRunning(d){
+    var rows = d.running_tasks || d.running || [];
+    var list = Array.isArray(rows) ? rows : [];
+    $('rt-running-hint').textContent = list.length + ' 个';
+    if(!list.length){
+      $('rt-running-rows').innerHTML = '<tr><td colspan="6" class="muted">空闲</td></tr>'; return;
+    }
+    $('rt-running-rows').innerHTML = list.map(function(t){
+      return '<tr><td><code>' + esc(String(t.task_id||'').slice(0,8)) + '</code></td>' +
+        '<td>' + esc(t.task_type||'-') + '</td>' +
+        '<td>' + esc(t.queue||'-') + '</td>' +
+        '<td class="num">' + (t.attempts||0) + '</td>' +
+        '<td class="muted">' + esc(String(t.correlation_id||'').slice(0,8) || '-') + '</td>' +
+        '<td>' + esc((t.started_at||'').replace('T',' ').slice(0,19) || '-') + '</td></tr>';
+    }).join('');
+  }
+
+  function renderRtRules(d){
+    var rs = (d.rules||{}).rules || [];
+    $('rt-rules-hint').textContent =
+      (d.rules||{}).enabled + ' / ' + (d.rules||{}).total + ' 条启用';
+    if(!rs.length){
+      $('rt-rule-rows').innerHTML = '<tr><td colspan="8" class="muted">无规则</td></tr>'; return;
+    }
+    $('rt-rule-rows').innerHTML = rs.map(function(r){
+      return '<tr><td><code>' + esc(r.name) + '</code>' +
+        (r.enabled ? '' : ' <span class="pill off">已关</span>') + '</td>' +
+        '<td>' + esc(r.event_type||'-') + '</td>' +
+        '<td>' + esc(r.task_type||'-') + '</td>' +
+        '<td>' + esc(r.queue||'-') + '</td>' +
+        '<td class="num">' + esc(r.priority) + '</td>' +
+        '<td class="num">' + esc(r.max_retries) + '</td>' +
+        '<td><button class="mini" data-rule="' + esc(r.name) + '" data-on="' +
+        (r.enabled ? '0' : '1') + '">' + (r.enabled ? '关闭' : '启用') + '</button></td>' +
+        '<td class="muted">' + esc(r.description||'') + '</td></tr>';
+    }).join('');
+  }
+
+  function renderRtRouter(d){
+    var rows = ((d.router||{}).pools) || [];
+    $('rt-router-hint').textContent = rows.length + ' 个池';
+    if(!rows.length){
+      $('rt-router-rows').innerHTML = '<tr><td colspan="4" class="muted">无</td></tr>'; return;
+    }
+    var byName = {};
+    ((d.pools||{}).pools||[]).forEach(function(p){ byName[p.pool] = p; });
+    $('rt-router-rows').innerHTML = rows.map(function(r){
+      var live = byName[r.pool];
+      var caps = (r.task_types||[]).map(function(t){
+        return '<code>' + esc(t) + '</code>'; }).join(' ');
+      return '<tr><td>' + esc(r.label||r.pool) + '</td>' +
+        '<td>' + esc(r.queue||'-') + '</td>' +
+        '<td class="num">' + (live ? (live.capacity||0) : '-') + '</td>' +
+        '<td>' + (caps || '<span class="muted">（无）</span>') + '</td></tr>';
+    }).join('');
+  }
+
+  function renderRtDead(d){
+    var rows = d.dead_letters || [];
+    $('rt-dead-hint').textContent = (d.dead_letter_count||0) + ' 条';
+    if(!rows.length){
+      $('rt-dead-rows').innerHTML = '<tr><td colspan="6" class="muted">无死信</td></tr>'; return;
+    }
+    $('rt-dead-rows').innerHTML = rows.map(function(t){
+      return '<tr><td>' + esc((t.finished_at||t.created_at||'').replace('T',' ').slice(0,19) || '-') + '</td>' +
+        '<td>' + esc(t.task_type||'-') + '</td>' +
+        '<td>' + esc(t.queue||'-') + '</td>' +
+        '<td class="num">' + (t.attempts||0) + '</td>' +
+        '<td class="muted" style="white-space:normal;min-width:240px">' +
+        esc(String(t.error||'').slice(0,160)) + '</td>' +
+        '<td class="muted">' + esc(String(t.correlation_id||'').slice(0,8) || '-') + '</td></tr>';
+    }).join('');
+  }
+
+  function renderRtTaskTypes(d){
+    var hs = ((d.handlers||{}).handlers) || [];
+    var sel = $('rt-task-type');
+    if(sel.getAttribute('data-filled')) return;   // 别把用户已选的项刷掉
+    sel.innerHTML = hs.map(function(h){
+      return '<option value="' + esc(h.task_type) + '">' + esc(h.task_type) +
+             (h.description ? ' — ' + esc(h.description) : '') + '</option>';
+    }).join('');
+    sel.setAttribute('data-filled', '1');
+    $('rt-dispatch-hint').textContent = hs.length + ' 种任务已注册处理器。' +
+      '未注册的类型（universe.rank / backtest.run / backtest.sweep）会直接进死信 —— ' +
+      '宁可明确失败，也不给一个跑成功但什么都没做的空壳。';
+  }
+
+  // ---------------- 维护计划 ----------------
+  function loadMaintenance(){
+    api('/api/maintenance').then(function(d){
+      if(!d || d.ok === false){
+        $('rt-maint-jobs').innerHTML = '<div class="muted">' +
+          esc((d && d.error) || '不可用') + '</div>';
+        return;
+      }
+      RT_JOBS = d.jobs || [];
+      $('rt-maint-hint').textContent = d.enabled + ' / ' + d.total + ' 个启用 · 检查节拍 ' +
+        (d.tick_seconds||30) + 's';
+      $('rt-maint-jobs').innerHTML = RT_JOBS.map(function(j, i){
+        var params = '';
+        Object.keys(j.params||{}).forEach(function(k){
+          var v = j.params[k];
+          var isApply = (k === 'apply');
+          params += '<label class="hint" style="display:inline-flex;flex-direction:row;' +
+            'align-items:center;gap:4px;font-size:12px">' + esc(k) +
+            (isApply ? '（真的执行）' : '') +
+            '<input type="' + (typeof v === 'boolean' ? 'checkbox' : 'text') + '" ' +
+            'data-mp="' + i + '" data-mk="' + esc(k) + '" ' +
+            (typeof v === 'boolean'
+              ? (v ? 'checked' : '')
+              : ('value="' + esc(v) + '" style="width:80px"')) +
+            '></label>';
+        });
+        return '<div class="comp">' +
+          '<div class="top"><span class="nm">' + esc(j.label) + '</span>' +
+          '<span class="pill ' + (j.enabled ? 'run' : 'off') + '">' +
+          (j.enabled ? '启用' : '停用') + '</span></div>' +
+          '<div class="det">任务 <code>' + esc(j.task_type) + '</code> · ' + esc(j.description||'') + '</div>' +
+          '<div class="row" style="margin-top:8px;gap:10px;align-items:flex-end;flex-wrap:wrap">' +
+            '<label class="hint" style="display:inline-flex;flex-direction:row;align-items:center;gap:4px">' +
+              '<input type="checkbox" data-mf="enabled" data-mi="' + i + '"' +
+              (j.enabled ? ' checked' : '') + '> 启用</label>' +
+            '<label>周期<select data-mf="schedule" data-mi="' + i + '" style="width:110px">' +
+              '<option value="daily"' + (j.schedule==='daily'?' selected':'') + '>每天</option>' +
+              '<option value="interval"' + (j.schedule==='interval'?' selected':'') + '>每 N 秒</option>' +
+            '</select></label>' +
+            '<label>时刻 (HH:MM)<input data-mf="at" data-mi="' + i + '" value="' +
+              esc(j.at) + '" style="width:90px"></label>' +
+            '<label>N 秒<input data-mf="interval_sec" data-mi="' + i + '" type="number" min="300" value="' +
+              esc(j.interval_sec) + '" style="width:100px"></label>' +
+            params +
+            '<button class="mini" data-mrun="' + esc(j.name) + '">立即执行</button>' +
+          '</div>' +
+          '<div class="det">上次 ' + (j.last_run_iso || '从未') +
+            ' · 下次 ' + (j.next_run_iso || (j.enabled ? '-' : '未启用')) +
+            ' · 已跑 ' + (j.runs||0) + ' 次' +
+            (j.last_result ? ' · ' + esc(j.last_result) : '') + '</div>' +
+          '</div>';
+      }).join('');
+      // 输入即"脏"：之后自动刷新不再重绘这一块，直到保存/手动刷新
+      Array.prototype.forEach.call(
+        $('rt-maint-jobs').querySelectorAll('input, select'),
+        function(el){
+          el.addEventListener('change', function(){ RT_MAINT_DIRTY = true; });
+          el.addEventListener('input', function(){ RT_MAINT_DIRTY = true; });
+        });
+    }).catch(function(e){
+      $('rt-maint-jobs').innerHTML = '<div class="muted">加载失败: ' + esc(e.message) + '</div>';
+    });
+  }
+
+  function collectMaintenance(){
+    var jobs = {};
+    RT_JOBS.forEach(function(j, i){
+      var get = function(field){
+        var el = document.querySelector('[data-mf="' + field + '"][data-mi="' + i + '"]');
+        return el ? el : null;
+      };
+      var enabled = get('enabled'), sched = get('schedule');
+      var at = get('at'), iv = get('interval_sec');
+      var params = {};
+      document.querySelectorAll('[data-mp="' + i + '"]').forEach(function(el){
+        var k = el.getAttribute('data-mk');
+        params[k] = (el.type === 'checkbox') ? el.checked : el.value;
+      });
+      jobs[j.name] = {
+        enabled: enabled ? enabled.checked : j.enabled,
+        schedule: sched ? sched.value : j.schedule,
+        at: at ? at.value : j.at,
+        interval_sec: iv ? Number(iv.value) : j.interval_sec,
+        params: params,
+      };
+    });
+    return {jobs: jobs};
+  }
+
+  function doSaveMaintenance(){
+    $('rt-maint-msg').textContent = '保存中…';
+    post('/api/maintenance/save', collectMaintenance()).then(function(r){
+      if(r && r.ok){
+        $('rt-maint-msg').textContent = '已保存并生效';
+        toast('维护计划已保存');
+        RT_MAINT_DIRTY = false;      // 已落盘，可以重新接受自动刷新
+        loadMaintenance();
+      } else {
+        $('rt-maint-msg').textContent = '失败: ' + ((r && r.error) || '未知');
+        toast('保存失败', true);
+      }
+    }).catch(function(e){
+      $('rt-maint-msg').textContent = '失败: ' + e.message; toast('保存失败', true);
+    });
+  }
+
+  // ---------------- 日志等级 ----------------
+  function loadLogging(){
+    api('/api/logging').then(function(d){
+      if(!d || d.ok === false){ return; }
+      RT_LEVELS = d.levels || [];
+      var opts = function(cur, withFollow){
+        return (withFollow ? '<option value="">跟随控制台</option>' : '') +
+          RT_LEVELS.map(function(l){
+            return '<option value="' + esc(l) + '"' + (l === cur ? ' selected' : '') + '>' +
+              esc(l) + '</option>'; }).join('');
+      };
+      $('rt-log-console').innerHTML = opts(d.console, false);
+      $('rt-log-file').innerHTML = opts(d.file, true);
+      $('rt-log-window').value = d.throttle_window;
+      $('rt-log-detail').textContent =
+        '目录 ' + (d.dir||'-') + ' · 保留 ' + (d.retention||'-') +
+        ' · 轮转 ' + (d.rotation||'-') +
+        ' · 被节流条目 ' + ((d.throttled||{}).buckets || 0) +
+        ' · 已压缩 ' + ((d.throttled||{}).pending || 0) + ' 次' +
+        (d.persisted ? ' · 已有持久化配置（重启后仍按此级别）' : ' · 当前来自环境变量/默认值');
+    }).catch(function(){});
+  }
+
+  function doApplyLogLevel(){
+    var body = {
+      console: $('rt-log-console').value,
+      file: $('rt-log-file').value,
+      throttle_window: Number($('rt-log-window').value),
+      persist: $('rt-log-persist').checked,
+    };
+    $('rt-log-msg').textContent = '应用中…';
+    post('/api/logging/level', body).then(function(r){
+      if(r && r.ok){
+        $('rt-log-msg').textContent = '控制台=' + r.console + ' 文件=' + r.file;
+        toast('日志级别已切换（无需重启）');
+        loadLogging();
+      } else {
+        $('rt-log-msg').textContent = '失败: ' + ((r && r.error) || '未知');
+        toast('切换失败', true);
+      }
+    }).catch(function(e){
+      $('rt-log-msg').textContent = '失败: ' + e.message; toast('切换失败', true);
+    });
+  }
+
+  function doDispatch(){
+    var raw = $('rt-params').value.trim() || '{}';
+    var params = null;
+    try { params = JSON.parse(raw); }
+    catch(e){ $('rt-dispatch-msg').textContent = '参数不是合法 JSON: ' + e.message; return; }
+    $('rt-dispatch-msg').textContent = '投递中…';
+    post('/api/runtime/dispatch', {
+      task_type: $('rt-task-type').value,
+      params: params,
+      priority: Number($('rt-priority').value),
+      dedup_key: $('rt-dedup').value.trim(),
+    }).then(function(r){
+      if(r && r.ok){
+        $('rt-dispatch-msg').textContent = '已投递到 ' + (r.pool||'-') + ' 池';
+        toast('任务已投递: ' + r.task_type);
+        loadRuntime();
+      } else {
+        $('rt-dispatch-msg').textContent = '失败: ' + ((r && r.error) || '未知');
+        toast('投递失败', true);
+      }
+    }).catch(function(e){
+      $('rt-dispatch-msg').textContent = '失败: ' + e.message; toast('投递失败', true);
+    });
+  }
+
   function switchPage(page){
     PAGE = page;
     $('page-live').classList.toggle('hidden', page !== 'live');
@@ -2422,10 +2978,17 @@
     $('page-strategy').classList.toggle('hidden', page !== 'strategy');
     $('page-pool').classList.toggle('hidden', page !== 'pool');
     $('page-backtest').classList.toggle('hidden', page !== 'backtest');
+    $('page-runtime').classList.toggle('hidden', page !== 'runtime');
     Array.prototype.forEach.call($('tabs').children, function(b){
       b.classList.toggle('on', b.getAttribute('data-page') === page);
     });
     if(btTimer){ clearInterval(btTimer); btTimer = null; }
+    if(rtTimer){ clearInterval(rtTimer); rtTimer = null; }
+    if(page === 'runtime'){
+      loadRuntime();
+      // 2s 太密（维护计划与日志等级不需要秒级刷新），5s 足够看清积压趋势
+      rtTimer = setInterval(loadRuntime, 5000);
+    }
     if(page === 'backtest'){
       loadBacktest();
       loadBtStrategies();   // 填充 bt-strategy 下拉（能力清单 / 默认参数）
