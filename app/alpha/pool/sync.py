@@ -38,6 +38,43 @@ def _result(ok: int, failed: List[Tuple[str, str]],
     return out
 
 
+def _flush(what: str, frames: List[Any], save_one: Any,
+           failed: List[Tuple[str, str]]) -> int:
+    """攒批落库：**一次事务**而不是每票一次。
+
+    每个 ``save_*`` 都自己开 Session 并立刻 commit（`kline_repo.py` 里
+    13 个 save 全是这个模式）。60 只票 × 9 个类别就是约 540 次
+    BEGIN/COMMIT —— WAL 下每次 commit 一次 fsync，还要反复取还连接池。
+    日频截面表都按 ``(symbol, date)`` upsert，把多只票的 df 拼起来
+    一次写入是等价的。
+
+    失败退回逐条：批量写失败最常见的成因是其中某一行数据有问题，
+    退回逐条至少保住"一只坏票不拖垮整批"这个原有语义，
+    不会比改造前更差。
+    """
+    if not frames:
+        return 0
+    try:
+        df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+        save_one(df)
+        return len(frames)
+    except Exception as exc:
+        logger.warning(f"{what} 批量落库失败，退回逐条写入: {exc}")
+        n = 0
+        for one in frames:
+            try:
+                save_one(one)
+                n += 1
+            except Exception as exc2:
+                sym = "?"
+                try:
+                    sym = str(one["symbol"].iloc[0])
+                except Exception:
+                    pass
+                failed.append((sym, f"落库失败: {exc2}"))
+        return n
+
+
 def _target_day(day: Any = None):
     """本次同步的"目标数据日"。
 
@@ -74,18 +111,24 @@ def sync_fund_flow(symbols: Sequence[str], days: int = 60,
     syms = [normalize_symbol(s) for s in dict.fromkeys(symbols) if s]
     target = _target_day(day)
     have: Dict[str, str] = {} if force else R.latest_dates("fund_flow", syms)
+    frames: List[Any] = []
     for sym in syms:
         if not force and have.get(sym) and str(have[sym]) >= str(target):
             skipped += 1
             continue
         try:
             df = MX.fetch_fund_flow(sym, days=days)
-            R.save_fund_flow(df)
-            ok += 1
         except MX.MarketXError as exc:
             failed.append((sym, str(exc)))
+            continue
         except Exception as exc:  # 兜底：任何异常都不能中断整批
             failed.append((sym, f"{type(exc).__name__}: {exc}"))
+            continue
+        if df is None or getattr(df, "empty", True):
+            failed.append((sym, "返回空数据"))
+            continue
+        frames.append(df)
+    ok += _flush("fund_flow", frames, R.save_fund_flow, failed)
     if skipped:
         logger.info(f"资金流同步跳过 {skipped} 只（库内已有 {target} 的数据，"
                     f"force=True 可强制重采）")
@@ -108,13 +151,13 @@ def sync_chip(symbols: Sequence[str], force: bool = False,
     syms = [normalize_symbol(s) for s in dict.fromkeys(symbols) if s]
     target = _target_day(day)
     have: Dict[str, str] = {} if force else R.latest_dates("chip", syms)
+    frames: List[Any] = []
     for sym in syms:
         if not force and have.get(sym) and str(have[sym]) >= str(target):
             skipped += 1
             continue
         try:
-            R.save_chip(MX.fetch_chip(sym))
-            ok += 1
+            df = MX.fetch_chip(sym)
         except MX.MarketXError as exc:
             if "熔断" in str(exc):
                 # 源已断开：这不是这只票的问题，记"跳过"而不是"失败"，
@@ -122,11 +165,18 @@ def sync_chip(symbols: Sequence[str], force: bool = False,
                 tripped += 1
                 continue
             failed.append((sym, str(exc)))
+            continue
         except Exception as exc:
             if "熔断" in str(exc):
                 tripped += 1
                 continue
             failed.append((sym, f"{type(exc).__name__}: {exc}"))
+            continue
+        if df is None or getattr(df, "empty", True):
+            failed.append((sym, "返回空数据"))
+            continue
+        frames.append(df)
+    ok += _flush("chip", frames, R.save_chip, failed)
     if skipped:
         logger.info(f"筹码同步跳过 {skipped} 只（库内已有 {target} 的数据）")
     if tripped:

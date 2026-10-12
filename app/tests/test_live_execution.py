@@ -410,5 +410,138 @@ class TestLiveRiskRules(unittest.TestCase):
         self.assertFalse(r.check(_signal(Side.SELL), _state(position_size=0)).allowed)
 
 
+# ===========================================================================
+# 超时单回收（reaper）
+#
+# 守的是实盘最难排查的一类故障：**策略在出信号，但就是不下单**。
+# 根因是券商回报丢失后订单永远停在 SUBMITTED，而"已有未结订单就不再下新单"
+# 那道保护会让该方向的信号被永久静默丢弃 —— 日志里一条 ERROR 都没有。
+# ===========================================================================
+class _SilentGateway(SimulatedGateway):
+    """可控的假网关：下单受理，但**永不推送回报**。
+
+    ``query_orders`` 的返回值由测试指定，用来模拟三种真实情况：
+      1. 券商那边早就是终态了（回报丢了，回查能对齐）
+      2. 券商那边还挂着（正常挂单，不该被撤）
+      3. 券商查无此单（报单可能根本没成功）
+    """
+
+    def __init__(self, *a, query_result=None, cancel_raises=False, **kw):
+        super().__init__(*a, **kw)
+        self.query_result = query_result if query_result is not None else []
+        self.cancel_raises = cancel_raises
+        self.cancel_calls = 0
+        self.query_calls = 0
+
+    def poll_fills(self):
+        return []          # 回报永久丢失
+
+    def poll_order_updates(self):
+        return []
+
+    def query_orders(self, only_open: bool = True):
+        self.query_calls += 1
+        return self.query_result
+
+    def cancel_order(self, broker_order_id: str) -> bool:
+        self.cancel_calls += 1
+        if self.cancel_raises:
+            raise GatewayError("撤单接口超时")
+        return True
+
+
+class TestStaleOrderReaper(unittest.TestCase):
+    def _stuck_broker(self, **gw_kw):
+        """造一个"单已报出、回报永不到"的 Broker。"""
+        pf = Portfolio(task_id="t1", symbol="000001",
+                       initial_cash=100_000.0, fee_rate=0.0003)
+        gw = _SilentGateway(price_source=lambda: {"000001": 10.0},
+                            initial_cash=100_000.0, **gw_kw)
+        gw.connect()
+        br = LiveBroker(pf, gw, fee_rate=0.0003, order_timeout=1.0)
+        br.set_price(10.0)
+        order = br.create_order("000001", Side.BUY, 100, task_id="t1")
+        br.submit(order)
+        return br, gw, order
+
+    def test_not_stale_before_timeout(self):
+        """没超时就不该动它 —— 限价单挂一会儿是常态，乱撤会撤掉能成交的单。"""
+        br, gw, order = self._stuck_broker()
+        self.assertEqual(len(br.sweep_stale_orders()), 0)
+        self.assertTrue(order.status == OrderStatus.SUBMITTED)
+        self.assertEqual(gw.query_calls, 0)
+
+    def test_recovered_by_broker_query(self):
+        """多数"卡单"只是回报丢了：回查能对齐就不撤单、不误伤。
+
+        这是最重要的一条路径 —— 它把"真故障"和"正常挂单"区分开了。
+        """
+        br, gw, order = self._stuck_broker()
+        # 回查结果必须用**真实券商单号**，否则匹配不上（回查按 broker_order_id 找）
+        bid = br._broker_ids[order.order_id]
+        filled = GatewayOrder(
+            broker_order_id=bid, client_order_id=order.order_id, symbol="000001",
+            side=Side.BUY, size=100, price=10.0, status=OrderStatus.FILLED,
+        )
+        gw.query_result = [filled]
+
+        handled = br.sweep_stale_orders(now=_later(order.created_at, 5))
+        self.assertEqual(len(handled), 1)
+        self.assertTrue(order.is_final)
+        self.assertEqual(br.stats["stale_recovered"], 1)
+        self.assertEqual(gw.cancel_calls, 0)     # 对齐了就不需要撤单
+
+    def test_still_open_at_broker_is_not_cancelled_early(self):
+        """券商确认还挂着 → 还没到强制撤单时长就不该撤。"""
+        br, gw, order = self._stuck_broker()
+        open_gw = GatewayOrder(
+            broker_order_id=br._broker_ids[order.order_id],
+            client_order_id=order.order_id, symbol="000001",
+            side=Side.BUY, size=100, price=10.0, status=OrderStatus.SUBMITTED,
+        )
+        gw.query_result = [open_gw]
+        br.sweep_stale_orders(now=_later(order.created_at, 5))
+        self.assertEqual(gw.cancel_calls, 0)
+
+    def test_forced_close_after_cancel_without_feedback(self):
+        """撤单请求发出后仍无回报 → 强制收尾，绝不让任务永久停摆。"""
+        br, gw, order = self._stuck_broker()
+        # 1) 超过撤单阈值 -> 发撤单请求
+        br.sweep_stale_orders(now=_later(order.created_at, 11))
+        self.assertEqual(gw.cancel_calls, 1)
+        self.assertFalse(order.is_final)
+        # 2) 撤单后等够时间仍无回报 -> 强制置终态
+        br.sweep_stale_orders(now=_later(order.created_at, 14))
+        self.assertTrue(order.is_final)
+        self.assertEqual(br.stats["stale_timeout"], 1)
+        self.assertTrue(order.meta.get("stale"))
+
+    def test_force_close_when_broker_never_heard_of_it(self):
+        """券商查无此单（报单可能没成功）：回查次数用尽后收尾。"""
+        br, gw, order = self._stuck_broker()   # query_result 为空
+        for _ in range(br.STALE_MAX_TRIES):
+            br.sweep_stale_orders(now=_later(order.created_at, 3))
+        self.assertTrue(order.is_final, "回查用尽后必须收尾，否则永久卡单")
+        self.assertEqual(br.stats["stale_timeout"], 1)
+
+    def test_cancel_retries_then_recovers_by_query(self):
+        """撤单接口报错，但回查发现单子已终态 —— 按回查结果收尾，不算失败。"""
+        br, gw, order = self._stuck_broker(cancel_raises=True)
+        done = GatewayOrder(
+            broker_order_id=br._broker_ids[order.order_id],
+            client_order_id=order.order_id, symbol="000001",
+            side=Side.BUY, size=100, price=10.0, status=OrderStatus.CANCELLED,
+        )
+        gw.query_result = [done]
+        self.assertTrue(br.cancel(order.order_id))
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
+
+
+def _later(t, seconds: float):
+    """把订单创建时间往后推 N 秒 —— 模拟"这笔单已经挂了很久"。"""
+    from datetime import timedelta
+    return t + timedelta(seconds=seconds)
+
+
 if __name__ == "__main__":
     unittest.main()

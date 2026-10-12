@@ -175,6 +175,17 @@ class Order:
     reject_reason: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def is_final(self) -> bool:
+        """是否已到终态（不会再有后续回报）。
+
+        与 ``GatewayOrder.is_final`` 同义。注意 ``PARTIAL`` **不是**终态：
+        还有一部分挂在市场上，资金仍在途，额度要继续占着。
+        """
+        return self.status in (
+            OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["side"] = self.side.value

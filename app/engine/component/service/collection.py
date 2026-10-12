@@ -470,8 +470,19 @@ class CollectionService(ServiceComponent):
         return self._check_guard_now(symbols, auto_repair)
 
     def collect_cross_now(self, slot: str = "post") -> defer.Deferred:
-        """立刻跑一轮日频截面采集。"""
-        return threads.deferToThread(self._run_cross_once, slot)
+        """立刻跑一轮日频截面采集。
+
+        带忙碌保护：面板上连点两下就会同时跑两轮全市场采集
+        （十几个接口 × 数百只票），既打满线程池、又把自己往限流里推。
+        定时路径（``_tick_cross``）本来就有这道保护，手动入口不能例外。
+        """
+        if self._busy_cross:
+            logger.warning("日频截面采集仍在进行中，忽略本次手动触发")
+            return defer.succeed(None)
+        self._busy_cross = True
+        d = threads.deferToThread(self._run_cross_once, slot)
+        d.addBoth(self._release_cross)
+        return d
 
 
 # ============================================================

@@ -18,11 +18,18 @@ from enum import Enum
 from typing import Dict, Any, Optional
 
 
-class RunMode(Enum):
-    """引擎运行模式，完全匹配你的实盘/回测需求"""
-    BACKTEST = "BACKTEST"    # 回测模式：任务完成自动停止
-    SIMULATE = "SIMULATE"    # 模拟盘模式：常驻运行，不发实单
-    LIVE = "LIVE"            # 实盘模式：常驻运行，发实单
+# 运行模式**只有一个真源**：``app.domain.types.RunMode``。
+#
+# 这里以前自己定义了一份同名枚举，后果比"重复代码"严重得多：
+# ``builder.py`` 从 domain 导入、``base.py``/``scheduler.py`` 从这里导入，
+# 于是 ``builder`` 造出来的 ``RunMode.BACKTEST`` 和 ``base`` 用来比较的
+# ``RunMode.BACKTEST`` 是**两个不同的类** —— ``==`` 恒为 False。
+# 直接后果：``base.py`` 里"回测模式装空闲自动停止看门狗"的判断永远不成立，
+# 回测跑完数据后 reactor 永久阻塞，命令永不返回。
+#
+# 保留这里的名字是为了不动已有 import（``from app.engine.settings import
+# RunMode`` 仍在用），它现在是 domain 版本的别名。
+from app.domain.types import RunMode  # noqa: F401  单一真源，兼容旧导入路径
 
 
 class EngineStatus(Enum):

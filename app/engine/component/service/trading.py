@@ -140,6 +140,7 @@ class TradingService(ServiceComponent):
         self.stats_gateway: Dict[str, int] = {
             "polls": 0, "fills": 0, "updates": 0, "unknown": 0,
             "reconciles": 0, "mismatches": 0, "errors": 0, "account_refreshes": 0,
+            "stale": 0,   # 被回收的超时单（回报丢失兜底）
         }
         self.last_reconcile: Dict[str, Any] = {}
         self._seeded_tasks: set = set()
@@ -350,12 +351,15 @@ class TradingService(ServiceComponent):
         # 不撤的话进程没了、单还在，第二天开盘才发现成交了 —— 这是实盘最典型的事故。
         if graceful:
             try:
+                # cancel_all() 返回的是撤掉的单数，不是 True/False。
+                # 写成 ``1 for ... if b.cancel_all()`` 数出来的是"有几个 broker
+                # 撤成功过"——日志里的数字会严重偏小，排查时以为只撤了 1 单。
                 n = sum(
-                    1 for b in self._brokers.values()
-                    if getattr(b, "cancel_all", None) and b.cancel_all()
+                    (getattr(b, "cancel_all", None) and (b.cancel_all() or 0)) or 0
+                    for b in self._brokers.values()
                 )
                 if n:
-                    logger.warning(f"退出前已撤销 {n} 个任务的未结订单，等待回报收尾")
+                    logger.warning(f"退出前已撤销 {n} 笔未结订单，等待回报收尾")
                     # 给券商一点时间把撤单回报推回来
                     yield task.deferLater(__import__("twisted.internet.reactor",
                                                      fromlist=["reactor"]).reactor, 1.5,
@@ -527,7 +531,36 @@ class TradingService(ServiceComponent):
                     self.stats_gateway["updates"] += 1
             except Exception as exc:
                 logger.debug(f"订单状态更新处理失败: {exc}")
+
+        # 回报收完后顺带回收超时单。
+        # 放在这里而不是新起一个 LoopingCall：轮询本来就在定期跑，
+        # 多一个定时器就多一处"停不干净"的风险，而回收完全不需要准时。
+        n += self._sweep_stale()
         return n
+
+    def _sweep_stale(self) -> int:
+        """让每个 Broker 回收自己的超时未结订单。
+
+        没有这道兜底，一次券商回报丢失就会让该任务永久停止下单，
+        而日志里一条 ERROR 都没有——这是最难排查的一类故障。
+        """
+        n = 0
+        for broker in list(self._brokers.values()):
+            sweep = getattr(broker, "sweep_stale_orders", None)
+            if sweep is None:
+                continue          # 模拟撮合瞬时成交，不需要回收
+            try:
+                handled = sweep() or []
+            except Exception as exc:
+                log_throttled(
+                    "ERROR", f"超时单回收异常: {exc}", key="live-sweep-stale")
+                continue
+            n += len(handled)
+            if handled:
+                self.stats_gateway["stale"] = \
+                    self.stats_gateway.get("stale", 0) + len(handled)
+        return n
+
     def _publish_fill(self, fill: FillEvent, broker: Any) -> None:
         if self.event_bus is None:
             return

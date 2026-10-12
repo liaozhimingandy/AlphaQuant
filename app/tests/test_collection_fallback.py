@@ -18,6 +18,8 @@
 # -------------------------------------------------------------------------------
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -478,6 +480,77 @@ class TestAdaptiveThrottle(unittest.TestCase):
                                create=True):
             MX._call("fake_ok", limit_key="unit-r", retry=0)
         self.assertLess(MX._throttle_gap("unit-r"), 4.0)
+
+    def test_concurrent_calls_are_serialized_not_batched(self):
+        """并发下限速必须仍然生效 —— 这是限速最容易失效的地方。
+
+        实现若退化成「读上次时间 → 各自 sleep」，N 个线程会读到
+        同一个 ``last``、算出同样的等待，睡醒后**同一瞬间一起打出去**，
+        限速形同虚设，源端该 RST 还是 RST。
+
+        正确的做法是"预约时刻"：每个线程领到不同的发车时刻，排成一列。
+        这里断言：8 个并发线程的实际发车时刻两两间隔 >= gap。
+        """
+        import threading
+
+        MX = self.MX
+        key = "unit-concurrent"
+        MX._THROTTLE_GAP[key] = 0.2      # 200ms，够小不至于拖慢测试
+        fired: list = []
+        lock = threading.Lock()
+
+        def worker():
+            MX._throttle(key)
+            with lock:
+                fired.append(time.monotonic())
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        fired.sort()
+
+        gaps = [b - a for a, b in zip(fired, fired[1:])]
+        self.assertEqual(len(fired), 8)
+        # 留一点浮点/调度余量，但不允许出现"几乎同时发车"
+        self.assertTrue(all(g >= 0.2 * 0.8 for g in gaps),
+                        f"并发下限速被绕过，实际间隔: {[round(g, 3) for g in gaps]}")
+
+    def test_breaker_counts_are_not_lost_under_concurrency(self):
+        """熔断计数并发下不能丢。``fails += 1`` 是读改写，无锁会丢计数，
+        表现是"明明失败了很多次，熔断却迟迟不触发"。"""
+        import threading
+
+        MX = self.MX
+        key = "unit-breaker-concurrent"
+        MX._BATCH_BREAKER.pop(key, None)
+
+        err = ConnectionError("Connection aborted")
+
+        def fail():
+            def boom():
+                raise err
+            try:
+                MX._breaker_guard(key, boom)
+            except Exception:
+                pass
+
+        # 阈值抬到并发数：只要**丢一次**计数就打不开熔断，
+        # 用例就能抓到。（用默认阈值 3 的话，10 次并发里丢几次也照样能开，
+        # 验不出问题。）
+        with mock.patch.object(MX, "_BATCH_BREAKER_THRESHOLD", 10):
+            threads = [threading.Thread(target=fail) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        st = MX._BATCH_BREAKER.get(key) or {}
+        self.assertGreaterEqual(int(st.get("fails") or 0), 10,
+                                f"并发下丢了熔断计数: {st}")
+        self.assertIsNotNone(MX._breaker_open(key), "达到阈值就该断开")
+        MX._BATCH_BREAKER.pop(key, None)
 
 
 class TestCalendarStateNaming(unittest.TestCase):

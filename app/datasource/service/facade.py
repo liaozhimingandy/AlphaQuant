@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import random
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -58,6 +59,13 @@ class MarketXError(RuntimeError):
 
 _LAST_CALL: Dict[str, float] = {}
 
+#: 限速/熔断/快照缓存都是**跨线程共享**的可变状态。
+#: 采集全部跑在 ``deferToThread`` 的线程池里（同一时刻可能有 N 只票在取数），
+#: 没有这把锁时 N 个线程会读到同一个 ``_LAST_CALL[key]``，
+#: 算出相同的 ``wait`` 并各自 sleep，然后**同一瞬间一起发请求** ——
+#: 限速与熔断在并发下形同虚设，仍然会被源端 RST / 封 IP。
+_RATE_LOCK = threading.Lock()
+
 
 #: 被限流后**临时**上调的间隔（秒），按 limit_key 独立。
 #: ``DATA_FETCH_MIN_INTERVAL`` 是"平时"的节奏（默认 0.3s），
@@ -76,26 +84,39 @@ def _throttle_gap(key: str) -> float:
 def _throttle_penalize(key: str) -> None:
     """撞到限流/连接被重置：把该类接口的间隔翻倍，别继续硬撞。"""
     base = float(settings.DATA_FETCH_MIN_INTERVAL or 0.0)
-    cur = max(base, float(_THROTTLE_GAP.get(key) or 0.0))
-    _THROTTLE_GAP[key] = min(max(cur * 2.0, 0.5), _THROTTLE_GAP_MAX)
+    with _RATE_LOCK:
+        cur = max(base, float(_THROTTLE_GAP.get(key) or 0.0))
+        _THROTTLE_GAP[key] = min(max(cur * 2.0, 0.5), _THROTTLE_GAP_MAX)
 
 
 def _throttle_relax(key: str) -> None:
     """一次成功后回落一档（不直接清零，避免立刻又打满）。"""
-    if key in _THROTTLE_GAP:
-        _THROTTLE_GAP[key] = max(0.0, _THROTTLE_GAP[key] / 2.0)
+    with _RATE_LOCK:
+        if key in _THROTTLE_GAP:
+            _THROTTLE_GAP[key] = max(0.0, _THROTTLE_GAP[key] / 2.0)
 
 
 def _throttle(key: str = "marketx") -> None:
-    """同类接口的限速。被限流封 IP 是最常见也最难恢复的故障。"""
+    """同类接口的限速。被限流封 IP 是最常见也最难恢复的故障。
+
+    用**预约时刻**而不是「读上次时间 → 自己 sleep」：
+
+    后者在多线程下会让 N 个线程读到同一个 ``last``、算出同样的 wait、
+    睡醒后同时打出去（限速失效）。预约时刻的做法是：在锁内领一个
+    **属于自己的发车时刻** ``slot``，锁外睡到那个时刻。后到的线程领到
+    更晚的 slot，天然排成一列，间隔就是 gap。锁内绝不 sleep，
+    否则会把整个线程池串行卡在临界区上。
+    """
     gap = _throttle_gap(key)
     if gap <= 0:
         return
-    last = _LAST_CALL.get(key, 0.0)
-    wait = gap - (time.monotonic() - last)
+    with _RATE_LOCK:
+        now = time.monotonic()
+        slot = max(now, _LAST_CALL.get(key, 0.0) + gap)
+        _LAST_CALL[key] = slot
+    wait = slot - time.monotonic()
     if wait > 0:
         time.sleep(wait)
-    _LAST_CALL[key] = time.monotonic()
 
 
 # ===========================================================================
@@ -113,35 +134,47 @@ _BATCH_BREAKER_COOLDOWN = 300.0    # 断开后冷却 5 分钟
 
 def _breaker_open(key: str) -> Optional[str]:
     """熔断中返回原因文本；未熔断（或冷却已过）返回 None。"""
-    st = _BATCH_BREAKER.get(key)
-    if not st:
-        return None
-    until = float(st.get("until") or 0.0)
-    if until <= 0:
-        # 已经在累计失败、但还没到断开阈值 —— 此时**不能**把计数清掉，
-        # 否则每次进来都从头数，永远到不了阈值（熔断形同虚设）。
-        return None
-    if time.monotonic() >= until:
-        _BATCH_BREAKER.pop(key, None)   # 冷却结束，放它再试一次
-        return None
-    return str(st.get("why") or "连续失败")
+    with _RATE_LOCK:
+        st = _BATCH_BREAKER.get(key)
+        if not st:
+            return None
+        until = float(st.get("until") or 0.0)
+        if until <= 0:
+            # 已经在累计失败、但还没到断开阈值 —— 此时**不能**把计数清掉，
+            # 否则每次进来都从头数，永远到不了阈值（熔断形同虚设）。
+            return None
+        if time.monotonic() >= until:
+            _BATCH_BREAKER.pop(key, None)   # 冷却结束，放它再试一次
+            return None
+        return str(st.get("why") or "连续失败")
 
 
 def _breaker_record(key: str, ok: bool, why: str = "") -> None:
-    """记录一次调用结果。成功即清零；失败累计到阈值就断开。"""
-    if ok:
-        _BATCH_BREAKER.pop(key, None)
-        return
-    st = _BATCH_BREAKER.setdefault(key, {"fails": 0, "until": 0.0, "why": ""})
-    st["fails"] = int(st.get("fails") or 0) + 1
-    st["why"] = why or "连续失败"
-    if int(st["fails"]) >= _BATCH_BREAKER_THRESHOLD and not st.get("until"):
-        st["until"] = time.monotonic() + _BATCH_BREAKER_COOLDOWN
+    """记录一次调用结果。成功即清零；失败累计到阈值就断开。
+
+    必须持锁：``fails += 1`` 是读改写，并发下会丢计数，
+    表现是"明明失败了很多次，熔断却迟迟不触发"。
+    """
+    with _RATE_LOCK:
+        if ok:
+            _BATCH_BREAKER.pop(key, None)
+            return
+        st = _BATCH_BREAKER.setdefault(key, {"fails": 0, "until": 0.0, "why": ""})
+        st["fails"] = int(st.get("fails") or 0) + 1
+        st["why"] = why or "连续失败"
+        if int(st["fails"]) >= _BATCH_BREAKER_THRESHOLD and not st.get("until"):
+            st["until"] = time.monotonic() + _BATCH_BREAKER_COOLDOWN
+            fails = st["fails"]
+            detail = str(why)[:80]
+        else:
+            fails = detail = None
+    if fails is not None:
+        # 告警放锁外：log_throttled 内部有自己的状态，没必要扩大临界区
         log_throttled(
             "WARNING",
-            f"[{key}] 连续失败 {st['fails']} 次，"
+            f"[{key}] 连续失败 {fails} 次，"
             f"{_BATCH_BREAKER_COOLDOWN / 60:.0f} 分钟内跳过该接口"
-            f"（源疑似不可用，整批重试只会加剧限流）：{str(why)[:80]}",
+            f"（源疑似不可用，整批重试只会加剧限流）：{detail}",
             key=f"breaker-{key}",
         )
 
@@ -365,6 +398,11 @@ _FF_PRIMARY_DEAD_UNTIL = 0.0                     # 主源(东财 push2his)熔断
 _FF_SNAPSHOT_CACHE: Dict[str, Tuple[pd.DataFrame, float]] = {}
 _FF_SNAPSHOT_TTL_OK = 1800.0
 _FF_SNAPSHOT_TTL_FAIL = 300.0
+#: "kind:日期" -> 正在取这张快照的线程的通知句柄。
+#: 没有它会出现**缓存击穿**：这个接口一次要翻 100+ 页，整批 68 只票
+#: 在同一个瞬间发现缓存 miss，然后一起翻 —— 68 × 100 页直接把源打挂，
+#: 也正好绕过了上面的限速（限速只管间隔，管不住"同时 miss"）。
+_FF_INFLIGHT: Dict[str, threading.Event] = {}
 
 
 def _ff_snapshot(kind: str) -> pd.DataFrame:
@@ -376,9 +414,28 @@ def _ff_snapshot(kind: str) -> pd.DataFrame:
     最关键的 `main_net_pct`。
     """
     key = f"{kind}:{date.today().isoformat()}"
-    hit = _FF_SNAPSHOT_CACHE.get(key)
-    if hit is not None and time.monotonic() < hit[1]:
-        return hit[0]      # 可能是空表 —— 即上一次失败的"负缓存"
+
+    # ---- 缓存查询 / 抢占取数权（都在锁内，临界区极短）----
+    with _RATE_LOCK:
+        hit = _FF_SNAPSHOT_CACHE.get(key)
+        if hit is not None and time.monotonic() < hit[1]:
+            return hit[0]  # 可能是空表 —— 即上一次失败的"负缓存"
+        ev = _FF_INFLIGHT.get(key)
+        if ev is None:
+            ev = threading.Event()
+            _FF_INFLIGHT[key] = ev
+            owner = True
+        else:
+            owner = False
+
+    # ---- 非属主：等属主取完，别自己再翻一遍 ----
+    if not owner:
+        ev.wait(timeout=120.0)
+        with _RATE_LOCK:
+            hit = _FF_SNAPSHOT_CACHE.get(key)
+        return hit[0] if hit is not None else pd.DataFrame()
+
+    # ---- 属主：真正去取（锁外，不阻塞别人读缓存）----
     try:
         # retries=0：这里本身就在"资金流源"的重试循环里，
         # 再让注册表重试一遍会把请求数翻倍（每个视角 100+ 页，很贵）。
@@ -389,7 +446,12 @@ def _ff_snapshot(kind: str) -> pd.DataFrame:
         logger.debug(f"资金流快照({kind})失败，5 分钟内不再重试: {exc}")
         df = pd.DataFrame()
     ttl = _FF_SNAPSHOT_TTL_OK if not df.empty else _FF_SNAPSHOT_TTL_FAIL
-    _FF_SNAPSHOT_CACHE[key] = (df, time.monotonic() + ttl)
+    try:
+        with _RATE_LOCK:
+            _FF_SNAPSHOT_CACHE[key] = (df, time.monotonic() + ttl)
+            _FF_INFLIGHT.pop(key, None)
+    finally:
+        ev.set()   # 唤醒所有等待者（哪怕取数异常也要唤醒，否则它们干等 120s）
     return df
 
 

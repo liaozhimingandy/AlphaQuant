@@ -257,6 +257,8 @@ class MyService(ServiceComponent):
 | 2 | `storage/repo/kline_repo.py:105` | **已修**：`except` 块里用了未导入的 `logger`，建表失败会从"忽略"变成崩溃 |
 | 3 | `engine/component/service/market.py` | **已修**：poll 模式无交易日闸门，非交易日反复用旧 bar 驱动策略 |
 | 4 | `research/runner.py` | **已修**：回测成本模型漏算印花税（卖出 0.05%），系统性高估收益 |
+| 4a | `risk/registry.py` + `tasking/spec.py` | **已修**：默认风控链没有 T+1 / 涨跌停 / 可卖量，照默认配置上实盘全是废单 |
+| 4b | `alpha/pool/sync.py` | **已修**（资金流/筹码）：逐票各开一次事务，60 票 × 9 类 ≈ 540 次 commit |
 
 ### P1 — 会误导排查方向
 
@@ -266,6 +268,12 @@ class MyService(ServiceComponent):
 | 6 | `control.py:490-506` | **已修**：wait 分支无 errback，失败要干等 300s |
 | 7 | `provider/base.py` `_KEYWORDS` | **已修**：缺 `HTTPError` 类名识别，本该重试的被判不重试 |
 | 8 | `engine/component/registry.py:294` vs `base.py` | 同一服务状态两处取值方式不同，快照可能显示不一致 |
+| 8a | `datasource/service/facade.py` `_throttle` | **已修**：限速器无锁，多线程下 N 个线程同时发车，限速与熔断形同虚设 |
+| 8b | `facade.py` `_ff_snapshot` | **已修**：缓存击穿——68 只票同时 miss 会一起翻 100+ 页 |
+| 8c | `engine/settings.py` `RunMode` | **已修**：与 `domain/types.py` 各定义一份，跨模块 `==` 恒 False，回测自动停止失效 |
+| 8d | `engine/component/service/portfolio.py` | **已修**：过期预留只在 `reserve` 里清理，最后一笔过期后 `is_busy()` 永远为真 |
+| 8e | `execution/live_broker.py` | **已修**：`order_timeout` 是死参数，回报丢失会让任务永久静默停摆 |
+| 8f | `engine/component/service/trading.py` | **已修**：`sum(1 for ... if b.cancel_all())` 数的是 broker 个数不是撤单数 |
 
 ### P2 — 整洁性 / 性能
 
@@ -274,10 +282,15 @@ class MyService(ServiceComponent):
 | 9 | `scheduler.py:104-108` | 事件叫 `TIMER_3MIN` 但 interval=5（秒），且无订阅者空转 |
 | 10 | `engine/collect/spec.py` | 截面循环用 `max(30/300, ...)` 兜下限，与 kline 的"间隔即频率"口径相反 |
 | 11 | `domain/symbol.py` | 名义是"代码标准化"，实际塞了完整取数层（含 HTTP、单例、线程锁），导致 `storage → domain → 网络` 的依赖倒置 |
-| 12 | `alpha/pool/sync.py` | 逐票"联网 + 独立事务"，60 票 = 60 次连接与 commit，建议攒批统一提交 |
+| 12 | `alpha/pool/sync.py` | **部分已修**（资金流/筹码已攒批）：基本面/因子/新闻/宏观/题材仍是逐票独立事务 |
 | 13 | `routing/router.py:423` | 每次调用 `inspect.signature` 且无缓存 |
 | 14 | `datasource/service/facade.py` | 模块导入期就 `REGISTRY.register`，与 `compat/*_source.py` 重复注册 |
 | 15 | `market.py:_fetch_latest` | 未经 `clean_frame` 清洗，与 `_load_symbol_history` 路径不一致 |
+| 16 | `engine/component/service/collection.py` | **已修**：`collect_cross_now` 无忙碌保护，面板连点会并发跑两轮全市场采集 |
+| 17 | `common/config.py` | 9 个"假配置项"定义了但无人读取（其中 `LIVE_MAX_DAILY_TRADES` 尤其危险：文档让人以为有每日下单闸门，实际没有） |
+| 18 | `execution/live_broker.py` / `task.py` | 重启后账本、订单表、去重键、预留全是内存态，**无启动对账与状态恢复** |
+| 19 | `risk/builtin.py:85` | `CashReserveRisk` 读的 `planned_size` 从未被写入，恒等于 100 股 |
+| 20 | `portfolio/sizer.py:75` | `equity = account.cash`，与 `PositionLimitRisk` 的真实 equity 口径不一致 |
 
 ### 命名层面（不影响运行，但会持续误导读代码的人）
 

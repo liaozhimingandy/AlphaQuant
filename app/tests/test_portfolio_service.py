@@ -215,10 +215,28 @@ class TestQuotaReservation(unittest.TestCase):
         s = _svc(budget=10_000.0, reserve_ttl=0.01)
         s.reserve("t1", "000001", 9_000.0, order_id="o_lost")
         time.sleep(0.05)
-        self.assertAlmostEqual(s.reserved, 9_000.0, places=2)  # 还没人去扫
-        s.reserve("t2", "600000", 1_000.0)                     # 触发懒清理
+        # 读 reserved 本身就会清理过期项 —— 过期的预留不该再算"占用"。
+        # 清理只在 reserve 里顺带做是不够的：见下一个用例。
+        self.assertAlmostEqual(s.reserved, 0.0, places=2)
         self.assertEqual(s.stats["expiries"], 1)
-        self.assertAlmostEqual(s.reserved, 1_000.0, places=2)
+        self.assertAlmostEqual(s.available, 10_000.0, places=2)
+
+    def test_last_reservation_expiry_restores_idle(self):
+        """**最后一笔**预留过期后若再没有新买单，它不能永久留在字典里。
+
+        清理只在 ``reserve`` 里做的话，最后一笔过期项没人再触发清理：
+        ``available`` 被永久低估、``is_busy()`` 永远为真，
+        引擎再也不判定空闲 —— 而日志里没有任何错误。
+        这个用例钉住"读路径也要清理"。
+        """
+        s = _svc(budget=10_000.0, reserve_ttl=0.01)
+        s.reserve("t1", "000001", 9_000.0, order_id="o_lost")
+        self.assertTrue(s.is_busy())
+        time.sleep(0.05)
+        # 期间没有任何新的 reserve 调用
+        self.assertFalse(s.is_busy())
+        self.assertEqual(s.stats["expiries"], 1)
+        self.assertAlmostEqual(s.available, 10_000.0, places=2)
 
     def test_release_by_task_and_release_all(self):
         s = _svc(budget=100_000.0)

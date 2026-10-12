@@ -7,7 +7,7 @@
 # -------------------------------------------------------------------------------
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.feature.context import FactorContext
 from app.domain.types import Account, Signal
@@ -99,7 +99,25 @@ class RiskChain:
         ]
 
 
-def build_risk_chain(spec: Optional[Iterable[Mapping[str, Any]]]) -> RiskChain:
+#: A 股硬约束：这些不是"策略偏好"，是**市场的物理规则**。
+#: 不拦的后果很具体 —— 涨停追买、跌停杀跌、当日买当日卖、卖空，
+#: 每一笔都会被柜台拒单，却照样占用报单额度、污染审计日志，
+#: 还会让本地账本以为自己建了仓，后续所有动作错位。
+#:
+#: 之所以要"强制"而不是靠用户配置：默认配置里没写这几条，
+#: 而用户照默认配置上实盘时不会意识到自己缺了闸门。
+#: 显式配过同名规则的不重复添加（以用户的参数为准）。
+ASTOCK_HARD_RULES: Tuple[str, ...] = (
+    "sellable_position",   # 不卖空、不超过可卖量
+    "price_limit",         # 涨停不追买、跌停不追杀
+    "t_plus_one",          # 当日买入不可当日卖出
+)
+
+
+def build_risk_chain(
+    spec: Optional[Iterable[Mapping[str, Any]]] = None,
+    enforce_astock: bool = False,
+) -> RiskChain:
     """从配置构造闸门链。
 
     格式::
@@ -108,12 +126,21 @@ def build_risk_chain(spec: Optional[Iterable[Mapping[str, Any]]]) -> RiskChain:
           {"type": "max_drawdown", "params": {"max_drawdown": 0.2}},
           {"type": "position_limit", "params": {"max_position_pct": 0.3}},
         ]
+
+    :param enforce_astock: 自动补上 :data:`ASTOCK_HARD_RULES`。
+        实盘/模拟盘必须为 True —— 这几条是市场规则而非策略选择，
+        漏掉它们不会产生"更激进的策略"，只会产生一堆必然废单。
+        回测不要开：回测里 ``prev_close`` / ``is_same_day`` 常常缺失，
+        开了会引入与实盘不一致的拦截口径（虽然规则本身会跳过，
+        但多一层就多一处口径分歧）。
     """
     _auto_register()
     chain = RiskChain()
+    seen: set = set()
     for item in spec or []:
         if isinstance(item, IBaseRiskRule):
             chain.add(item)
+            seen.add(getattr(item, "name", ""))
             continue
         if not isinstance(item, Mapping):
             raise ValueError(f"风控配置必须是 dict，收到: {type(item).__name__}")
@@ -124,6 +151,16 @@ def build_risk_chain(spec: Optional[Iterable[Mapping[str, Any]]]) -> RiskChain:
             if k not in ("type", "name", "params"):
                 params.setdefault(k, v)
         chain.add(create_risk(rtype, **params))
+        seen.add(rtype)
+
+    if enforce_astock:
+        for rtype in ASTOCK_HARD_RULES:
+            if rtype in seen:
+                continue      # 用户自己配过，用他的参数
+            try:
+                chain.add(create_risk(rtype))
+            except Exception as exc:
+                logger.error(f"A股硬约束 {rtype} 装配失败（已跳过）: {exc}")
     return chain
 
 

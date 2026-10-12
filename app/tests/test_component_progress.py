@@ -494,5 +494,37 @@ class TestNetworkHint(unittest.TestCase):
         self.assertIn("DataUnavailable", rows[2]["error"])
 
 
+class TestRunModeSingleSource(unittest.TestCase):
+    """``RunMode`` 只能有一份定义。
+
+    踩过的坑：``engine/settings.py`` 自己定义了一份同名枚举，
+    于是 ``builder``（从 domain 导入）造出来的 ``RunMode.BACKTEST``
+    和 ``base``（从 settings 导入）用来比较的是**两个不同的类**，
+    ``==`` 恒为 False —— 直接后果是回测的"空闲自动停止看门狗"
+    永远装不上，回测跑完数据后 reactor 永久阻塞，命令不返回。
+    """
+
+    def test_both_import_paths_are_the_same_class(self):
+        from app.domain.types import RunMode as DomainMode
+        from app.engine.settings import RunMode as EngineMode
+
+        self.assertIs(DomainMode, EngineMode)
+
+    def test_cross_module_comparison_holds(self):
+        """跨模块比较必须成立 —— 这正是当初失效的那条判断。"""
+        from app.domain.types import RunMode as DomainMode
+        from app.engine.settings import RunMode as EngineMode
+
+        built = DomainMode("BACKTEST")          # builder 造出来的值
+        self.assertEqual(built, EngineMode.BACKTEST)   # base 里的比较
+        self.assertTrue(built == EngineMode.BACKTEST)
+
+    def test_values_stable(self):
+        from app.engine.settings import RunMode
+
+        self.assertEqual(
+            {m.value for m in RunMode}, {"BACKTEST", "SIMULATE", "LIVE"})
+
+
 if __name__ == "__main__":
     unittest.main()

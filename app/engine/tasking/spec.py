@@ -69,6 +69,23 @@ def _mode_value(run_mode: Any) -> str:
     return str(getattr(run_mode, "value", run_mode))
 
 
+def _is_live_like(run_mode: Any, cfg: Any = None) -> bool:
+    """是否按"真金白银"的标准装配风控链。
+
+    实盘自不必说；**模拟盘也算** —— 模拟盘存在的唯一理由是提前演练实盘，
+    如果这里漏了涨跌停/T+1，模拟跑得很顺、上实盘全是废单，
+    那模拟盘就白跑了，还给出虚假信心。
+
+    兼容三种传参：``domain.types.RunMode``、``engine.settings.RunMode``、
+    以及纯字符串（配置文件里就是字符串）。
+    """
+    mode = run_mode if run_mode is not None else getattr(cfg, "run_mode", None)
+    name = getattr(mode, "value", None)
+    if name is None:
+        name = mode
+    return str(name or "").upper() in ("LIVE", "SIMULATE")
+
+
 def build_task(spec: TaskSpec | Mapping[str, Any], gateway: Any = None,
                run_mode: Any = None) -> QuantTask:
     """把配置装配成可运行的任务。
@@ -87,7 +104,12 @@ def build_task(spec: TaskSpec | Mapping[str, Any], gateway: Any = None,
         raise ValueError(f"任务配置必须是 dict/TaskSpec，收到 {type(spec).__name__}")
 
     strategy = build_strategy(cfg.strategy)
-    risk_chain = build_risk_chain(cfg.risk)
+    # A 股硬约束只对**真金白银**的模式强制装配。
+    # 回测不开：回测里 prev_close / is_same_day 往往缺失，规则会自行跳过，
+    # 但多挂一层就多一处"回测与实盘口径不一致"的隐患，而回测本来
+    # 也不会真的被柜台拒单，挂了没有收益。
+    enforce = _is_live_like(run_mode, cfg)
+    risk_chain = build_risk_chain(cfg.risk, enforce_astock=enforce)
     task_id = cfg.task_id or f"{cfg.symbol}-{uuid.uuid4().hex[:6]}"
 
     return QuantTask(

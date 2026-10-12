@@ -319,7 +319,14 @@ class PortfolioService(ServiceComponent):
     # ------------------------------------------------------------------
     @property
     def reserved(self) -> float:
-        """当前被在途单占住的额度。"""
+        """当前被在途单占住的额度。
+
+        读之前先 :meth:`_sweep`。清理是"懒"的（只在 reserve 时顺带跑），
+        但读路径不清会有真实后果：**最后一笔**预留过期后如果再没有新买单，
+        它就永远留在字典里 —— ``available`` 被永久低估、:meth:`is_busy`
+        永久为真，引擎再也判定不了空闲，而日志里没有任何错误。
+        """
+        self._sweep()
         return sum(r.amount for r in self._reservations.values())
 
     def _effective_budget(self) -> Optional[float]:
@@ -509,7 +516,11 @@ class PortfolioService(ServiceComponent):
         return base
 
     def is_busy(self) -> bool:
-        """有待结算的预留就算忙——引擎不该在这时候判定为空闲并退出。"""
+        """有待结算的预留就算忙——引擎不该在这时候判定为空闲并退出。
+
+        先 :meth:`_sweep`：过期的预留不算"待结算"，否则引擎会永远忙。
+        """
+        self._sweep()
         return bool(self._reservations)
 
     def health_check(self) -> Dict[str, Any]:

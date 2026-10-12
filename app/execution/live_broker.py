@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -76,10 +77,28 @@ class LiveBroker:
         #: 订单发生任何变化时回调（QuantTask 用它重置计数、落库组件用它记录）
         self.on_order_update: Optional[Callable[[Order], None]] = None
 
+        #: 订单超时追查次数。``order_id -> 已回查次数``，用于决定何时放弃。
+        self._stale_tries: Dict[str, int] = {}
+        #: 已发出撤单请求、但回报还没回来的订单
+        self._cancel_sent: Dict[str, datetime] = {}
+
         self.stats: Dict[str, int] = {
             "submitted": 0, "filled": 0, "partial": 0,
             "cancelled": 0, "rejected": 0, "errors": 0,
+            "stale_recovered": 0, "stale_timeout": 0,
         }
+
+    # ---- 超时单回收的节奏（相对 ``order_timeout`` 的倍数）----
+    #: 超过 order_timeout 只是**开始回查**，不是撤单。
+    #: 限价单挂在市场上等成交是正常的，上来就撤会把本来能成交的单子撤掉。
+    STALE_CANCEL_FACTOR = 10.0
+    #: 撤单请求发出后再等这么多个 order_timeout 仍无回报，就强制收尾。
+    STALE_FORCE_FACTOR = 2.0
+    #: 回查/撤单都拿不到结果时，最多尝试几次再强制收尾
+    STALE_MAX_TRIES = 5
+    #: 撤单失败重试次数与退避间隔（秒）
+    CANCEL_RETRIES = 3
+    CANCEL_RETRY_GAP = 0.5
 
     # ============================================================
     # 行情
@@ -205,18 +224,170 @@ class LiveBroker:
             self.stats["cancelled"] += 1
             self._notify(order)
             return True
-        try:
-            ok = self.gateway.cancel_order(broker_id)
-        except Exception as exc:
-            logger.error(f"撤单失败 {order_id}: {exc}")
-            return False
-        if ok:
-            logger.info(f"[{order.task_id}] 已请求撤单 | {order_id} (券商 {broker_id})")
-        return ok
+        # 撤单失败**必须重试**。只打一条日志就返回的话，
+        # 这笔单会永远卡在未结状态，进而让该方向的所有信号被静默丢弃
+        # （见 :meth:`sweep_stale_orders`）。一次网络抖动不该造成永久停摆。
+        #
+        # 重试前先回查：很多"撤单失败"其实是单子已经成交/已撤了，
+        # 这时候再撤一次只会拿到一个"无此单"的错误。
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, self.CANCEL_RETRIES + 1):
+            try:
+                ok = self.gateway.cancel_order(broker_id)
+            except Exception as exc:
+                last_exc = exc
+                gw = self._query_broker_state(order)
+                if gw is not None and self.apply_order_update(gw) is not None:
+                    logger.info(
+                        f"[{order.task_id}] 撤单报错但回查到终态 "
+                        f"{order.status.value}，按回查结果收尾 | {order_id}"
+                    )
+                    self._forget(order_id)
+                    return True
+                if attempt < self.CANCEL_RETRIES:
+                    time.sleep(self.CANCEL_RETRY_GAP * attempt)
+                    continue
+                logger.error(
+                    f"撤单失败 {order_id}（已重试 {attempt} 次）: {last_exc}"
+                )
+                return False
+            if ok:
+                logger.info(
+                    f"[{order.task_id}] 已请求撤单 | {order_id} (券商 {broker_id})")
+                return True
+            # 网关返回 False：不受理。多半是单子已终态，回查确认一下
+            gw = self._query_broker_state(order)
+            if gw is not None and self.apply_order_update(gw) is not None:
+                self._forget(order_id)
+                return True
+            if attempt < self.CANCEL_RETRIES:
+                time.sleep(self.CANCEL_RETRY_GAP * attempt)
+        return False
 
     def cancel_all(self) -> int:
         """撤掉全部未结订单。引擎停止/风控熔断时调用。"""
         return sum(1 for o in list(self.open_orders) if self.cancel(o.order_id))
+
+    # ============================================================
+    # 超时单回收（reaper）
+    # ============================================================
+    def sweep_stale_orders(self, now: Any = None) -> List[Order]:
+        """回收超时未结订单 —— 实盘"跑着跑着不交易了"最常见的根因。
+
+        为什么必须有这个
+        ----------------
+        ``QuantTask._process_signal`` 里有道保护：**已有未结订单就不再下新单**
+        （防每根 K 线发一单）。这道保护成立的前提是订单最终会走到终态。
+        可是一旦券商回报丢了 —— 断线、进程重启、单号丢失、推送漏发 ——
+        本地订单就永远停在 SUBMITTED，那个方向的信号从此被**静默丢弃**，
+        日志里只有一行 DEBUG。症状是"策略明明在出信号，就是不下单"，
+        而且跨任务额度也被永久占住。
+
+        回收分三步，从温和到强硬
+        ------------------------
+        1. **回查**。多数情况只是回报丢了，单子其实已成/已撤。
+           问券商要真实状态，能对齐就对齐 —— 这一步不撤任何单。
+        2. **撤单**。挂了很久（``order_timeout × 10``）还活着才请求撤单。
+           限价单挂在市场上等成交是**正常的**，上来就撤会撤掉本来能成交的单。
+        3. **强制收尾**。撤单后仍无回报，或回查次数用尽 —— 本地置终态，
+           让防堆单保护与额度恢复正常。
+
+        第 3 步会在账本与券商之间留下偏差，所以打 **ERROR** 并标记
+        ``meta["stale"]=True``，交给对账去发现，绝不假装什么都没发生。
+        """
+        if self.order_timeout <= 0:
+            return []
+        now = now or datetime.now()
+        handled: List[Order] = []
+
+        for order in list(self.open_orders):
+            created = order.created_at or now
+            age = (now - created).total_seconds()
+            if age <= self.order_timeout:
+                continue
+
+            # 1) 回查：券商可能早就给这笔单定终态了，只是没推给我们
+            gw = self._query_broker_state(order)
+            if gw is not None and gw.status != order.status:
+                self.apply_order_update(gw)
+            if order.is_final:
+                self.stats["stale_recovered"] += 1
+                logger.warning(
+                    f"[{order.task_id}] 订单 {order.order_id} 回报丢失已通过回查对齐 "
+                    f"| 券商状态 {order.status.value}"
+                )
+                handled.append(order)
+                self._forget(order.order_id)
+                continue
+
+            tries = self._stale_tries.get(order.order_id, 0) + 1
+            self._stale_tries[order.order_id] = tries
+
+            # 2) 挂太久 -> 撤单
+            if age >= self.order_timeout * self.STALE_CANCEL_FACTOR:
+                sent_at = self._cancel_sent.get(order.order_id)
+                if sent_at is None:
+                    if self.cancel(order.order_id):
+                        self._cancel_sent[order.order_id] = now
+                        logger.warning(
+                            f"[{order.task_id}] 订单 {order.order_id} 已挂 {age:.0f}s "
+                            f"超过上限，已请求撤单"
+                        )
+                    continue
+                if (now - sent_at).total_seconds() >= (
+                    self.order_timeout * self.STALE_FORCE_FACTOR
+                ):
+                    self._force_close(order, "撤单请求已发出但无回报")
+                    handled.append(order)
+                    continue
+
+            # 3) 回查次数用尽：券商侧始终查不到这笔单，多半是报单根本没成功
+            if tries >= self.STALE_MAX_TRIES:
+                self._force_close(order, f"回查 {tries} 次仍未到终态")
+                handled.append(order)
+        return handled
+
+    def _query_broker_state(self, order: Order) -> Optional[GatewayOrder]:
+        """向券商回查这笔单的真实状态。查不到（或网关没接）返回 None。"""
+        broker_id = self._broker_ids.get(order.order_id, "")
+        if not broker_id or self.gateway is None:
+            return None
+        try:
+            for gw in (self.gateway.query_orders(only_open=False) or []):
+                if gw.broker_order_id == broker_id:
+                    return gw
+        except Exception as exc:
+            logger.debug(f"回查订单 {order.order_id} 失败（下次再试）: {exc}")
+        return None
+
+    def _force_close(self, order: Order, why: str) -> None:
+        """把一笔追不回结果的订单置为终态。
+
+        置 CANCELLED 而不是引入新状态：新状态要改 ``is_final``、
+        任务侧一堆判断、面板统计，改动面太大。这里用 ``reject_reason``
+        和 ``meta["stale"]`` 说清"这是本地放弃，券商侧未知"。
+        """
+        order.status = OrderStatus.CANCELLED
+        order.reject_reason = f"本地超时强制结束（{why}）：券商侧状态未知，请以对账为准"
+        try:
+            order.meta["stale"] = True
+        except Exception:
+            pass
+        with self._lock:
+            self.stats["cancelled"] += 1
+            self.stats["stale_timeout"] += 1
+        logger.error(
+            f"[{order.task_id}] 订单 {order.order_id} 超时强制收尾（{why}）| "
+            f"{order.symbol} {order.side.value} {order.size} | "
+            f"已挂 {(datetime.now() - (order.created_at or datetime.now())).total_seconds():.0f}s "
+            f"—— 券商侧可能仍有此单，请立即对账并人工确认"
+        )
+        self._notify(order)     # 触发任务释放额度、恢复防堆单判定
+        self._forget(order.order_id)
+
+    def _forget(self, order_id: str) -> None:
+        self._stale_tries.pop(order_id, None)
+        self._cancel_sent.pop(order_id, None)
 
     # ============================================================
     # 成交回报 → 账本
