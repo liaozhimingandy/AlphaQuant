@@ -141,7 +141,8 @@ class MonitorResource(Resource):
 
             # hosts 是"网络层实测的域名健康度"：多个源常共用同一域名
             # （push2 一挂，三个人气榜源一起挂），只看源列表会误判成源不行。
-            from app.data import net
+            # 旧路径 ``app.data`` 已随数据层重构迁走，网络层现在在 transport 下
+            from app.datasource.transport import net
 
             return self._json(request, {
                 "health": REGISTRY.health(),

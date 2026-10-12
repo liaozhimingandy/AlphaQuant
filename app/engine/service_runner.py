@@ -14,7 +14,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.common.config import settings
 from app.common.logging import logger
@@ -91,6 +91,39 @@ def watch_stop_file(stop_file: str | Path, on_stop, interval: float = 0.5):
     holder["lc"] = lc
     lc.start(interval, now=False)
     return lc
+
+
+def collection_job_buckets(col: Any) -> Dict[float, int]:
+    """把采集服务的 K 线任务按频率分档计数（启动日志用）。
+
+    采集三合一之后，服务对象上**没有**裸 ``spec`` 这个属性——K 线任务挂在
+    ``kline_spec`` 上，日频截面和完整性校验各自是独立开关。这里一律用
+    getattr 兜底：服务没装配 / 换了实现，返回空表即可。
+
+    **启动脚本里绝不能因为"打印一行日志"把引擎带崩**——此前就是
+    ``col.spec.jobs`` 抛 AttributeError，进程在装配完成后立刻退出，
+    表现是"监控面板打不开"，实际引擎根本没起来。
+    """
+    jobs = list(getattr(getattr(col, "kline_spec", None), "jobs", None) or [])
+    buckets: Dict[float, int] = {}
+    for job in jobs:
+        buckets[job.interval] = buckets.get(job.interval, 0) + 1
+    return buckets
+
+
+def log_collection_summary(col: Any) -> None:
+    """打印一行采集概况。取不到服务就安静跳过。"""
+    if col is None:
+        return
+    from app.engine.collect.spec import humanize_frequency
+
+    buckets = collection_job_buckets(col)
+    logger.info(
+        "行情采集: "
+        + (", ".join(f"{humanize_frequency(k)}×{v}" for k, v in sorted(buckets.items()))
+           or "无任务")
+        + f" | 共 {sum(buckets.values())} 个任务"
+    )
 
 
 def install_stop_watcher(engine: Any, stop_file: str | Path, interval: float = 0.5):
@@ -172,18 +205,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     if not args.no_monitor:
         logger.info(f"监控面板: http://{args.host or settings.MONITOR_HOST}:{args.port or settings.MONITOR_PORT}/")
-    col = engine.get_component("collection_service")
-    if col is not None:
-        from app.engine.collect.spec import humanize_frequency
-
-        buckets: dict = {}
-        for job in col.spec.jobs:
-            buckets[job.interval] = buckets.get(job.interval, 0) + 1
-        logger.info(
-            "行情采集: "
-            + ", ".join(f"{humanize_frequency(k)}×{v}" for k, v in sorted(buckets.items()))
-            + f" | 共 {len(col.spec.jobs)} 个任务"
-        )
+    log_collection_summary(engine.get_component("collection_service"))
     logger.info("=" * 70)
 
     # 停止标志轮询要在 start() 之前挂上（start 内部会 reactor.run() 阻塞）

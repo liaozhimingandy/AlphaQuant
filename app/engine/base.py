@@ -137,9 +137,11 @@ class IQuantEngine(ABC):
         :param seconds: 等待时间（秒），支持小数如0.1、0.01
         :return: Deferred对象，等待完成后自动触发callback
         """
-        d = defer.Deferred()
-        reactor.callLater(delay=seconds, callable=d.callback,)
-        return d
+        # 委托给 utils.async_sleep，避免两处实现走偏：
+        # 早先这里写的是 ``callLater(callable=d.callback)``，缺 result 会抛
+        # ``TypeError: callback() missing 1 required positional argument``，
+        # 等它的协程永远等不到回调（停服务时表现为 timed call 报错后卡住）。
+        return async_sleep(seconds)
 
 
 class BaseQuantEngine(IQuantEngine):
