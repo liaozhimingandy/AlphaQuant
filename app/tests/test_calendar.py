@@ -18,6 +18,7 @@ from datetime import date, datetime, time as dtime
 from app.domain.calendar import (
     STATE_CLOSED,
     STATE_HOLIDAY,
+    STATE_NAMES,
     STATE_LUNCH,
     STATE_OPEN,
     STATE_POST_CLOSE,
@@ -79,8 +80,11 @@ class TestTradeCalendar(unittest.TestCase):
 
     def test_state_pre_open_and_early_morning(self):
         self.assertEqual(self.cal.state(datetime(2026, 10, 9, 9, 15)), STATE_PRE_OPEN)
-        # 凌晨算"非交易日"语义：既不采数据，也不该误判成盘前
-        self.assertEqual(self.cal.state(datetime(2026, 10, 9, 3, 0)), STATE_HOLIDAY)
+        # 凌晨是"今天开盘、但还没到点"，**不是**非交易日。
+        # 以前这里返回 HOLIDAY，于是每个交易日清晨日志都写"当前 非交易日"，
+        # 看着像今天不开盘，排查时特别容易被带偏。
+        self.assertEqual(self.cal.state(datetime(2026, 10, 9, 3, 0)), STATE_CLOSED)
+        self.assertEqual(STATE_NAMES[STATE_CLOSED], "休市中")
 
     def test_state_holiday_on_non_trading_day(self):
         self.assertEqual(self.cal.state(datetime(2026, 10, 10, 10, 0)), STATE_HOLIDAY)

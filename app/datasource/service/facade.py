@@ -684,12 +684,46 @@ def fetch_chip(symbol: str, adjust: str = "") -> pd.DataFrame:
 # ===========================================================================
 # 涨停池
 # ===========================================================================
+def _zt_pool_one(day: date) -> pd.DataFrame:
+    """拉单个交易日的涨停池并完成解析。"""
+    df = _call("stock_zt_pool_em", date=day.strftime("%Y%m%d"),
+               limit_key="zt", retry=1)
+    return _parse_limitup_pool(df, day)
+
+
 def fetch_limitup_pool(trade_date: Optional[str] = None) -> pd.DataFrame:
-    """涨停池。`trade_date` 格式 YYYYMMDD，留空取最新交易日。"""
+    """涨停池。`trade_date` 格式 YYYYMMDD，留空取**最近有数据的交易日**。
+
+    为什么留空时要回退而不是只试今天：涨停池是**收盘后**才落定的数据，
+    开盘日一早去取当天，接口返回的必然是空 —— 这不是接口变更，也不是
+    数据源坏了。以前直接把"当日为空"抛成错误，于是每个交易日早上
+    固定报一次失败，而库里其实已经有上一交易日的数据了。
+
+    所以：从今天往前最多找 3 个交易日，取第一个有数据的；
+    都没有才是真的没数据（``DataUnavailable``，调用方按"暂无"跳过）。
+    """
     if trade_date:
         df = _call("stock_zt_pool_em", date=str(trade_date), limit_key="zt")
-    else:
-        df = _call("stock_zt_pool_em", limit_key="zt")
+        return _parse_limitup_pool(df, _to_date(trade_date) or date.today())
+
+    from app.domain.calendar import get_calendar
+
+    cal = get_calendar()
+    errors: List[str] = []
+    # recent_trading_days 升序，倒着走 = 最近的先试
+    for day in reversed(cal.recent_trading_days(3)):
+        try:
+            return _zt_pool_one(day)
+        except MarketXError as exc:
+            errors.append(f"{day}: {str(exc)[:60]}")
+            continue
+    raise DataUnavailable(
+        f"涨停池最近 3 个交易日均无数据（{'；'.join(errors)}）"
+    )
+
+
+def _parse_limitup_pool(df: pd.DataFrame, d: date) -> pd.DataFrame:
+    """解析涨停池返回（列名可能随 akshare 版本变化，全部按关键词找）。"""
 
     col_code = _pick(df, ["代码", "股票代码"])
     col_name = _pick(df, ["名称", "股票简称"])
@@ -706,7 +740,6 @@ def fetch_limitup_pool(trade_date: Optional[str] = None) -> pd.DataFrame:
     if col_code is None:
         raise MarketXError("涨停池缺少代码列")
 
-    d = _to_date(trade_date) if trade_date else date.today()
     rows = []
     for _, r in df.iterrows():
         sym = normalize_symbol(r.get(col_code))
@@ -994,15 +1027,23 @@ def fetch_trade_dates() -> List[str]:
 # ===========================================================================
 # 基本面（估值 / 成长 / 质量）
 # ===========================================================================
-def fetch_valuation(symbol: str) -> Dict[str, Any]:
-    """估值指标：PE / PB / 股息率 / 市值。
+#: 乐咕估值接口名。akshare 1.18 之后**整个接口被移除**（不是改名），
+#: 所以走之前必须先 hasattr 探测，不能假设它存在。
+_LEGACY_VALUATION_API = "stock_a_indicator_lg"
+#: 百度估值（``stock_zh_valuation_baidu``）支持的指标 → 输出字段。
+#: 实测只有这三项能用（"市销率/股息率/流通市值" 在接口内部返回 None）。
+_BAIDU_VAL_INDICATORS: Tuple[Tuple[str, str], ...] = (
+    ("市盈率(TTM)", "pe"),
+    ("市净率", "pb"),
+    ("总市值", "market_cap"),
+)
+#: 百度"总市值"的单位是**亿元**，库里统一存元
+_BAIDU_MV_UNIT = 1e8
 
-    用"乐咕乐股"的 A 股估值接口，一次拿到历史序列，取最近一条。
-    财务数据按季更新，一天拉一次完全够 —— 这也是它被放进
-    **日频截面采集**（而不是分钟级）的原因。
-    """
-    code = _code_only(symbol)
-    df = _call("stock_a_indicator_lg", symbol=code, limit_key="valuation")
+
+def _valuation_legacy(symbol: str, code: str) -> Dict[str, Any]:
+    """乐咕乐股估值（老 akshare）。字段最全：PE/PB/PS/股息率/总市值/流通市值。"""
+    df = _call(_LEGACY_VALUATION_API, symbol=code, limit_key="valuation")
     col_date = _pick(df, ["trade_date", "日期"])
     col_pe = _pick(df, ["pe", "pe_ttm"])
     col_pb = _pick(df, ["pb"])
@@ -1025,6 +1066,76 @@ def fetch_valuation(symbol: str) -> Dict[str, Any]:
         "market_cap": (_num(last.get(col_mv)) or 0) * 10000 if col_mv else None,
         "float_market_cap": (_num(last.get(col_cmv)) or 0) * 10000 if col_cmv else None,
     }
+
+
+def _valuation_baidu(symbol: str, code: str) -> Dict[str, Any]:
+    """百度估值兜底（akshare 1.18+ 乐咕接口被移除后的替代）。
+
+    一次只能取一个指标，所以这里按 `pe / pb / 总市值` 各调一次，
+    取各自序列的最后一条。**单个指标拿不到不整体失败** —— 少一个 PS
+    比整个估值维度全空要好得多。
+    """
+    out: Dict[str, Any] = {
+        "symbol": normalize_symbol(symbol), "date": None,
+        "pe": None, "pb": None, "ps": None, "dividend_yield": None,
+        "market_cap": None, "float_market_cap": None,
+    }
+    last_date: Optional[date] = None
+    errors: List[str] = []
+    for indicator, field in _BAIDU_VAL_INDICATORS:
+        try:
+            df = _call("stock_zh_valuation_baidu", symbol=code,
+                       indicator=indicator, period="近一年",
+                       limit_key="valuation", retry=1)
+        except MarketXError as exc:
+            errors.append(f"{indicator}: {str(exc)[:60]}")
+            continue
+        col_date = _pick(df, ["date", "日期"])
+        col_val = _pick(df, ["value", "值"])
+        if col_val is None:
+            errors.append(f"{indicator}: 返回缺少数值列")
+            continue
+        df = df.sort_values(by=col_date) if col_date else df
+        last = df.iloc[-1]
+        value = _num(last.get(col_val))
+        if value is not None and field == "market_cap":
+            value = value * _BAIDU_MV_UNIT      # 亿元 → 元
+        out[field] = value
+        if col_date:
+            last_date = _to_date(last.get(col_date)) or last_date
+    out["date"] = last_date
+
+    if out["pe"] is None and out["pb"] is None and out["market_cap"] is None:
+        raise MarketXError(f"百度估值全部指标失败: {symbol} | " + "; ".join(errors))
+    return out
+
+
+def fetch_valuation(symbol: str) -> Dict[str, Any]:
+    """估值指标：PE / PB / 股息率 / 市值。
+
+    财务数据按季更新，一天拉一次完全够 —— 这也是它被放进
+    **日频截面采集**（而不是分钟级）的原因。
+
+    取数顺序：乐咕（老 akshare，字段最全）→ 百度估值（现版本唯一可用）。
+    乐咕接口在 akshare 1.18 之后被移除，**必须先探测再调**，
+    否则每次都是"没有接口"这一个错，69 只票无一幸免。
+    """
+    code = _code_only(symbol)
+
+    if ak is not None and hasattr(ak, _LEGACY_VALUATION_API):
+        try:
+            return _valuation_legacy(symbol, code)
+        except MarketXError as exc:
+            logger.debug(f"乐咕估值失败，改用百度估值: {exc}")
+
+    try:
+        return _valuation_baidu(symbol, code)
+    except MarketXError as exc:
+        raise MarketXError(
+            f"估值不可用 {symbol}: {exc}（已尝试 {_LEGACY_VALUATION_API}"
+            f"{'（当前 akshare 版本无此接口）' if ak is None or not hasattr(ak, _LEGACY_VALUATION_API) else ''}"
+            f" / stock_zh_valuation_baidu）"
+        ) from exc
 
 
 def fetch_financial_indicator(symbol: str) -> Dict[str, Any]:

@@ -358,7 +358,11 @@ class DataRouter:
         # ---- 该路由失败：分类 → 回写健康度 ----
         assert last is not None
         if last.penalize:
-            self._mark_hosts(route, False, str(last))
+            # 解析失败时**不回写域名健康度**：响应其实拿到了，只是结构对不上。
+            # 回写了就会把"接口改版"记成"域名不可达"，后续几批请求因域名
+            # 冷却被整批跳过，症状看起来像断网（详见 registry.is_parse_error）。
+            if last.type is not ProviderErrorType.PARSE_ERROR:
+                self._mark_hosts(route, False, str(last))
             health.record(key, False, ms=0, error=str(last),
                           error_type=last.type.value,
                           extra_cooldown=COOLDOWN_SECONDS.get(last.type, 0.0))

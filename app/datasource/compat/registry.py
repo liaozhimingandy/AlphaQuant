@@ -124,6 +124,46 @@ def is_transient(exc: Exception) -> bool:
     ))
 
 
+#: 解析类失败的关键词。TCP 是通的、响应也拿到了，只是**结构对不上** ——
+#: 与网络层失败是两回事，混在一起会把排查方向带偏（见 ``is_parse_error``）。
+_PARSE_ERROR_WORDS = (
+    "ValueError", "KeyError", "Length mismatch", "length mismatch",
+    "缺少", "缺列", "缺少必需列", "解析", "parse_error",
+)
+
+
+def is_parse_error(exc: BaseException) -> bool:
+    """这次失败是"源返回的东西变了"，而不是"连不上源"。
+
+    典型：akshare 内部给 DataFrame 赋列名时抛
+    ``ValueError: Length mismatch: Expected axis has 13 elements, new values have 7`` ——
+    东财把返回字段数改了，库还没跟上。
+
+    **必须和"域名不可达"分开**：解析失败时 TCP 连接是好的，
+    若按网络失败处理，会顺手把域名冷却 5 分钟，并在日志里提示
+    "检查代理端口"——于是真正的病因（接口改版，得改适配代码）
+    被一句误导性的提示盖住，排查从"改代码"变成"查网络"。
+    """
+    try:
+        from app.datasource.provider.base import (
+            ProviderErrorType,
+            classify,
+        )
+
+        return classify(exc) is ProviderErrorType.PARSE_ERROR
+    except Exception:
+        text = f"{type(exc).__name__}: {exc}"
+        return any(w in text for w in _PARSE_ERROR_WORDS)
+
+
+def is_parse_error_text(text: str) -> bool:
+    """字符串版解析失败判断（告警拼接时手里只有字符串）。
+
+    与 :func:`is_parse_error` 用同一套关键词，避免两处各写一遍。
+    """
+    return any(w in (text or "") for w in _PARSE_ERROR_WORDS)
+
+
 def is_network_error_text(text: str) -> bool:
     """对**已经格式化成字符串**的错误判断它是不是网络层问题。
 
@@ -608,7 +648,7 @@ class SourceRegistry:
             if last_exc is not None:
                 n_tries = attempt + 1
                 self._penalize(spec, f"{type(last_exc).__name__}: "
-                                     f"{_brief(last_exc, 160)}")
+                                     f"{_brief(last_exc, 160)}", exc=last_exc)
                 errors.append(f"{spec.name}: {type(last_exc).__name__}: "
                               f"{_brief(last_exc, 160)}")
                 nxt = order[idx + 1] if idx + 1 < len(order) else "（已无更多数据源）"
@@ -626,8 +666,15 @@ class SourceRegistry:
         # 大多数源是"连不上"而不是"数据不对"时，问题多半在网络/代理，
         # 这时候把排查方向一起打出来，省一轮"到底哪里坏了"的猜谜。
         net = sum(1 for e in errors if is_network_error_text(e))
+        parsed = sum(1 for e in errors if is_parse_error_text(e))
         hint = ""
-        if errors and net >= max(1, len(errors) // 2):
+        if errors and parsed >= max(1, len(errors) // 2) and parsed >= net:
+            # 数据拿到了、但解析不了：这时提示"查代理"是把人往沟里带，
+            # 真正的处置是改适配代码（列名/列数/akshare 版本）。
+            hint = (f" || {len(errors)} 个源中 {parsed} 个是解析失败"
+                    f"（接口返回结构与本地解析不匹配，多为 akshare/接口改版）；"
+                    f"排查：核对列名与 akshare 版本，网络层无异常")
+        elif errors and net >= max(1, len(errors) // 2):
             hint = f" || {len(errors)} 个源中 {net} 个是网络层失败（连接被重置/超时/非JSON响应）；{network_hint()}"
         else:
             hint = f" || {network_hint()}"
@@ -682,10 +729,15 @@ class SourceRegistry:
             except Exception:
                 pass
 
-    def _penalize(self, spec: SourceSpec, why: str) -> None:
+    def _penalize(self, spec: SourceSpec, why: str,
+                  exc: Optional[BaseException] = None) -> None:
         spec.fail_count += 1
         spec.last_error = why
-        self._mark_hosts(spec, False, why)
+        # 解析类失败**不回写域名健康度**：域名是通的，错的是返回结构。
+        # 回写了就等于把"接口改版"记成"域名不可达"，
+        # 后面几批请求会因为域名冷却被整批跳过，症状看起来像网络断了。
+        if exc is None or not is_parse_error(exc):
+            self._mark_hosts(spec, False, why)
         # 降权和熔断是两件事，别合并：
         #   熔断 = 短期内**根本不再试**它（防整批请求撞墙）；
         #   降权 = 冷却结束后再试时，它也得**排在后面**（防它立刻又占掉第一批请求）。

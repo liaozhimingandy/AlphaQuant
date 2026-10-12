@@ -50,7 +50,7 @@ STATE_PRE_OPEN = "pre_open"        # 盘前
 STATE_OPEN = "open"                # 连续竞价中
 STATE_LUNCH = "lunch"              # 午休
 STATE_POST_CLOSE = "post_close"    # 收盘后缓冲（数据定稿中）
-STATE_CLOSED = "closed"            # 当日已收市（超出缓冲）
+STATE_CLOSED = "closed"            # 当日未开市 / 已收市（超出缓冲）
 STATE_HOLIDAY = "holiday"          # 非交易日（周末/法定节假日）
 
 STATE_NAMES = {
@@ -58,7 +58,9 @@ STATE_NAMES = {
     STATE_OPEN: "交易中",
     STATE_LUNCH: "午休",
     STATE_POST_CLOSE: "收盘结算中",
-    STATE_CLOSED: "已收市",
+    # 早上 8 点和晚上 8 点都落在这里（一个是还没开、一个是已经收），
+    # 所以叫"休市中"而不是"已收市"。
+    STATE_CLOSED: "休市中",
     STATE_HOLIDAY: "非交易日",
 }
 
@@ -217,9 +219,12 @@ class TradeCalendar:
         first_open, last_close = self.sessions[0][0], self.sessions[-1][1]
 
         if now < first_open:
+            # 盘前窗口之外（比如早上 7 点）**不是**非交易日：今天照样开盘，
+            # 只是还没到点。以前这里返回 HOLIDAY，于是每个交易日清晨
+            # 日志都写"当前 非交易日"，看着像今天不开盘，是纯粹的误导。
             pre = (datetime.combine(dt.date(), first_open)
                    - timedelta(minutes=self.pre_open_minutes)).time()
-            return STATE_PRE_OPEN if now >= pre else STATE_HOLIDAY
+            return STATE_PRE_OPEN if now >= pre else STATE_CLOSED
         if now >= last_close:
             post_end = (datetime.combine(dt.date(), last_close)
                         + timedelta(minutes=self.post_close_minutes))

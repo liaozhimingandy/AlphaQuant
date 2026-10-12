@@ -12,8 +12,8 @@ from __future__ import annotations
 import abc
 import threading
 import time
-from datetime import datetime
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from tenacity import (
@@ -236,6 +236,28 @@ class IBaseDataSource(abc.ABC):
         return df.reset_index(drop=True)
 
 
+def _as_datetime(value: Any) -> Optional[datetime]:
+    """把 'YYYY-MM-DD HH:MM:SS' / 'YYYY-MM-DD' / datetime 统一成 datetime。
+
+    解析不了返回 None（调用方给缺省值），不抛异常 —— 采集入口的一个
+    坏参数不该让整批任务炸掉，退化成"用默认窗口"更划算。
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%Y%m%d %H:%M:%S", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _retry_kwargs(fn_name: str):
     return dict(
         stop=stop_after_attempt(settings.DATA_FETCH_MAX_RETRY),
@@ -253,6 +275,12 @@ class BaostockDataSource(IBaseDataSource):
     """Baostock：稳定、无需 token，作为首选数据源。"""
 
     name = "baostock"
+    #: 分钟线支持。东财(push2his)一不通，分钟线原本就**没有任何兜底** ——
+    #: 整条分钟采集链路会随东财一起挂掉，而日线还能靠 baostock 活着。
+    #: baostock 提供 5/15/30/60 分钟线（没有 1 分钟线），正好补上这个洞。
+    supports_minute = True
+    #: baostock 只提供这几种分钟粒度
+    BS_MINUTE_PERIODS = ("5", "15", "30", "60")
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -324,6 +352,92 @@ class BaostockDataSource(IBaseDataSource):
         df = self._standardize_df(df, symbol)
         if df.empty:
             raise DataFetchError(f"Baostock 未返回 {symbol} 在 {start}~{end} 的数据")
+        return df
+
+    @retry(**_retry_kwargs("baostock.fetch_minute_data"))
+    def fetch_minute_data(
+        self,
+        code: str,
+        period: str = "5",
+        start_datetime: Optional[str] = None,
+        end_datetime: Optional[str] = None,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """分钟线兜底源（东财不可用时的退路）。
+
+        两点与东财不同，调用方要心里有数：
+
+        * **没有 1 分钟线** —— baostock 只给 5/15/30/60，传 1 直接报错让上层换源；
+        * **不给当日盘中数据** —— 数据一般滞后到上一交易日收盘，
+          所以"今天的分钟线"仍然要靠东财。它的价值是：东财挂了，
+          历史分钟线不至于一起断（回测/因子不受影响）。
+
+        baostock 的 ``time`` 字段是 K 线的**结束时刻**（东财是开始时刻），
+        形如 ``20261009150000000``。这里按"结束时刻"落库，并统一到
+        ``_standardize_minute_df`` 的列契约（dt/symbol/ohlcv/amount）。
+        """
+        # 先校验周期：不支持的粒度没必要先登录、先建连接
+        period = str(period).strip().rstrip("mMiInN")
+        if period not in self.BS_MINUTE_PERIODS:
+            raise DataFetchError(
+                f"Baostock 不支持 {period} 分钟线（仅 {', '.join(self.BS_MINUTE_PERIODS)}）"
+            )
+
+        bs = _lazy_baostock()
+        self._throttle()
+        self._ensure_login()
+
+        symbol = normalize_symbol(code)
+        bs_code = f"sh.{symbol}" if symbol.startswith(("6", "9")) else f"sz.{symbol}"
+
+        # 缺省窗口：最近 30 个自然日。baostock 的分钟线一次性返回整个区间，
+        # 取太短会漏、取太长会慢，30 天对 5 分钟线约 1400 根，够用。
+        end_dt = _as_datetime(end_datetime) or datetime.now()
+        start_dt = _as_datetime(start_datetime) or (end_dt - timedelta(days=30))
+
+        # 1=后复权 2=前复权 3=不复权
+        adjust_map = {"qfq": "2", "hfq": "1", "none": "3", "不复权": "3"}
+        adjust_flag = adjust_map.get(adjust, "2")
+
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,time,open,high,low,close,volume,amount",
+            start_date=start_dt.strftime("%Y-%m-%d"),
+            end_date=end_dt.strftime("%Y-%m-%d"),
+            frequency=period,
+            adjustflag=adjust_flag,
+        )
+        if rs.error_code != "0":
+            raise DataFetchError(f"Baostock 分钟线查询失败: {rs.error_msg}")
+
+        rows: List[list] = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+
+        df = pd.DataFrame(rows, columns=rs.fields)
+        if df.empty:
+            raise DataFetchError(
+                f"Baostock 未返回 {symbol} {period}分钟线 "
+                f"({start_dt:%Y-%m-%d} ~ {end_dt:%Y-%m-%d})"
+            )
+
+        # date + time -> dt。time 形如 20261009150000000：
+        # 前 8 位是日期，接下来 6 位是时分秒，末尾 3 位是毫秒。
+        day = df["date"].astype(str).str.strip()
+        clock = df["time"].astype(str).str.strip().str.zfill(17)
+        df["dt"] = pd.to_datetime(
+            day + " " + clock.str[8:14].str.replace(
+                r"^(\d{2})(\d{2})(\d{2})$", r"\1:\2:\3", regex=True),
+            errors="coerce",
+        )
+        # 标准化会先把列名小写再做别名映射（date 也会被映射成 dt），
+        # 所以这里必须**提前**丢掉原始列、补上 symbol，
+        # 否则会出现两个 dt 列、且缺 symbol 被判成"缺少必需列"。
+        df["symbol"] = normalize_symbol(symbol)
+        df = df.drop(columns=[c for c in ("date", "time") if c in df.columns])
+        df = self._standardize_minute_df(df, symbol, period)
+        if df.empty:
+            raise DataFetchError(f"Baostock {symbol} {period}分钟线解析后为空")
         return df
 
 
@@ -522,8 +636,11 @@ class DataSourceFactory:
                 errors.append(msg)
                 continue
 
+        # 用单行 " | " 而不是 "\n  "：多源失败的原因在日志里只显示**第一行**，
+        # 换行写法会让"真正的原因"永远看不到，只剩一句"所有数据源均获取失败"。
         raise DataFetchError(
-            f"所有数据源均获取失败 ({symbol} {start_d}~{end_d})：\n  " + "\n  ".join(errors)
+            f"所有数据源均获取失败 ({symbol} {start_d}~{end_d})："
+            + (" | ".join(errors) or "无候选数据源")
         )
 
     @classmethod
@@ -568,8 +685,9 @@ class DataSourceFactory:
                 errors.append(msg)
                 continue
 
-        detail = "\n  ".join(errors) or "所有候选数据源都不支持分钟线"
-        raise DataFetchError(f"分钟线获取失败 ({symbol} {period}分钟)：\n  {detail}")
+        # 同上：单行输出，别让原因藏在换行后面
+        detail = " | ".join(errors) or "所有候选数据源都不支持分钟线"
+        raise DataFetchError(f"分钟线获取失败 ({symbol} {period}分钟)：{detail}")
 
     @classmethod
     def shutdown(cls) -> None:

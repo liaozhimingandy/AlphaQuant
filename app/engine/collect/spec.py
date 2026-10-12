@@ -145,7 +145,7 @@ def in_trading_session(dt: Optional[datetime] = None,
 
 
 def market_state(dt: Optional[datetime] = None) -> str:
-    """当前市场状态（盘前/交易中/午休/收盘结算中/已收市/非交易日）。"""
+    """当前市场状态（盘前/交易中/午休/收盘结算中/休市中/非交易日）。"""
     from app.domain.calendar import get_calendar
 
     return get_calendar().state(dt)
