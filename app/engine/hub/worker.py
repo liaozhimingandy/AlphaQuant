@@ -316,6 +316,18 @@ class ServiceWorker:
             logger.critical(f"[{self.spec.id}] 运行异常: {exc}", exc_info=True)
             exit_code = 1
         finally:
+            # 先停自己挂的两个 LoopingCall，再停 reactor。
+            # 顺序反了的话，reactor 停止过程中这两个循环可能还在跑，
+            # 在已关闭的 engine 上写状态，产生"停止后还在写文件"的脏日志。
+            for _loop in (self._heartbeat, self._command_loop):
+                try:
+                    if _loop is not None and getattr(_loop, "running", False):
+                        _loop.stop()
+                except Exception:
+                    pass
+            self._heartbeat = None
+            self._command_loop = None
+
             if reactor.running:  # pragma: no cover
                 reactor.stop()
             self._write_state_final(False)

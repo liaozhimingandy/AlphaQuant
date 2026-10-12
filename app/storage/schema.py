@@ -470,7 +470,9 @@ class StockFundamental(Base):
 
     __table_args__ = (
         UniqueConstraint("symbol", "date", name="uk_fundamental_symbol_date"),
-        Index("ix_fundamental_date", "date"),
+        # 这里**不要**再给 date 加 Index：上面 ``index=True`` 已经生成了
+        # ``ix_stock_fundamental_date``，重复建一个同列索引只会让写入
+        # 每次多维护一份 B 树，查询计划却用不上第二个。
     )
 
 

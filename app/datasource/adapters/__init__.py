@@ -26,7 +26,12 @@ BUILTIN_PROVIDERS: List[Type[DataProvider]] = []
 
 
 def _load() -> List[Type[DataProvider]]:
-    """延迟导入：适配器内部才去 import akshare/mootdx 这些重依赖。"""
+    """延迟导入：适配器内部才去 import akshare/mootdx 这些重依赖。
+
+    :data:`BUILTIN_PROVIDERS` 是给外部扩展留的口子：把自写的 Provider
+    追加进去就会一并注册。**必须让它参与返回**，否则照文件头注释操作
+    会静默不生效 —— 那种"我明明加了却没反应"的排查成本极高。
+    """
     from app.datasource.adapters.akshare import AkShareProvider
     from app.datasource.adapters.astockdata import AStockDataProvider
     from app.datasource.adapters.baostock import BaoStockProvider
@@ -36,7 +41,7 @@ def _load() -> List[Type[DataProvider]]:
     from app.datasource.adapters.tushare import TushareProvider
     from app.datasource.adapters.xueqiu import XueqiuProvider
 
-    return [
+    return list(BUILTIN_PROVIDERS) + [
         BaoStockProvider,
         AkShareProvider,
         EastMoneyProvider,

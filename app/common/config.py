@@ -119,7 +119,14 @@ class Settings:
     DEFAULT_CASH: float = _env_float("DEFAULT_CASH", 100000.0)
     DEFAULT_COMMISSION: float = _env_float("DEFAULT_COMMISSION", 0.0003)
     DEFAULT_SLIPPAGE_PERC: float = _env_float("DEFAULT_SLIPPAGE_PERC", 0.001)
-    DEFAULT_STAMP_DUTY: float = _env_float("DEFAULT_STAMP_DUTY", 0.0)
+    # 印花税：**只在卖出时收**。A 股现行万五（2023-08 起由千一减半）。
+    # 它比佣金（万三）还贵，是卖出侧的主要成本 —— 漏掉它会让回测
+    # 系统性高估策略收益（换手越高、周期越短，高估越严重）。
+    DEFAULT_STAMP_DUTY: float = _env_float("DEFAULT_STAMP_DUTY", 0.0005)
+    #: 单笔最低佣金（元）。券商普遍为 5 元，小额买入时不可忽略。
+    MIN_COMMISSION: float = _env_float("MIN_COMMISSION", 5.0)
+    #: 过户费率（双边，按成交金额）。沪深均收，现行十万分之一。
+    TRANSFER_FEE: float = _env_float("TRANSFER_FEE", 0.00001)
 
     # ---------------- 引擎 ----------------
     # 回测模式下，调度器持续空闲多少秒后自动停止引擎（避免 reactor 永久阻塞）

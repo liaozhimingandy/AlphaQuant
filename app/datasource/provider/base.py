@@ -234,6 +234,11 @@ _KEYWORDS: Sequence[tuple] = (
         "incompleteread", "brokenpipe", "sslerror", "max retries",
         "httpsconnectionpool", "name or service not known", "连接被重置",
         "网络", "dns",
+        # urllib/requests 抛的是 ``HTTPError``。旧层 ``is_transient`` 明确把它
+        # 算作瞬时，新层原先只收全小写连写的 ``connectionerror``，于是
+        # HTTPError 落到 UNKNOWN，而 UNKNOWN 不在 RETRYABLE 里 —— 本该重试的
+        # 错误被直接放弃换源，是一次静默的迁移回退。
+        "httperror",
     )),
     (ProviderErrorType.SERVER_ERROR, (
         "500", "502", "503", "504", "bad gateway", "server error",

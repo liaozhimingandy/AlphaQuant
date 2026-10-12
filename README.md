@@ -1013,10 +1013,27 @@ python main.py ctl component disable news_service
 运行时新增的任务会落到 `output/runtime/<namespace>/tasks.json`，下次启动自动重放；
 新增任务的标的会自动纳入行情订阅（否则它永远等不到 K 线）。
 
-完整架构说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（推荐的深入阅读入口）、
-[`docs/ENGINE_ARCHITECTURE.md`](docs/ENGINE_ARCHITECTURE.md)（引擎四类组件与服务化）
-与 [`docs/STRUCTURE.md`](docs/STRUCTURE.md)（逐层设计取舍与新旧路径对照）。
-（原先这里指向 `app/readme.md`，那个文件并不存在——链接是悬空的。）
+## 文档导航
+
+文档按"你此刻想干什么"来分，不必从头读到尾：
+
+| 想解决什么 | 看哪份 |
+|---|---|
+| **怎么用**（命令、面板、配置） | 本文 README |
+| **运行原理**：按下回车之后发生了什么，三条链路怎么走 | [`docs/RUNTIME.md`](docs/RUNTIME.md) |
+| **为什么这么设计**：28 条决策及其理由 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| **引擎四类组件**：服务化重构的来龙去脉 | [`docs/ENGINE_ARCHITECTURE.md`](docs/ENGINE_ARCHITECTURE.md) |
+| **采集层**：Provider / Capability / Router / Canonical | [`docs/DATA_FABRIC.md`](docs/DATA_FABRIC.md) |
+| **加一个数据源** | [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md) |
+| **加因子 / 策略 / 风控 / 组件 / API** | [`docs/EXTENDING.md`](docs/EXTENDING.md) |
+| **查某个配置项是什么意思** | [`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md) |
+| **目录逐层取舍 + 新旧路径对照** | [`docs/STRUCTURE.md`](docs/STRUCTURE.md) |
+| **数据校验 / 补全服务** | [`docs/DATA_INTEGRITY.md`](docs/DATA_INTEGRITY.md) |
+
+**第一次读建议**：README（跑起来）→ `RUNTIME.md`（知道它怎么转）
+→ `ARCHITECTURE.md`（知道为什么这样转）。
+
+> 注：本文早期版本曾指向 `app/readme.md`，那个文件并不存在（链接悬空），已修正。
 
 引擎里的东西按角色分四类，**加东西前先看这张图**：
 

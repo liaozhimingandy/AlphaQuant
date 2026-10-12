@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
+from app.common.logging import logger
 from app.storage.engine import SessionLocal
 from app.storage.schema import (
     ChipDistribution,
@@ -90,17 +91,27 @@ def _clean(model: Any, row: Dict[str, Any], fields: Sequence[str]) -> Dict[str, 
     return out
 
 
-def _ensure_pool_tables() -> None:
+_POOL_TABLES_READY = False
+
+
+def _ensure_pool_tables(force: bool = False) -> None:
     """确保人气榜/资金流排名/名称对照三张新表存在。
 
     用户可能开着引擎直接升级代码，``create_all`` 只建缺失表、不删不改旧表，
     这里用 ``checkfirst=True`` 在首次访问时补齐，免去"手动跑 init-db"的麻烦。
+
+    只做一次：这个函数挂在每张榜单的读写入口上，一轮刷新会被调十几次，
+    每次都跑 3 条 DDL 纯属浪费（``checkfirst`` 本身也要查 sqlite_master）。
     """
+    global _POOL_TABLES_READY
+    if _POOL_TABLES_READY and not force:
+        return
     try:
         from app.storage.engine import engine
 
         for _m in (StockHotRank, StockFlowRank, StockInfo):
             _m.__table__.create(bind=engine, checkfirst=True)
+        _POOL_TABLES_READY = True
     except Exception as exc:  # pragma: no cover - 建表失败不应阻断主流程
         logger.debug(f"补建股票池表失败（忽略）: {exc}")
 

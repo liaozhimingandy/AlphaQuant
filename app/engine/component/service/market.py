@@ -111,7 +111,16 @@ class MarketService(ServiceComponent):
         self._queues: Dict[str, Deque[Bar]] = {}
         self._loop: Optional[task.LoopingCall] = None
         self._finished = False
-        self.stats: Dict[str, int] = {"bars": 0, "polls": 0, "errors": 0}
+        # 是否只在交易时段推进（poll 模式）。replay 是历史回放，与
+        # "今天是不是交易日"无关，不能受它约束。
+        self.gate_trading_day = mode == "poll"
+        # 已推送 bar 的日期，用于同 bar 去重：盘后数据定稿后每个周期都
+        # 会取到同一根，重复推送会让策略被同一根 bar 反复驱动。
+        self._last_bar_date: Dict[str, Any] = {}
+        self.stats: Dict[str, int] = {
+            "bars": 0, "polls": 0, "errors": 0,
+            "skipped_closed": 0, "dup_bars": 0,
+        }
 
     # ---------------- 生命周期 ----------------
     def on_initialize(self) -> None:
@@ -122,6 +131,10 @@ class MarketService(ServiceComponent):
         self.start_date = str(cfg.get("start") or self.start_date)
         self.end_date = str(cfg.get("end") or self.end_date)
         self.data_source = str(cfg.get("data_source") or self.data_source)
+        # mode 可能被配置覆盖，闸门要跟着重算（不能只在 __init__ 里算一次）
+        self.gate_trading_day = (
+            self.mode == "poll" and bool(cfg.get("gate_trading_day", True))
+        )
 
         if self.mode == "replay":
             self._load_history()
@@ -242,7 +255,15 @@ class MarketService(ServiceComponent):
 
     @defer.inlineCallbacks
     def _tick_poll(self):
-        """抓取最新行情（阻塞 IO，走线程池）。"""
+        """抓取最新行情（阻塞 IO，走线程池）。
+
+        只在交易时段推进。非交易日库里本来就没有当日 bar，硬查会抛
+        ``DataFetchError`` 并每周期每标的刷一条告警——既污染日志，
+        又白搭一次 DB 往返（标的一多就很可观）。
+        """
+        if self.gate_trading_day and not self._in_session():
+            self.stats["skipped_closed"] += 1
+            return
         self.stats["polls"] += 1
         for sym in self.symbols:
             try:
@@ -252,7 +273,21 @@ class MarketService(ServiceComponent):
                 logger.warning(f"抓取 {sym} 最新行情失败: {exc}")
                 continue
             if bar is not None:
-                self._emit(bar)
+                self._emit(bar, dedupe=True)
+
+    def _in_session(self) -> bool:
+        """当前是否处在交易时段（仅 poll 模式关心）。
+
+        日历自身出故障时**放行**而不是掐死行情——日历是优化项，
+        不该成为新的单点故障；真出问题下游会照常报出来。
+        """
+        try:
+            from app.domain.calendar import get_calendar
+
+            cal = get_calendar()
+            return bool(cal.is_trading_day()) and bool(cal.is_open())
+        except Exception:
+            return True
 
     def _fetch_latest(self, symbol: str) -> Optional[Bar]:
         from app.storage.service import MarketDataService
@@ -264,7 +299,22 @@ class MarketService(ServiceComponent):
         bars = df_to_bars(normalize_symbol(symbol), df)
         return bars[-1] if bars else None
 
-    def _emit(self, bar: Bar) -> None:
+    def _emit(self, bar: Bar, dedupe: bool = False) -> None:
+        """推一根行情给策略。
+
+        :param dedupe: 同一标的同一日期只推一次。轮询模式下日线当日定稿后
+            每个周期都会取到同一根 bar，不去重会让策略被同一根反复驱动
+            （表现为重复信号、模拟盘重复成交、实盘重复报单）。
+            手动 :meth:`push` 不去重 —— 那是人主动触发的。
+        """
+        if dedupe:
+            key = str(getattr(bar, "symbol", "") or "")
+            day = getattr(bar, "date", None)
+            if day is not None and self._last_bar_date.get(key) == day:
+                self.stats["dup_bars"] += 1
+                return
+            if key:
+                self._last_bar_date[key] = day
         self.stats["bars"] += 1
         self.event_bus.publish(StandardEvents.BAR_RECEIVED, bar=bar)
 

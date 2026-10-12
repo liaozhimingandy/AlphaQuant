@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional
 import backtrader as bt
 import pandas as pd
 
+from app.common.config import settings
 from app.research.analyzers import EquityCurveAnalyzer
+from app.research.commission import AStockCommissionInfo
 from app.research.config import BacktestConfig
 from app.research.registry import get_strategy
 from app.research.result import BacktestResult, build_result
@@ -22,6 +24,16 @@ from app.common.logging import logger
 
 # backtrader 的 PandasData 需要这些列（小写）
 REQUIRED_FEED_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+
+def _as_rate(value: Any, fallback: float) -> float:
+    """费率取值器：``None`` / 空串 / 非法值一律退回 fallback。"""
+    try:
+        if value is None or value == "":
+            return float(fallback or 0.0)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback or 0.0)
 
 
 class BacktestError(RuntimeError):
@@ -94,7 +106,20 @@ class BacktestRunner:
         cerebro.adddata(feed)
 
         cerebro.broker.setcash(self.config.cash)
-        cerebro.broker.setcommission(commission=self.config.commission)
+        # 用 A 股口径计费（佣金双边 + 印花税仅卖出 + 过户费双边）。
+        # 原先的 setcommission 是买卖对称费率，会把卖出侧的印花税漏掉，
+        # 短线策略的净值因此被系统性高估。详见 commission.py 文件头。
+        cerebro.broker.addcommissioninfo(
+            AStockCommissionInfo(
+                commission=self.config.commission,
+                stamp_duty=_as_rate(self.config.stamp_duty,
+                                    settings.DEFAULT_STAMP_DUTY),
+                transfer_fee=_as_rate(getattr(settings, "TRANSFER_FEE", 0.0),
+                                      0.0),
+                min_commission=_as_rate(
+                    getattr(settings, "MIN_COMMISSION", 0.0), 0.0),
+            )
+        )
         if self.config.slippage_perc:
             cerebro.broker.set_slippage_perc(perc=self.config.slippage_perc)
 

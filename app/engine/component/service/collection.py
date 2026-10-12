@@ -226,6 +226,9 @@ class CollectionService(ServiceComponent):
             else settings.DATA_GUARD_MAX_REPAIR
         )
         self._guard_loop: Optional[task.LoopingCall] = None
+        # 首检的延迟回调句柄。必须存下来，否则在首检延迟窗口内停止服务，
+        # 回调照样会触发、照常联网做一次体检。
+        self._guard_start_call: Optional[Any] = None
         self._busy_guard = False
         self._guard_report: Optional[IntegrityReport] = None
         self.stats_guard: Dict[str, int] = {
@@ -1283,13 +1286,26 @@ class CollectionService(ServiceComponent):
         else:
             from twisted.internet import reactor
 
-            reactor.callLater(self.guard_start_delay, self._tick_guard)
+            self._guard_start_call = reactor.callLater(
+                self.guard_start_delay, self._tick_guard
+            )
             logger.debug(f"数据校验首检已安排在 {self.guard_start_delay:.0f}s 后")
         return defer.succeed(None)
+
     def _stop_guard(self, graceful: bool = True) -> defer.Deferred:
+        call = getattr(self, "_guard_start_call", None)
+        if call is not None:
+            try:
+                if call.active():
+                    call.cancel()
+            except Exception:
+                pass
+        self._guard_start_call = None
         if self._guard_loop is not None and self._guard_loop.running:
             self._guard_loop.stop()
         self._guard_loop = None
+        # 停止时若体检正在跑，一并复位忙标志，避免留下永久 "busy"
+        self._busy_guard = False
         return defer.succeed(None)
     # ---------------- 执行 ----------------
     def _on_guard_step(self, done: int, total: int, bad: bool) -> None:

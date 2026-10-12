@@ -39,13 +39,14 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from twisted.internet import reactor, threads
+from twisted.internet import defer, reactor, threads
 from twisted.internet.task import LoopingCall
 
 from app.engine.component.kinds import SchedulerComponent as SchedulerBase
 from app.engine.event import StandardEvents
 from app.engine.settings import RunMode
 from app.engine.task import TaskPriority, TaskStatus, Task
+from app.engine.utils import async_sleep
 from app.common.logging import logger
 
 
@@ -78,6 +79,8 @@ class SchedulerComponent(SchedulerBase):
         # ---- 定时器 ----
         self._timers: Dict[str, LoopingCall] = {}
         self._is_stopping = False
+        # 重试用的延迟回调。必须登记，否则停止后仍会往已停的队列里丢任务。
+        self._pending_retries: set = set()
 
     # ============================================================
     # 生命周期
@@ -104,11 +107,19 @@ class SchedulerComponent(SchedulerBase):
             timer_id="default_3min",
         )
 
-    def on_stop(self, graceful: bool = True) -> None:
+    @defer.inlineCallbacks
+    def on_stop(self, graceful: bool = True) -> Any:
         """停止调度器，引擎停止时调用。
 
         先停定时器（不再产生新事件源），再等队列排空。
         反过来会有"队列刚排空又来一批定时事件"的窗口。
+
+        等待必须**异步**：``on_stop`` 跑在 reactor 线程里，用
+        ``time.sleep`` 会把事件循环整个冻住 —— 行情推送、面板响应、
+        撤单回调全部停摆，而任务自己又在等这些回调，于是
+        ``_active_tasks`` 永远归不了零，形成"停止 = 挂死"。
+        因此这里改用异步让出，并**带 deadline**：宁可超时放弃
+        并告警，也不能无限期等一个可能已经卡死的任务。
         """
         self._running = False
         for timer_id, lc in self._timers.items():
@@ -120,14 +131,45 @@ class SchedulerComponent(SchedulerBase):
                 logger.error(f"停止定时器 {timer_id} 异常: {exc}")
         self._timers.clear()
 
+        # 取消尚未触发的重试，避免停止后继续往队列里投任务
+        for later in list(self._pending_retries):
+            try:
+                if later.active():
+                    later.cancel()
+            except Exception:
+                pass
+        self._pending_retries.clear()
+
         if graceful:
+            deadline = time.monotonic() + self._shutdown_wait()
+            waited = 0.0
             while self._active_tasks > 0 or not self._task_queue.empty():
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        f"停止调度器时仍有任务未收尾 | 活跃: {self._active_tasks} "
+                        f"| 待执行: {self._task_queue.qsize()} "
+                        f"| 已等待: {waited:.1f}s（超时放弃，避免挂死）"
+                    )
+                    break
                 logger.debug(
                     f"等待剩余任务完成 | 活跃: {self._active_tasks} "
                     f"| 待执行: {self._task_queue.qsize()}"
                 )
-                time.sleep(0.1)
+                yield async_sleep(0.1)
+                waited += 0.1
         logger.info("调度组件已停止")
+
+    def _shutdown_wait(self) -> float:
+        """关停时最多等多久在跑的任务（秒）。
+
+        优先读引擎配置 ``SHUTDOWN_TASK_WAIT``（默认 30s），读不到就退回 5s——
+        调度器只是引擎的一个组件，整体关停还有自己的预算，这里不该恋战。
+        """
+        try:
+            cfg = getattr(self.context, "config", None) or {}
+            return float(cfg.get("SHUTDOWN_TASK_WAIT", 5))
+        except Exception:
+            return 5.0
 
     # ============================================================
     # 契约一：提交任务
@@ -228,9 +270,17 @@ class SchedulerComponent(SchedulerBase):
                         f"任务执行失败，第{task.current_retry}次重试: "
                         f"{task.task_name} | 错误: {exc}"
                     )
-                    reactor.callLater(
-                        delay=task.retry_interval,
-                        callable=lambda: self._task_queue.put(task),
+                    def _enqueue_retry(t: Task = task) -> None:
+                        # 顺手清掉已触发/已取消的句柄，避免集合无界增长
+                        self._pending_retries = {
+                            d for d in self._pending_retries if d.active()
+                        }
+                        self._task_queue.put(t)
+
+                    self._pending_retries.add(
+                        reactor.callLater(
+                            delay=task.retry_interval, callable=_enqueue_retry
+                        )
                     )
                 else:
                     task.status = TaskStatus.FAILED
@@ -243,8 +293,21 @@ class SchedulerComponent(SchedulerBase):
                 with self._lock:
                     self._active_tasks -= 1
 
-        # 异步执行任务，不阻塞调度循环
-        threads.deferToThread(_run_task)
+        # 异步执行任务，不阻塞调度循环。
+        # 必须接住返回的 Deferred：``except Exception`` 抓不到 BaseException
+        # （SystemExit / KeyboardInterrupt），漏网的会变成
+        # "Unhandled error in Deferred"，既不记日志也无人知晓。
+        d = threads.deferToThread(_run_task)
+        d.addErrback(self._on_task_crashed, task)
+        return d
+
+    def _on_task_crashed(self, failure: Any, task: Task) -> None:
+        """任务跑飞（BaseException 级）时的兜底记录。"""
+        task.status = TaskStatus.FAILED
+        logger.error(
+            f"任务异常终止: {task.task_name} | ID: {task.task_id} "
+            f"| {failure.getErrorMessage() if hasattr(failure, 'getErrorMessage') else failure}"
+        )
 
     # ============================================================
     # 契约二：周期定时器

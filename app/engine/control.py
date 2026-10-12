@@ -106,23 +106,40 @@ class ControlCenter:
         return runtime.get(task_id) if runtime is not None else None
 
     def task_detail(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """单个任务的详细信息：快照 + 权益曲线 + 成交明细 + 订单/新闻。"""
+        """单个任务的详细信息：快照 + 权益曲线 + 成交明细 + 订单/新闻。
+
+        整段包 try：下面这一串 ``.portfolio`` / ``.orders`` / ``.to_dict()``
+        里任意一处缺字段或抛错，就会让面板任务详情整个 500。
+        宁可少给几段明细，也要保住页面能开。
+        """
         task = self.get_task(task_id)
         if task is None:
             return None
         from app.monitoring.snapshot import _sample_curve
 
-        detail = json_safe(task.snapshot())
-        detail["equity_curve"] = _sample_curve(list(task.portfolio.equity_curve))
-        detail["trades"] = [t.to_dict() for t in task.portfolio.trades[-200:]]
-        detail["orders"] = [o.to_dict() for o in task.orders[-200:]]
-        detail["news"] = [n.to_dict() for n in task.recent_news[-20:]]
-        detail["errors"] = list(task.errors[-20:])
-        detail["risk_rules"] = [
-            {"name": r.name, "params": dict(getattr(r, "params", {}))}
-            for r in task.risk_chain.rules
-        ]
-        detail["watch_symbols"] = sorted(runtime_watch(task))
+        try:
+            detail = json_safe(task.snapshot())
+        except Exception as exc:
+            logger.warning(f"任务 {task_id} 快照失败: {exc}")
+            detail = {"task_id": task_id, "error": f"快照失败: {exc}"}
+        for key, fn in (
+            ("equity_curve", lambda: _sample_curve(
+                list(task.portfolio.equity_curve))),
+            ("trades", lambda: [t.to_dict() for t in task.portfolio.trades[-200:]]),
+            ("orders", lambda: [o.to_dict() for o in task.orders[-200:]]),
+            ("news", lambda: [n.to_dict() for n in task.recent_news[-20:]]),
+            ("errors", lambda: list(task.errors[-20:])),
+            ("risk_rules", lambda: [
+                {"name": r.name, "params": dict(getattr(r, "params", {}))}
+                for r in task.risk_chain.rules
+            ]),
+            ("watch_symbols", lambda: sorted(runtime_watch(task))),
+        ):
+            try:
+                detail[key] = fn()
+            except Exception as exc:
+                logger.warning(f"任务 {task_id} 取 {key} 失败: {exc}")
+                detail[key] = []
         return detail
 
     # ============================================================
@@ -463,8 +480,16 @@ class ControlCenter:
         if comp is None:
             return {"available": False, "reason": "本引擎未装配数据校验服务"}
         snap = comp.snapshot()
+        guard = snap.get("guard")
+        if not guard:
+            # 不能回退成整个采集服务快照：面板会拿到一堆 jobs/symbols，
+            # 唯独取不到它要的"缺失数/补全数"，等于报错报了等于没报。
+            return {
+                "available": True,
+                "error": "体检单元未启用（collection_service 未装配 guard 单元）",
+            }
         out: Dict[str, Any] = {"available": True}
-        out.update(json_safe(snap.get("guard") or snap))
+        out.update(json_safe(guard))
         return out
 
     def data_guard_check(self, symbol: str = "", wait: bool = False,
@@ -495,12 +520,25 @@ class ControlCenter:
                 box.update(value)
                 return value
 
+            failure: Dict[str, Any] = {}
+
+            def _capture_err(f: Any) -> None:
+                failure["error"] = str(
+                    f.getErrorMessage() if hasattr(f, "getErrorMessage") else f
+                )
+                return None
+
             d.addCallback(_capture)
+            # 必须挂 errback：否则校验失败时 box 永远为空，只能干等到
+            # 300s 超时，报"体检超时"——把真实错误吞掉，还让人白等 5 分钟。
+            d.addErrback(_capture_err)
             # CLI 是同步上下文：这里只能等。校验本来就慢，
             # 用户是明确点了"立刻体检"，等是有预期的。
             deadline = time.time() + 300.0
-            while not box and time.time() < deadline:
+            while not box and not failure and time.time() < deadline:
                 time.sleep(0.05)
+            if failure:
+                return {"ok": False, **failure}
             if not box:
                 return {"ok": False, "error": "体检超时（300s）"}
             return _ok(box)

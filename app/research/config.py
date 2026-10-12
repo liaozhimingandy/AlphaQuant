@@ -32,6 +32,8 @@ class BacktestConfig:
     cash: float = settings.DEFAULT_CASH
     commission: float = settings.DEFAULT_COMMISSION
     slippage_perc: float = settings.DEFAULT_SLIPPAGE_PERC
+    #: 印花税率（**仅卖出**收取）。留空则跟随 ``settings.DEFAULT_STAMP_DUTY``。
+    stamp_duty: float | None = None
 
     # 数据来源：auto(库里没有就联网) / db / csv / remote
     data_source: str = "auto"
