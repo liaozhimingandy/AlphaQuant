@@ -85,8 +85,8 @@ SOURCE_FIXES = [
      "self._text(request, dashboard_html(),"),
     # 仓库模块改名时漏掉的两处（cli.py 里也有一处，同样是这个原因）。
     # 它在 try/except 里，失败会静默返回空列表 —— 面板股票池一直空白却不报错。
-    ("from app.storage.repo import marketx_repository as R",
-     "from app.storage.repo import kline_repo as R"),
+    ("from app.data.repo import marketx_repository as R",
+     "from app.data.repo import kline_repo as R"),
 ]
 
 

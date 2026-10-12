@@ -17,8 +17,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.feature.context import FactorContext  # noqa: E402
-from app.feature.registry import create_factor  # noqa: E402
+from app.modules.factor.context import FactorContext  # noqa: E402
+from app.modules.factor.registry import create_factor  # noqa: E402
 from app.domain.series import BarSeries  # noqa: E402
 from app.domain.types import Bar  # noqa: E402
 
@@ -142,7 +142,7 @@ def main() -> int:
     failures += 0 if ok_spread else 1
 
     # 6) 因子可被规则层消费（这是能否用在 config/tasks.json 里的关键）
-    from app.strategy.rule.spec import build_rule
+    from app.modules.strategy.rule.spec import build_rule
 
     rule = build_rule({
         "factor": "wma_cross_up", "op": "eq", "value": 1,

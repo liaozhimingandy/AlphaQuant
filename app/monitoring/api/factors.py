@@ -21,9 +21,9 @@ class FactorViewsMixin:
         于是题材/基本面/资金/舆情/宏观那几十个从来没被用过。
         """
         try:
-            from app.feature.catalog import CATEGORY_DOCS, factor_catalog
-            from app.feature.expr import func_catalog, variable_catalog
-            from app.feature.library import get_library
+            from app.modules.factor.catalog import CATEGORY_DOCS, factor_catalog
+            from app.modules.factor.expr import func_catalog, variable_catalog
+            from app.modules.factor.library import get_library
 
             lib = get_library()
             cat = factor_catalog()
@@ -43,7 +43,7 @@ class FactorViewsMixin:
 
     def factor_validate(self, expr: str) -> Dict[str, Any]:
         try:
-            from app.feature.expr import validate
+            from app.modules.factor.expr import validate
 
             return validate(expr)
         except Exception as exc:
@@ -51,7 +51,7 @@ class FactorViewsMixin:
 
     def factor_add(self, body: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            from app.feature.library import get_library
+            from app.modules.factor.library import get_library
 
             ok, msg, spec = get_library().add(
                 str(body.get("name") or ""),
@@ -70,7 +70,7 @@ class FactorViewsMixin:
 
     def factor_remove(self, name: str) -> Dict[str, Any]:
         try:
-            from app.feature.library import get_library
+            from app.modules.factor.library import get_library
 
             ok, msg = get_library().remove(name)
             return {"ok": ok, "message": msg}
@@ -81,7 +81,7 @@ class FactorViewsMixin:
                      horizon: int = 5) -> Dict[str, Any]:
         """检验一个因子（工作线程执行）。"""
         try:
-            from app.feature.evaluate import evaluate_factor
+            from app.modules.factor.evaluate import evaluate_factor
 
             rep = evaluate_factor(expr, self._factor_symbols(symbols),
                                   horizon=int(horizon))
@@ -96,9 +96,9 @@ class FactorViewsMixin:
                     save: bool = False) -> Dict[str, Any]:
         """遗传算法挖掘（工作线程执行）。"""
         try:
-            from app.feature.evaluate import load_panel
-            from app.feature.library import SOURCE_MINED, get_library
-            from app.feature.mining.mining import FactorMiner
+            from app.modules.factor.evaluate import load_panel
+            from app.modules.factor.library import SOURCE_MINED, get_library
+            from app.modules.factor.mining.mining import FactorMiner
 
             syms = self._factor_symbols(symbols)
             panel = load_panel(syms)
@@ -132,8 +132,8 @@ class FactorViewsMixin:
     def _factor_symbols(self, symbols: Any = None) -> List[str]:
         if symbols:
             return [str(s) for s in symbols]
-        from app.storage.engine import SessionLocal
-        from app.storage.repo.stock_repo import StockRepository
+        from app.data.engine import SessionLocal
+        from app.data.repo.stock_repo import StockRepository
 
         try:
             with SessionLocal() as db:

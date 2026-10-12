@@ -3,7 +3,7 @@
 """数据面命令：建库 / 采集 / 完整性校验 / 数据源与 Provider 观测。
 
 对应链路 DataSource → Provider → Capability → Router → DataService，
-这里只做「人读得懂的呈现」，业务一律下沉到 app.datasource / app.storage。
+这里只做「人读得懂的呈现」，业务一律下沉到 app.providers.market / app.data。
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from app.common.logging import logger
 # ============================== 数据库 ==============================
 @cli.command(name="init-db", help="初始化数据库（建表）")
 def init_db_cmd() -> None:
-    from app.storage.service import init_db
+    from app.data.service import init_db
 
     init_db()
     click.secho(f"✅ 数据库初始化完成 | {settings.DATABASE_URL}", fg="green")
@@ -38,7 +38,7 @@ def init_db_cmd() -> None:
 )
 @click.option("--save-csv", is_flag=True, help="同时导出 CSV 到 data/stock/")
 def collect_cmd(symbol, start, end, adjust, source, save_csv) -> None:
-    from app.storage.service import MarketDataService
+    from app.data.service import MarketDataService
 
     source_arg = None if source == "auto" else source
     ok, fail = 0, 0
@@ -72,7 +72,7 @@ def dataguard_cmd(symbol, lookback, repair, max_symbols) -> None:
     为什么要单独给个命令：库里少一天数据不会报错，回测照跑、信号照出，
     只是结论悄悄偏了。这类问题只能靠主动体检发现，不能等它报错。
     """
-    from app.engine.integrity import DataIntegrityChecker, summarize
+    from app.modules.collection.integrity import DataIntegrityChecker, summarize
 
     auto = settings.DATA_GUARD_AUTO_REPAIR if repair is None else bool(repair)
     checker = DataIntegrityChecker(
@@ -144,7 +144,7 @@ def _probe_sources(registry: Any, kind: Optional[str]) -> None:
         click.secho(f"{r['name']:<18}{flag:>6}{str(r.get('ms')) + 'ms':>8}  {detail}",
                     fg=color)
     if bad == len(rows):
-        from app.datasource.compat.registry import network_hint
+        from app.providers.market.compat.registry import network_hint
 
         click.secho("全部不可用 —— " + network_hint(), fg="yellow")
     elif bad:
@@ -158,9 +158,9 @@ def _probe_sources(registry: Any, kind: Optional[str]) -> None:
 @click.option("--kind", default=None, help="只探测该数据类型，如 hot_rank / daily")
 def sources_cmd(probe: bool, kind: Optional[str]) -> None:
     # 注册发生在 import 期，必须先让内置源模块被加载，否则列表是空的
-    import app.datasource.service.facade  # noqa: F401  触发全部内置源注册
+    import app.providers.market.service.facade  # noqa: F401  触发全部内置源注册
 
-    from app.datasource.compat.registry import REGISTRY
+    from app.providers.market.compat.registry import REGISTRY
 
     if probe:
         _probe_sources(REGISTRY, kind)
@@ -168,7 +168,7 @@ def sources_cmd(probe: bool, kind: Optional[str]) -> None:
 
     rows = REGISTRY.health()
     if not rows:
-        click.secho("尚未注册任何数据源（是不是没 import app.datasource.service.facade？）",
+        click.secho("尚未注册任何数据源（是不是没 import app.providers.market.service.facade？）",
                     fg="yellow")
         return
     click.secho(f"{'数据源':<18}{'权重':>6}{'基准':>6}  {'状态':<10}  支持", fg="cyan")
@@ -203,7 +203,7 @@ def providers_cmd(cap: Optional[str], probe: bool, do_reset: bool,
     它没有声明 HOT_RANK，所以压根不会出现在 hot_rank 的路由里，
     而不是"调用了之后才发现不支持"。
     """
-    from app.datasource.provider import PROVIDERS, bootstrap, reload
+    from app.providers.market.provider import PROVIDERS, bootstrap, reload
 
     if do_reload:
         cfg = reload()
@@ -262,8 +262,8 @@ _PROBE_ARGS_BY_CAP: Dict[str, Dict[str, Any]] = {
 
 def _probe_routes(cap: Optional[str]) -> None:
     """逐条路由实打一次：区分"源挂了"和"本机出不去网"。"""
-    from app.datasource.provider import PROVIDERS
-    from app.datasource.provider.base import DataCapability, ProviderError, as_provider_error
+    from app.providers.market.provider import PROVIDERS
+    from app.providers.market.provider.base import DataCapability, ProviderError, as_provider_error
 
     click.secho("正在实测路由……", fg="cyan")
     targets = ([DataCapability.parse(cap)] if cap
@@ -306,7 +306,7 @@ def _echo_host_state() -> None:
     源级状态只能告诉你"它失败了"，而多个源常常共用同一个域名：
     push2 一挂，三个人气榜源一起挂，看源列表会误判成"数据源都不行"。
     """
-    from app.datasource.transport import net
+    from app.providers.market.transport import net
 
     hosts = net.host_state()
     if not hosts:
@@ -328,7 +328,7 @@ def _echo_host_state() -> None:
 # ============================== 数据清单 ==============================
 @cli.command(name="list", help="查看本地数据库已有哪些标的与覆盖区间")
 def list_cmd() -> None:
-    from app.storage.service import MarketDataService
+    from app.data.service import MarketDataService
 
     rows = MarketDataService.inventory()
     if not rows:

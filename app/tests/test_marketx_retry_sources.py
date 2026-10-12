@@ -24,9 +24,9 @@ from unittest import mock
 
 import pandas as pd
 
-from app.alpha.pool import sync as S
-from app.datasource.service import facade as MX
-from app.datasource.compat.registry import (
+from app.modules.universe.pool import sync as S
+from app.providers.market.service import facade as MX
+from app.providers.market.compat.registry import (
     REGISTRY,
     DataUnavailable,
     SourceError,

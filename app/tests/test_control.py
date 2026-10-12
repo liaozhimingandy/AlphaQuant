@@ -12,8 +12,8 @@ from __future__ import annotations
 import unittest
 import uuid
 
-from app.engine.base import BaseQuantEngine
-from app.engine.event import StandardEvents
+from app.engine.engine import BaseQuantEngine
+from app.runtime.event_bus import StandardEvents
 from app.domain.types import TaskState
 from app.tests.helpers import TempWorkspaceMixin
 from app.common.jsonio import read_json
@@ -35,8 +35,9 @@ def make_task_spec(task_id: str, symbol: str = "000001", **over) -> dict:
 def make_engine(tasks=None, with_market: bool = True) -> BaseQuantEngine:
     from app.engine import component
     # 重构后：行情中枢 → 行情服务，策略中枢 → 策略组件，任务调度器 → 调度组件
-    from app.engine.component import (
-        MarketService, SchedulerComponent, StrategyComponent)
+    from app.modules.market.service import MarketService
+    from app.runtime.scheduler import SchedulerComponent
+    from app.modules.strategy.component import StrategyComponent
 
     engine = BaseQuantEngine.create({"RUN_MODE": "BACKTEST"})
     if with_market:
@@ -229,7 +230,7 @@ class TestControlWithRunningEngine(TempWorkspaceMixin, unittest.TestCase):
         self.engine = make_engine()
         self.engine.control.namespace = self.ns
         # 直接把内部状态置为 RUNNING，模拟引擎已启动（避免跑 reactor）
-        from app.engine.settings import EngineStatus
+        from app.engine.context import EngineStatus
 
         self.engine._status = EngineStatus.RUNNING
 

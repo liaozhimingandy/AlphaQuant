@@ -237,7 +237,7 @@
 | 配置项 | 建议接线位置 |
 |---|---|
 | `DEFAULT_STAMP_DUTY` / `MIN_COMMISSION` / `TRANSFER_FEE` | ✅ 已接（`research/commission.py`） |
-| `LIVE_MAX_DAILY_TRADES` | `app/risk/builtin.py` 加一条 `DailyTradeLimitRisk` |
+| `LIVE_MAX_DAILY_TRADES` | `app/modules/risk/builtin.py` 加一条 `DailyTradeLimitRisk` |
 | `EXECUTION_MODE` | `app/engine/builder.py` 决定网关是否启用 |
-| `LLM_MIN_CONFIDENCE` | `app/news/` 的 LLM 分析器判定处 |
+| `LLM_MIN_CONFIDENCE` | `app/modules/news/` 的 LLM 分析器判定处 |
 | `LOG_TRACE_KEEP` | `app/common/logging.py` 的 sink 配置 |

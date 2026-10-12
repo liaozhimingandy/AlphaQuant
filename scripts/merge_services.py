@@ -361,7 +361,7 @@ import sys
 
 from app.engine.component.base import Progress
 from app.engine.component.kinds import Cap, RestartPolicy, ServiceComponent
-from app.engine.collect.spec import (
+from app.modules.collection.spec import (
     CollectJob,
     CollectorSpec,
     DAILY_PERIOD,
@@ -371,7 +371,7 @@ from app.engine.collect.spec import (
     normalize_period,
     parse_frequency,
 )
-from app.engine.integrity import DataIntegrityChecker, IntegrityReport, summarize
+from app.modules.collection.integrity import DataIntegrityChecker, IntegrityReport, summarize
 from app.engine.event import StandardEvents
 from app.domain.symbol import DataFetchError, normalize_symbol
 from app.common.config import settings
@@ -888,8 +888,8 @@ from twisted.internet import defer, task, threads
 
 from app.engine.component.kinds import Cap, RestartPolicy, ServiceComponent
 from app.engine.event import StandardEvents
-from app.execution.endpoints import load_endpoints
-from app.execution.gateway import (
+from app.providers.broker.endpoints import load_endpoints
+from app.providers.broker.gateway import (
     FillEvent,
     GatewayError,
     GatewayOrder,
@@ -898,7 +898,7 @@ from app.execution.gateway import (
     has_gateway,
     list_gateways,
 )
-from app.storage.repo.trade_repo import get_repository
+from app.data.repo.trade_repo import get_repository
 from app.domain.types import OrderStatus
 from app.common.config import settings
 from app.common.jsonio import json_safe

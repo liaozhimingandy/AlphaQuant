@@ -10,9 +10,9 @@ from __future__ import annotations
 import unittest
 
 from app.domain.types import Account, Side, Signal, SignalSource
-from app.portfolio import build_sizer
-from app.risk import RiskChain, build_risk_chain, create_risk, list_risks
-from app.strategy.state import DecisionState
+from app.account import build_sizer
+from app.modules.risk import RiskChain, build_risk_chain, create_risk, list_risks
+from app.modules.strategy.state import DecisionState
 
 
 def signal(side=Side.BUY, source=SignalSource.BAR, **meta) -> Signal:
@@ -125,7 +125,7 @@ class TestSizer(unittest.TestCase):
 
     def test_method_shadowing_is_rejected(self):
         """构造参数与 size() 方法同名会被提前拦掉，而不是等到下单时报诡异错误。"""
-        from app.portfolio.sizer import IBaseSizer
+        from app.account.sizer import IBaseSizer
 
         class Bad(IBaseSizer):
             name = "bad"
@@ -133,7 +133,7 @@ class TestSizer(unittest.TestCase):
             def __init__(self, size=1):
                 self.size = size  # 故意遮蔽
 
-        import app.portfolio.sizer as sz
+        import app.account.sizer as sz
 
         sz._SIZERS["bad"] = Bad
         try:
@@ -194,7 +194,7 @@ class TestAStockHardRules(unittest.TestCase):
     def test_broken_hard_rule_does_not_break_chain(self):
         """硬约束装配失败不能让整条链建不起来（配置错也要能启动）。"""
         from unittest import mock
-        from app.risk import registry as R
+        from app.modules.risk import registry as R
 
         with mock.patch.object(R, "create_risk",
                                side_effect=ValueError("boom")):
@@ -206,20 +206,20 @@ class TestLiveLikeModeDetection(unittest.TestCase):
     """哪些运行模式要按真金白银的标准装配风控。"""
 
     def test_live_and_simulate_enforce(self):
-        from app.engine.tasking.spec import _is_live_like
+        from app.runtime.tasking.spec import _is_live_like
         for mode in ("LIVE", "live", "SIMULATE", "simulate"):
             self.assertTrue(_is_live_like(mode), mode)
 
     def test_backtest_does_not(self):
-        from app.engine.tasking.spec import _is_live_like
+        from app.runtime.tasking.spec import _is_live_like
         for mode in ("BACKTEST", "backtest", None, ""):
             self.assertFalse(_is_live_like(mode), mode)
 
     def test_enum_and_string_both_work(self):
         """两种 RunMode 枚举 + 纯字符串都要认得（配置里是字符串）。"""
         from app.domain.types import RunMode as DMode
-        from app.engine.settings import RunMode as EMode
-        from app.engine.tasking.spec import _is_live_like
+        from app.engine.context import RunMode as EMode
+        from app.runtime.tasking.spec import _is_live_like
 
         self.assertTrue(_is_live_like(DMode.LIVE))
         self.assertTrue(_is_live_like(EMode.SIMULATE))

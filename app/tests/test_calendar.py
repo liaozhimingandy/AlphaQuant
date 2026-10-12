@@ -158,7 +158,7 @@ class TestClosedMarketNoRequest(unittest.TestCase):
     def _component(self, symbols=("000001",)):
         # 日频截面原是独立的 ExtDataComponent，现在并进 CollectionService
         # 的 ``_cross`` 单元：构造参数带 ``cross_`` 前缀，方法带 ``_cross`` 中缀。
-        from app.engine.component import CollectionService
+        from app.modules.collection.service import CollectionService
 
         # K 线单元用一个不存在的配置文件：构造期它会解析一次采集配置，
         # 不隔离的话会读到工程里的 config/collector.json，把真实标的带进用例。
@@ -251,8 +251,8 @@ class _freeze:
     # 采集时间窗口的判断在 schedule 模块里，也要一起冻住 ——
     # 只冻 calendar 会出现"日历说在盘后、窗口说不在"的自相矛盾
     _MODULES = ("app.domain.calendar",
-                "app.engine.component.service.collection",
-                "app.engine.collect.schedule")
+                "app.modules.collection.service",
+                "app.modules.collection.schedule")
 
     def __init__(self, when: datetime) -> None:
         self.when = when

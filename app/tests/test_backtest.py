@@ -10,10 +10,10 @@ from unittest import mock
 
 import pandas as pd
 
-from app.research import BacktestConfig, run_backtest
-from app.research.registry import get_strategy, list_strategies
-from app.research.result import annualized_return, max_drawdown, sharpe_ratio
-from app.research.runner import BacktestError, BacktestRunner
+from app.modules.backtest import BacktestConfig, run_backtest
+from app.modules.backtest.registry import get_strategy, list_strategies
+from app.modules.backtest.result import annualized_return, max_drawdown, sharpe_ratio
+from app.modules.backtest.runner import BacktestError, BacktestRunner
 from app.tests.helpers import make_ohlcv, make_uptrend
 
 
@@ -74,7 +74,7 @@ class TestRegistry(unittest.TestCase):
 class TestRunner(unittest.TestCase):
     def _patch_load(self, df):
         return mock.patch(
-            "app.research.runner.MarketDataService.load", return_value=df
+            "app.modules.backtest.runner.MarketDataService.load", return_value=df
         )
 
     def test_runs_end_to_end(self):

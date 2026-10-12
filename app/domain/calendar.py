@@ -353,7 +353,7 @@ def refresh_from_network(save: bool = True) -> Dict[str, Any]:
     那比"多采了几次"严重得多。所以宁可用旧的/内置的，也不要清空。
     """
     try:
-        from app.datasource.service import facade as MX
+        from app.providers.market.service import facade as MX
     except Exception as exc:
         return {"ok": False, "error": f"数据模块不可用: {exc}"}
     try:

@@ -1,9 +1,9 @@
 # 数据采集层架构：Provider / Capability / Router / Canonical
 
 > 面向"数据源永远在变，而因子和策略一行都不该改"这件事。
-> 配套代码：`app/datasource/provider/`（Provider·能力·熔断·路由·质量）、
-> `app/datasource/model/`（标准模型）、`app/datasource/service/`（对外统一入口）、
-> `app/datasource/storage/`（Raw 层）、`config/providers.json`（编排配置）。
+> 配套代码：`app/providers/market/provider/`（Provider·能力·熔断·路由·质量）、
+> `app/providers/market/model/`（标准模型）、`app/providers/market/service/`（对外统一入口）、
+> `app/providers/market/raw/`（Raw 层）、`config/providers.json`（编排配置）。
 
 ---
 
@@ -62,16 +62,16 @@
 
 | 路径 | 职责 |
 | --- | --- |
-| `app/datasource/model/` | **标准数据模型**：`Kline` / `RankRow` / `FundFlowRow` + 请求对象 + 枚举 |
-| `app/datasource/provider/base.py` | `DataCapability` 能力枚举、`ProviderErrorType` 错误分类、`DataProvider`、`@capability` |
-| `app/datasource/provider/health.py` | 能力级熔断器 + 健康分（成功率/延迟/新鲜度） |
-| `app/datasource/provider/registry.py` | 注册表：注册、按能力查、排序 |
-| `app/datasource/provider/router.py` | 路由器：四层决策、血缘、事件 |
-| `app/datasource/provider/quality.py` | 数据质量校验（OHLC 自洽、日期唯一、代码非空） |
-| `app/datasource/provider/config.py` | 读 `config/providers.json` |
-| `app/datasource/adapters/` | 各数据源的 Adapter（**新增数据源只动这里**） |
-| `app/datasource/service/data_service.py` | `data_service`：上层唯一入口 |
-| `app/datasource/storage/raw_store.py` | Raw / Bronze 原始响应存档 |
+| `app/providers/market/model/` | **标准数据模型**：`Kline` / `RankRow` / `FundFlowRow` + 请求对象 + 枚举 |
+| `app/providers/market/provider/base.py` | `DataCapability` 能力枚举、`ProviderErrorType` 错误分类、`DataProvider`、`@capability` |
+| `app/providers/market/provider/health.py` | 能力级熔断器 + 健康分（成功率/延迟/新鲜度） |
+| `app/providers/market/provider/registry.py` | 注册表：注册、按能力查、排序 |
+| `app/providers/market/routing/router.py` | 路由器：四层决策、血缘、事件 |
+| `app/providers/market/routing/quality.py` | 数据质量校验（OHLC 自洽、日期唯一、代码非空） |
+| `app/providers/market/routing/config.py` | 读 `config/providers.json` |
+| `app/providers/market/adapters/` | 各数据源的 Adapter（**新增数据源只动这里**） |
+| `app/providers/market/service/data_service.py` | `data_service`：上层唯一入口 |
+| `app/providers/market/raw/raw_store.py` | Raw / Bronze 原始响应存档 |
 
 ---
 
@@ -119,7 +119,7 @@ class AkShareProvider(DataProvider):
     @capability(DataCapability.DAILY_KLINE, name="akshare_daily",
                 hosts=("push2his.eastmoney.com",))
     def daily(self, symbol, start=None, end=None, adjust="qfq"):
-        from app.datasource.compat.kline_sources import _akshare_daily
+        from app.providers.market.compat.kline_sources import _akshare_daily
         return _akshare_daily(symbol=symbol, start=start, end=end, adjust=adjust)
 
     @capability(DataCapability.HOT_RANK, name="akshare_em", priority=40)
@@ -263,7 +263,7 @@ class Kline:
 标准模型解决的是：baostock 给中文列、通达信给小写英文列且**没有成交额**、
 腾讯没有成交额且量纲是"手"。外部格式 → 标准模型**只在适配器里发生一次**。
 
-与 `app/datasource/kline_base.py` 的分工：
+与 `app/providers/market/compat/kline_base.py` 的分工：
 
 | | 口径 | 用途 |
 | --- | --- | --- |
@@ -410,7 +410,7 @@ class Kline:
 ### 第 1 步：写 Adapter
 
 ```python
-# app/datasource/adapters/mysource.py
+# app/providers/market/adapters/mysource.py
 class MySourceProvider(DataProvider):
     name = "mysource"
     priority = 60
@@ -426,12 +426,12 @@ class MySourceProvider(DataProvider):
 
 - **取不到** → 抛 `DataUnavailable`（源没坏，不降分）；
 - **源坏了** → 抛 `SourceError` / 任意异常（会被分类后计入熔断）；
-- 返回 `DataFrame`，列名走 `app/datasource/kline_base.DAILY_COLUMNS`。
+- 返回 `DataFrame`，列名走 `app/providers/market/compat/kline_base.DAILY_COLUMNS`。
 
 ### 第 2 步：挂进装配列表
 
 ```python
-# app/datasource/adapters/__init__.py
+# app/providers/market/adapters/__init__.py
 BUILTIN_PROVIDERS / _load() 里加上 MySourceProvider
 ```
 
@@ -469,7 +469,7 @@ HTTP：`GET /api/providers`（`routes` / `capabilities` / `config` / `used`）�
 | --- | --- | --- |
 | `fetch_hot_rank` / `fetch_fund_flow` / `fetch_fund_flow_rank` | ✅ 新 Router | 走 `config/providers.json` 的 routes |
 | `kline_sources.fetch_daily`（含数据校验补全） | ✅ 新 Router | 同上 |
-| `app/datasource/compat/registry.py` 的 `REGISTRY` | ⏸ 兼容期保留 | 仍在注册（面板 / 旧调用方在读）；新链路会把采集事件**镜像**给它，保证"最近成功的源"继续可查 |
+| `app/providers/market/compat/registry.py` 的 `REGISTRY` | ⏸ 兼容期保留 | 仍在注册（面板 / 旧调用方在读）；新链路会把采集事件**镜像**给它，保证"最近成功的源"继续可查 |
 | `DataSourceFactory` / `MarketDataService`（老链路） | ⏸ 兼容期保留 | 分钟线、部分采集组件仍在用 |
 
 等老链路全部迁完，删掉 `DataRouter._mirror()` 与 `sources.py` 即可。

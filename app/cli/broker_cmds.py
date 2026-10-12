@@ -22,8 +22,8 @@ def brokers_group() -> None:
 @brokers_group.command(name="list", help="列出全部接入点（凭据已脱敏）")
 @click.option("--config", "config_path", default=None, help="接入点配置文件路径")
 def brokers_list(config_path) -> None:
-    from app.execution.endpoints import describe_endpoints
-    from app.execution.gateway import gateway_signature, list_gateways
+    from app.providers.broker.endpoints import describe_endpoints
+    from app.providers.broker.gateway import gateway_signature, list_gateways
 
     data = describe_endpoints(config_path)
     _print_endpoints({
@@ -35,8 +35,8 @@ def brokers_list(config_path) -> None:
 @click.argument("endpoint", required=False, default="")
 @click.option("--config", "config_path", default=None, help="接入点配置文件路径")
 def brokers_check(endpoint, config_path) -> None:
-    from app.execution.endpoints import load_endpoints
-    from app.execution.gateway import create_gateway, has_gateway, list_gateways
+    from app.providers.broker.endpoints import load_endpoints
+    from app.providers.broker.gateway import create_gateway, has_gateway, list_gateways
 
     cfg = load_endpoints(config_path)
     try:
@@ -91,7 +91,7 @@ def brokers_check(endpoint, config_path) -> None:
 
 @brokers_group.command(name="gateways", help="列出可用网关与其可配参数")
 def brokers_gateways() -> None:
-    from app.execution.gateway import gateway_signature, list_gateways
+    from app.providers.broker.gateway import gateway_signature, list_gateways
 
     names = list_gateways()
     if not names:

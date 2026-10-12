@@ -115,7 +115,7 @@ def log_collection_summary(col: Any) -> None:
     """打印一行采集概况。取不到服务就安静跳过。"""
     if col is None:
         return
-    from app.engine.collect.spec import humanize_frequency
+    from app.modules.collection.spec import humanize_frequency
 
     buckets = collection_job_buckets(col)
     logger.info(

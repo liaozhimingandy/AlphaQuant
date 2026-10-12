@@ -26,9 +26,9 @@ class RepoTestCase(TempWorkspaceMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        import app.storage.schema  # noqa: F401
+        import app.data.schema  # noqa: F401
 
-        from app.storage.engine import Base, engine
+        from app.data.engine import Base, engine
 
         Base.metadata.create_all(bind=engine)
 
@@ -39,7 +39,7 @@ class TestFactorValueStore(RepoTestCase):
     SYM = "910001"
 
     def setUp(self) -> None:
-        from app.storage.repo import kline_repo as R
+        from app.data.repo import kline_repo as R
 
         self.R = R
         self.day = date(2026, 3, 10)
@@ -118,7 +118,7 @@ class TestNewsStore(RepoTestCase):
     SYM = "910002"
 
     def test_dedup_and_stats(self):
-        from app.storage.repo import kline_repo as R
+        from app.data.repo import kline_repo as R
 
         day = date(2026, 3, 10)
         R.save_news([
@@ -136,7 +136,7 @@ class TestNewsStore(RepoTestCase):
 
     def test_sentiment_keywords(self):
         """情感规则是粗糙的离线兜底 —— 只要求方向正确，不要求精确。"""
-        from app.datasource.service.facade import _sentiment
+        from app.providers.market.service.facade import _sentiment
 
         self.assertGreater(_sentiment("公司业绩超预期，中标大单"), 0)
         self.assertLess(_sentiment("涉嫌违规被立案调查，业绩大幅下滑"), 0)
@@ -145,7 +145,7 @@ class TestNewsStore(RepoTestCase):
 
 class TestMacroAndBreadth(RepoTestCase):
     def test_macro_save_and_latest(self):
-        from app.storage.repo import kline_repo as R
+        from app.data.repo import kline_repo as R
 
         # 显式传日期：库里可能已采到更新的真实宏观数据，
         # 不指定日期会读到那一行，测试就变成"看运气"
@@ -158,7 +158,7 @@ class TestMacroAndBreadth(RepoTestCase):
         self.assertAlmostEqual(R.latest_macro(day)["pmi"], 49.4)
 
     def test_breadth_save_and_latest(self):
-        from app.storage.repo import kline_repo as R
+        from app.data.repo import kline_repo as R
 
         day = date(2026, 3, 9)
         R.save_breadth([
@@ -171,7 +171,7 @@ class TestMacroAndBreadth(RepoTestCase):
 
     def test_breadth_idempotent(self):
         """同一天重复采集必须覆盖 —— 否则"今天情绪是多少"会有两个答案。"""
-        from app.storage.repo import kline_repo as R
+        from app.data.repo import kline_repo as R
 
         d = date(2026, 3, 9)
         R.save_breadth([{"date": d, "up_count": 100, "down_count": 50}])
@@ -185,7 +185,7 @@ class TestFeatureAssembly(RepoTestCase):
     SYM = "910003"
 
     def setUp(self) -> None:
-        from app.storage.repo import kline_repo as R
+        from app.data.repo import kline_repo as R
 
         self.day = date(2026, 3, 10)
         R.save_factor_values([
@@ -205,7 +205,7 @@ class TestFeatureAssembly(RepoTestCase):
                          "down_count": 1800, "sentiment": 30.0}])
 
     def test_features_filled(self):
-        from app.feature.features import get_provider
+        from app.modules.factor.features import get_provider
 
         f = get_provider(ttl=0).get(self.SYM, self.day)
         self.assertAlmostEqual(f.lhb_net_buy, 1.2e8)
@@ -216,7 +216,7 @@ class TestFeatureAssembly(RepoTestCase):
         self.assertAlmostEqual(f.breadth_sentiment, 30.0)
 
     def test_available_flags(self):
-        from app.feature.features import get_provider
+        from app.modules.factor.features import get_provider
 
         f = get_provider(ttl=0).get(self.SYM, self.day)
         self.assertTrue(f.available["sentiment"])
@@ -224,7 +224,7 @@ class TestFeatureAssembly(RepoTestCase):
 
     def test_market_context_cached(self):
         """宏观对所有票同值，不该每只票都查一次库。"""
-        from app.feature.features import FeatureProvider
+        from app.modules.factor.features import FeatureProvider
 
         p = FeatureProvider(ttl=0)
         p._market_context(self.day)
@@ -238,12 +238,12 @@ class TestNewScoreDims(unittest.TestCase):
     """舆情与宏观要真的参与打分。"""
 
     def _feat(self, **kw):
-        from app.feature.features import StockFeatures
+        from app.modules.factor.features import StockFeatures
 
         return StockFeatures(symbol="000001", **kw)
 
     def _engine(self):
-        from app.alpha.score import ScoreConfig, ScoreEngine
+        from app.modules.universe.score import ScoreConfig, ScoreEngine
 
         return ScoreEngine(config=ScoreConfig.load())
 
@@ -285,7 +285,7 @@ class TestNewScoreDims(unittest.TestCase):
         self.assertEqual(a, b)
 
     def test_weights_include_new_dims(self):
-        from app.alpha.score import ScoreConfig
+        from app.modules.universe.score import ScoreConfig
 
         w = ScoreConfig.load().weights
         for k in ("sentiment", "macro", "fundamental", "capital"):
@@ -302,7 +302,7 @@ class TestStrategyStore(TempWorkspaceMixin, unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from app.strategy.store import StrategyStore
+        from app.modules.strategy.store import StrategyStore
 
         self.store = StrategyStore(
             path=str(Path(tempfile.mkdtemp(prefix="aq-stg-")) / "strategies.json"))
@@ -362,7 +362,7 @@ class TestStrategyStore(TempWorkspaceMixin, unittest.TestCase):
         self.assertEqual(got["params"]["factors"][0]["name"], "mom_20")
 
     def test_persists(self):
-        from app.strategy.store import StrategyStore
+        from app.modules.strategy.store import StrategyStore
 
         self.store.add("p1", "score", {"entry_score": 70, "exit_score": 55})
         again = StrategyStore(path=str(self.store.path)).load(force=True)
@@ -381,7 +381,7 @@ class TestFactorCatalog(unittest.TestCase):
 
     def test_shows_more_than_library(self):
         """面板曾经只显示 8 条预置因子，其余几十个等于不存在。"""
-        from app.feature.catalog import factor_catalog
+        from app.modules.factor.catalog import factor_catalog
 
         cat = factor_catalog(with_data=False)
         self.assertGreater(cat["total"], 30)
@@ -390,7 +390,7 @@ class TestFactorCatalog(unittest.TestCase):
             self.assertIn(must, keys, f"缺少类别 {must}")
 
     def test_no_duplicate_names(self):
-        from app.feature.catalog import factor_catalog
+        from app.modules.factor.catalog import factor_catalog
 
         names = [f["name"] for g in factor_catalog(with_data=False)["categories"]
                  for f in g["factors"]]
@@ -398,7 +398,7 @@ class TestFactorCatalog(unittest.TestCase):
 
     def test_price_factors_are_marked_usable(self):
         """量价技术类只要有K线就能算，不该被标成"无数据"。"""
-        from app.feature.catalog import factor_catalog
+        from app.modules.factor.catalog import factor_catalog
 
         cat = factor_catalog()
         price = next(g for g in cat["categories"] if g["key"] == "量价技术")
@@ -406,7 +406,7 @@ class TestFactorCatalog(unittest.TestCase):
 
     def test_expression_factors_grouped_together(self):
         """预置因子被子分类拆散成 8 个单条分组会比不分组更难看。"""
-        from app.feature.catalog import factor_catalog
+        from app.modules.factor.catalog import factor_catalog
 
         cat = factor_catalog(with_data=False)
         expr = next(g for g in cat["categories"] if g["key"] == "表达式因子")
@@ -414,7 +414,7 @@ class TestFactorCatalog(unittest.TestCase):
         self.assertTrue(all(f["sub"] for f in expr["factors"]))
 
     def test_flat_names_for_dropdown(self):
-        from app.feature.catalog import flat_names
+        from app.modules.factor.catalog import flat_names
 
         names = flat_names()
         self.assertGreater(len(names), 30)
@@ -425,7 +425,7 @@ class TestCollectionSchedule(unittest.TestCase):
     """采集时间窗口：默认盘前 30 分钟 / 闭市后 30 分钟，且可配置。"""
 
     def _sch(self, **kw):
-        from app.engine.collect.schedule import CollectionSchedule
+        from app.modules.collection.schedule import CollectionSchedule
 
         return CollectionSchedule(**kw)
 
@@ -477,7 +477,7 @@ class TestCollectionSchedule(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from app.engine.collect.schedule import load_schedule, save_schedule
+        from app.modules.collection.schedule import load_schedule, save_schedule
 
         f = Path(tempfile.mkdtemp()) / "collector.json"
         f.write_text('{"enabled": true, "interval": "5m"}', encoding="utf-8")
@@ -497,7 +497,7 @@ class TestStrategyCombination(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from app.strategy.store import StrategyStore
+        from app.modules.strategy.store import StrategyStore
 
         return StrategyStore(path=str(Path(tempfile.mkdtemp()) / "s.json"))
 

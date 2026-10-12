@@ -24,16 +24,16 @@ from unittest import mock
 
 import pandas as pd
 
-from app.alpha.pool import sync as S
-from app.datasource.service import facade as MX
-from app.datasource.compat.registry import (
+from app.modules.universe.pool import sync as S
+from app.providers.market.service import facade as MX
+from app.providers.market.compat.registry import (
     REGISTRY,
     DataUnavailable,
     SourceError,
     SourceRegistry,
     is_transient,
 )
-from app.storage.repo import kline_repo as R
+from app.data.repo import kline_repo as R
 
 
 class ProxyError(Exception):  # noqa: N818 - 名字与 requests 的 ProxyError 对齐
@@ -154,7 +154,7 @@ class TestExhaustedWarning(unittest.TestCase):
                           fetch=lambda symbol=None: (_ for _ in ()).throw(
                               SourceError("雪球返回非 JSON")))
 
-        with mock.patch("app.datasource.compat.registry.log_throttled") as m_log:
+        with mock.patch("app.providers.market.compat.registry.log_throttled") as m_log:
             with self.assertRaises(SourceError) as ctx:
                 self.reg.fetch("k")
 
@@ -184,7 +184,7 @@ def _patch_source(name: str, **kw):
     Provider 注册时存的是**绑定方法的引用**，之后改模块里的同名属性，
     路由里那个还是旧函数。
     """
-    from app.datasource.provider import PROVIDERS
+    from app.providers.market.provider import PROVIDERS
 
     route = PROVIDERS.route(name)
     assert route is not None, f"没有注册路由 {name}"
@@ -199,19 +199,19 @@ class TestHotRankMultiSource(unittest.TestCase):
         # 熔断/健康分是**全局状态**：上一个用例把源打进冷却，
         # 下一个用例就会跳过它落到别的源上，于是"降级顺序"的断言随机失败。
         # 每个用例前重置，保证断言的是降级逻辑本身而不是历史状态。
-        from app.datasource.provider import PROVIDERS
+        from app.providers.market.provider import PROVIDERS
 
         REGISTRY.reset()
         PROVIDERS.reset()
         # 域名健康度也是全局的（net 模块级字典），而且更隐蔽：
         # 上一个用例把 push2 打挂两次，本用例里所有依赖它的源会被**直接跳过**，
         # 于是"应该降级到某源"的断言变成"全被跳过"。必须一起清。
-        from app.datasource.transport import net
+        from app.providers.market.transport import net
 
         net.reset()
 
     def test_hot_rank_has_multiple_sources(self):
-        from app.datasource.provider import PROVIDERS
+        from app.providers.market.provider import PROVIDERS
 
         names = [r.name for r in PROVIDERS.ranking("hot_rank")]
         self.assertGreaterEqual(len(names), 2,
@@ -273,7 +273,7 @@ class TestHotRankMultiSource(unittest.TestCase):
              _patch_source("local_hot", return_value=fallback):
             df = MX.fetch_hot_rank()
         self.assertEqual(len(df), 1)
-        from app.datasource.compat.registry import REGISTRY
+        from app.providers.market.compat.registry import REGISTRY
 
         used = [e for e in REGISTRY.recent_events(5)
                 if e.get("kind") == "hot_rank" and e.get("ok")]
@@ -290,8 +290,8 @@ class TestNoRecollect(unittest.TestCase):
         self._cleanup()
 
     def _cleanup(self):
-        from app.storage.engine import SessionLocal
-        from app.storage.schema import ChipDistribution, FundFlow, StockHotRank
+        from app.data.engine import SessionLocal
+        from app.data.schema import ChipDistribution, FundFlow, StockHotRank
 
         syms = ["600901", "600902"]
         with SessionLocal() as s:

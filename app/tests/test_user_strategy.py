@@ -7,8 +7,8 @@ import json
 import unittest
 from pathlib import Path
 
-from app.research.defaults import BacktestDefaults
-from app.strategy.discovery import snake, strategy_key
+from app.modules.backtest.defaults import BacktestDefaults
+from app.modules.strategy.discovery import snake, strategy_key
 from app.tests.helpers import TempWorkspaceMixin
 
 BT_SAMPLE = '''
@@ -26,7 +26,7 @@ class UnnamedStrategy(bt.Strategy):
 '''
 
 ENGINE_SAMPLE = '''
-from app.strategy.base import IBaseStrategy
+from app.modules.strategy.base import IBaseStrategy
 
 class MyLiveStrategy(IBaseStrategy):
     STRATEGY_NAME = "my_live"
@@ -73,7 +73,7 @@ class TestDiscovery(TempWorkspaceMixin, unittest.TestCase):
         # 发现流程会往**全局注册表**里塞东西。测试用完必须摘干净，
         # 否则后面的用例（比如"跑一遍所有内置策略"）会莫名其妙多跑几个
         # 只存在于临时文件里的策略。临时文件早被删了，类对象却还在内存里。
-        from app.research import registry as bt_reg
+        from app.modules.backtest import registry as bt_reg
 
         for name in self._added:
             bt_reg._REGISTRY.pop(name, None)
@@ -87,7 +87,7 @@ class TestDiscovery(TempWorkspaceMixin, unittest.TestCase):
         return p
 
     def _load(self, *extra_dirs):
-        from app.research.registry import load_user_strategies
+        from app.modules.backtest.registry import load_user_strategies
 
         dirs = [str(self.dir), *[str(d) for d in extra_dirs]]
         found = load_user_strategies(dirs, force=True)
@@ -102,7 +102,7 @@ class TestDiscovery(TempWorkspaceMixin, unittest.TestCase):
         self.assertIn("unnamed", found)
 
     def test_discovers_engine_strategy(self):
-        from app.strategy.registry import load_user_strategies as live_load
+        from app.modules.strategy.registry import load_user_strategies as live_load
 
         self._write("live.py", ENGINE_SAMPLE)
         found = live_load([str(self.dir)], force=True, register=False)
@@ -122,7 +122,7 @@ class TestDiscovery(TempWorkspaceMixin, unittest.TestCase):
 
         所以这里断言的不是"互不串台"，而是"自研串两边、legacy 只串一边"。
         """
-        from app.strategy.registry import load_user_strategies as live_load
+        from app.modules.strategy.registry import load_user_strategies as live_load
 
         self._write("both.py", BT_SAMPLE + ENGINE_SAMPLE)
         bt_found = self._load()
@@ -145,7 +145,7 @@ class TestDiscovery(TempWorkspaceMixin, unittest.TestCase):
         self.assertIn("my_alpha", found)
 
     def test_missing_dir_is_fine(self):
-        from app.research.registry import load_user_strategies
+        from app.modules.backtest.registry import load_user_strategies
 
         found = load_user_strategies([str(self.dir / "nope")], force=True)
         self.assertEqual(found, {})
@@ -168,7 +168,7 @@ class TestDiscovery(TempWorkspaceMixin, unittest.TestCase):
         于是"先加载用户策略"会让 `_REGISTRY` 提前非空 → 内置策略永远补不上，
         用户执行 `main.py strategies` 会发现框架自带的策略全没了。
         """
-        from app.research import registry as R
+        from app.modules.backtest import registry as R
 
         saved = dict(R._REGISTRY)
         saved_dirs = set(R._LOADED_DIRS)
@@ -268,39 +268,39 @@ class TestBacktestNormalize(TempWorkspaceMixin, unittest.TestCase):
 
 class TestDeclarativeSpec(unittest.TestCase):
     def test_json_string_spec(self):
-        from app.research.strategies.spec_strategy import _as_spec
+        from app.modules.backtest.strategies.spec_strategy import _as_spec
 
         spec = _as_spec('{"entry": {"always": true}}')
         self.assertEqual(spec, {"entry": {"always": True}})
 
     def test_dict_spec_passthrough(self):
-        from app.research.strategies.spec_strategy import _as_spec
+        from app.modules.backtest.strategies.spec_strategy import _as_spec
 
         raw = {"exit": {"never": True}}
         self.assertEqual(_as_spec(raw), raw)
 
     def test_empty_returns_none(self):
-        from app.research.strategies.spec_strategy import _as_spec
+        from app.modules.backtest.strategies.spec_strategy import _as_spec
 
         self.assertIsNone(_as_spec(None))
         self.assertIsNone(_as_spec(""))
 
     def test_bad_spec_raises_with_context(self):
-        from app.research.strategies.spec_strategy import _as_spec
+        from app.modules.backtest.strategies.spec_strategy import _as_spec
 
         with self.assertRaises(ValueError):
             _as_spec("{not json and not a path/that/exists}")
 
     def test_default_spec_is_buildable(self):
         """默认规则必须真能构造出来，否则"不传规则就跑"会当场炸。"""
-        from app.strategy.rule.spec import build_rule
-        from app.research.strategies.spec_strategy import DEFAULT_SPEC
+        from app.modules.strategy.rule.spec import build_rule
+        from app.modules.backtest.strategies.spec_strategy import DEFAULT_SPEC
 
         build_rule(DEFAULT_SPEC["entry"])
         build_rule(DEFAULT_SPEC["exit"])
 
     def test_declarative_registered(self):
-        from app.research.registry import get_strategy, list_strategies
+        from app.modules.backtest.registry import get_strategy, list_strategies
 
         self.assertIn("declarative", list_strategies())
         self.assertEqual(get_strategy("declarative").STRATEGY_NAME, "declarative")
@@ -319,14 +319,14 @@ class TestUserStrategyStore(TempWorkspaceMixin, unittest.TestCase):
     """
 
     def _store(self) -> "StrategyStore":
-        from app.strategy.store import StrategyStore
+        from app.modules.strategy.store import StrategyStore
 
         s = StrategyStore(str(self.workdir() / "config" / "strategies.json"))
         s.load(force=True)
         return s
 
     def test_multi_factor_weights_roundtrip(self):
-        from app.strategy.store import KIND_MULTI
+        from app.modules.strategy.store import KIND_MULTI
 
         store = self._store()
         ok, msg, s = store.add(
@@ -365,7 +365,7 @@ class TestUserStrategyStore(TempWorkspaceMixin, unittest.TestCase):
 
     def test_multi_factor_empty_factors_ok(self):
         """不勾选任何因子 = 用因子库全部启用因子（等权）。"""
-        from app.strategy.store import KIND_MULTI
+        from app.modules.strategy.store import KIND_MULTI
 
         store = self._store()
         ok, _, s = store.add(
@@ -377,7 +377,7 @@ class TestUserStrategyStore(TempWorkspaceMixin, unittest.TestCase):
         self.assertEqual(ts["params"]["factors"], [])
 
     def test_score_and_rule_to_task(self):
-        from app.strategy.store import KIND_SCORE, KIND_RULE
+        from app.modules.strategy.store import KIND_SCORE, KIND_RULE
 
         store = self._store()
         ok, _, sc = store.add("sc", KIND_SCORE, {"entry_score": 72, "exit_score": 50})
@@ -391,7 +391,7 @@ class TestUserStrategyStore(TempWorkspaceMixin, unittest.TestCase):
         self.assertEqual(ru.to_task_strategy()["type"], "declarative")
 
     def test_exit_must_be_below_entry(self):
-        from app.strategy.store import KIND_MULTI
+        from app.modules.strategy.store import KIND_MULTI
 
         store = self._store()
         ok, msg, _ = store.add("bad", KIND_MULTI,

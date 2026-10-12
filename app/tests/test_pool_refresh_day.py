@@ -20,11 +20,11 @@ except Exception:
     pass
 
 from app.domain.calendar import TradeCalendar, get_calendar
-from app.alpha.pool import pool as P
-from app.alpha.pool.sync import MX as SYNC_MX  # sync 模块内 `from app.data import marketx as MX`
-from app.storage.engine import SessionLocal
-from app.storage.schema import StockScore, LimitUpPool, FundFlow, ChipDistribution
-from app.storage.repo import kline_repo as R
+from app.modules.universe.pool import pool as P
+from app.modules.universe.pool.sync import MX as SYNC_MX  # sync 模块内 `from app.data import marketx as MX`
+from app.data.engine import SessionLocal
+from app.data.schema import StockScore, LimitUpPool, FundFlow, ChipDistribution
+from app.data.repo import kline_repo as R
 
 
 def _fake_dt():
@@ -150,7 +150,7 @@ class TestRefreshOnClosedDay(unittest.TestCase):
             s.commit()
 
     def test_refresh_syncs_previous_trading_day(self):
-        from app.alpha.pool import StockPool
+        from app.modules.universe.pool import StockPool
 
         pool = StockPool()
         pool.config.sync_fundamental = False  # 跳过需要联网的基本面

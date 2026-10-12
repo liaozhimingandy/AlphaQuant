@@ -312,7 +312,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 
 ## 6. 事件总线
 
-- 定义：`app/engine/event.py:19-59` `StandardEvents`（纯字符串常量）
+- 定义：`app/runtime/event_bus.py:19-59` `StandardEvents`（纯字符串常量）
 - 实现：`EventBus`（`event.py:62-91`），`_receivers: Dict[str, List[Callable]]`
 - `publish()` **同步**遍历回调，**逐接收者 try/except 隔离**（`:82-83`）——
   一个订阅者抛错不影响其他订阅者，也不影响发布方
@@ -336,7 +336,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | `COMPONENT_ERROR` | `base.py:232/587` | `trading.py:733` → 落库 |
 | `TIMER_3MIN` | `scheduler.py:104` | 暂无订阅者 |
 
-除了进程内总线，还有一条**进程间总线**（`app/engine/bus/filebus.py` +
+除了进程内总线，还有一条**进程间总线**（`app/runtime/bus/filebus.py` +
 `bus/components.py`）用于多服务协作，靠 `origin.startswith("bus:")`
 判断防止互相转发死循环。
 

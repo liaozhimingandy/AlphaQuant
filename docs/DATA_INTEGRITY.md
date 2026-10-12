@@ -1,8 +1,8 @@
 # 数据校验服务：库里缺了什么，缺的那段要不要补
 
-> 配套代码：`app/engine/integrity.py`（校验器）、
-> `app/engine/component/dataguard.py`（引擎组件）、
-> `app/datasource/kline_sources.py`（补全走的数据源链路）。
+> 配套代码：`app/modules/collection/integrity.py`（校验器）、
+> `app/modules/collection/service.py`（CollectionService 的 guard 单元）、
+> `app/providers/market/compat/kline_sources.py`（补全走的数据源链路）。
 
 ---
 

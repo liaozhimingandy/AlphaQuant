@@ -11,8 +11,8 @@ import unittest
 from datetime import date
 
 from app.common.config import settings
-from app.storage.engine import Base, engine
-from app.storage.repo import kline_repo as R
+from app.data.engine import Base, engine
+from app.data.repo import kline_repo as R
 from app.tests.helpers import TempWorkspaceMixin
 
 #: 用一个不可能与真实数据冲突的日期
@@ -69,7 +69,7 @@ def _seed_themes() -> None:
 class RepoTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        import app.storage.schema  # noqa: F401
+        import app.data.schema  # noqa: F401
 
         Base.metadata.create_all(bind=engine)
         _seed_themes()
@@ -79,27 +79,27 @@ class RepoTestCase(unittest.TestCase):
 
 class TestBand(unittest.TestCase):
     def test_below_and_above(self):
-        from app.alpha.score import band
+        from app.modules.universe.score import band
 
         pts = [(0.0, 20.0), (0.10, 80.0)]
         self.assertEqual(band(-1.0, pts), 20.0)
         self.assertEqual(band(1.0, pts), 80.0)
 
     def test_linear_interpolation(self):
-        from app.alpha.score import band
+        from app.modules.universe.score import band
 
         pts = [(0.0, 0.0), (10.0, 100.0)]
         self.assertAlmostEqual(band(5.0, pts), 50.0)
         self.assertAlmostEqual(band(2.5, pts), 25.0)
 
     def test_none_returns_default(self):
-        from app.alpha.score import band
+        from app.modules.universe.score import band
 
         self.assertIsNone(band(None, [(0.0, 1.0), (1.0, 2.0)]))
         self.assertEqual(band(None, [(0.0, 1.0), (1.0, 2.0)], default=42.0), 42.0)
 
     def test_nan_is_none(self):
-        from app.alpha.score import band
+        from app.modules.universe.score import band
 
         self.assertIsNone(band(float("nan"), [(0.0, 1.0), (1.0, 2.0)]))
 
@@ -109,7 +109,7 @@ class TestDerivedMetrics(unittest.TestCase):
 
     def test_net_days(self):
         """从**最后一天往前**数。今天流出就是 0 天，不管之前流了多少天。"""
-        from app.feature.features import _net_days
+        from app.modules.factor.features import _net_days
 
         self.assertEqual(_net_days([{"main_net": 1}, {"main_net": 2}]), 2)
         self.assertEqual(_net_days([{"main_net": 1}, {"main_net": -1}]), 0)
@@ -118,27 +118,27 @@ class TestDerivedMetrics(unittest.TestCase):
         self.assertEqual(_net_days([{"main_net": None}]), 0)
 
     def test_accel(self):
-        from app.feature.features import _accel
+        from app.modules.factor.features import _accel
 
         flows = [{"main_net": v} for v in (1.0, 1.0, 1.0, 3.0, 3.0, 3.0)]
         self.assertAlmostEqual(_accel(flows, window=3), 3.0)
 
     def test_accel_invalid_when_base_negative(self):
         """前段是净流出时"加速度"没有意义，必须返回 None 而不是编一个数。"""
-        from app.feature.features import _accel
+        from app.modules.factor.features import _accel
 
         flows = [{"main_net": v} for v in (-1.0, -1.0, -1.0, 3.0, 3.0, 3.0)]
         self.assertIsNone(_accel(flows, window=3))
 
     def test_pulse_uses_absolute_baseline(self):
         """用绝对值做分母：否则历史均值接近 0 时比值会爆炸成假信号。"""
-        from app.feature.features import _pulse
+        from app.modules.factor.features import _pulse
 
         flows = [{"main_net": v} for v in (-2.0, -2.0, -2.0, 6.0)]
         self.assertAlmostEqual(_pulse(flows), 3.0)
 
     def test_insufficient_history_is_none(self):
-        from app.feature.features import _accel, _pulse
+        from app.modules.factor.features import _accel, _pulse
 
         self.assertIsNone(_accel([{"main_net": 1.0}]))
         self.assertIsNone(_pulse([]))
@@ -146,7 +146,7 @@ class TestDerivedMetrics(unittest.TestCase):
 
 class TestFeatureProvider(RepoTestCase):
     def test_fund_flow_loaded(self):
-        from app.feature.features import FeatureProvider
+        from app.modules.factor.features import FeatureProvider
 
         f = FeatureProvider(ttl=0).get("900001", D0)
         self.assertIsNotNone(f.main_net)
@@ -155,7 +155,7 @@ class TestFeatureProvider(RepoTestCase):
         self.assertTrue(f.available["capital"])
 
     def test_chip_and_theme_loaded(self):
-        from app.feature.features import FeatureProvider
+        from app.modules.factor.features import FeatureProvider
 
         f = FeatureProvider(ttl=0).get("900001", D0)
         self.assertAlmostEqual(f.profit_ratio, 0.55)
@@ -165,7 +165,7 @@ class TestFeatureProvider(RepoTestCase):
         self.assertEqual(f.continuous, 2)
 
     def test_missing_symbol_is_all_unavailable(self):
-        from app.feature.features import FeatureProvider
+        from app.modules.factor.features import FeatureProvider
 
         f = FeatureProvider(ttl=0).get("999999", D0)
         self.assertFalse(f.available.get("capital", False))
@@ -174,8 +174,8 @@ class TestFeatureProvider(RepoTestCase):
 
 class TestScoreEngine(RepoTestCase):
     def _engine(self):
-        from app.feature.features import FeatureProvider
-        from app.alpha.score import ScoreConfig, ScoreEngine
+        from app.modules.factor.features import FeatureProvider
+        from app.modules.universe.score import ScoreConfig, ScoreEngine
 
         return ScoreEngine(config=ScoreConfig.load(),
                            provider=FeatureProvider(ttl=0))
@@ -204,8 +204,8 @@ class TestScoreEngine(RepoTestCase):
 
         只有资金流一个维度就给 90 分，是最容易骗到人的假信号。
         """
-        from app.feature.features import FeatureProvider, StockFeatures
-        from app.alpha.score import ScoreConfig, ScoreEngine
+        from app.modules.factor.features import FeatureProvider, StockFeatures
+        from app.modules.universe.score import ScoreConfig, ScoreEngine
 
         cfg = ScoreConfig.load()
         cfg.min_dims = 2
@@ -221,8 +221,8 @@ class TestScoreEngine(RepoTestCase):
 
     def test_risk_penalty_applied(self):
         """获利盘极高要扣分 —— 人人浮盈意味着随时可能兑现。"""
-        from app.feature.features import FeatureProvider, StockFeatures
-        from app.alpha.score import ScoreConfig, ScoreEngine
+        from app.modules.factor.features import FeatureProvider, StockFeatures
+        from app.modules.universe.score import ScoreConfig, ScoreEngine
 
         eng = ScoreEngine(config=ScoreConfig.load(), provider=FeatureProvider(ttl=0))
         base = StockFeatures(symbol="X")
@@ -249,19 +249,19 @@ class TestScoreEngine(RepoTestCase):
 
 class TestScoreStrategy(unittest.TestCase):
     def _strategy(self, **kw):
-        from app.strategy import create_strategy
+        from app.modules.strategy import create_strategy
 
         return create_strategy("score", **kw)
 
     def _ctx(self, score):
-        from app.feature.context import FactorContext
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
 
         return FactorContext("000001", BarSeries("000001"),
                              features={"composite_score": score})
 
     def _state(self, has_position=False):
-        from app.strategy.state import DecisionState
+        from app.modules.strategy.state import DecisionState
 
         return DecisionState(task_id="t", symbol="000001", has_position=has_position)
 
@@ -288,7 +288,7 @@ class TestScoreStrategy(unittest.TestCase):
 
     def test_missing_score_does_nothing(self):
         """拿不到评分时不动手。凭空假设一个分数去交易，比不交易危险得多。"""
-        from app.feature.context import FactorContext
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
 
         s = self._strategy()
@@ -298,7 +298,7 @@ class TestScoreStrategy(unittest.TestCase):
 
     def test_rejects_inverted_thresholds(self):
         """出口高于入口会造成"刚买就卖"的抖动，必须在构造时拒绝。"""
-        from app.strategy.score_strategy import ScoreStrategy
+        from app.modules.strategy.score_strategy import ScoreStrategy
 
         with self.assertRaises(ValueError):
             ScoreStrategy(entry_score=50, exit_score=80)
@@ -308,8 +308,8 @@ class TestSyncDegradation(unittest.TestCase):
     """同步失败必须**说清楚且不中断整批**。"""
 
     def test_single_failure_does_not_crash(self):
-        import app.alpha.pool.sync as S
-        from app.datasource.service import facade as MX
+        import app.modules.universe.pool.sync as S
+        from app.providers.market.service import facade as MX
         original = MX.fetch_fund_flow
 
         def boom(symbol, days=None):
@@ -325,8 +325,8 @@ class TestSyncDegradation(unittest.TestCase):
         self.assertIn("模拟失败", r["failed"][0][1])
 
     def test_partial_failure_reports_each(self):
-        import app.alpha.pool.sync as S
-        from app.datasource.service import facade as MX
+        import app.modules.universe.pool.sync as S
+        from app.providers.market.service import facade as MX
         original = MX.fetch_chip
         calls = []
 
@@ -351,9 +351,9 @@ class TestSyncDegradation(unittest.TestCase):
 class TestStockPool(RepoTestCase):
     def test_refresh_with_explicit_symbols(self):
         """直接指定标的（不走候选池）—— 离线也能验证整条链路。"""
-        from app.alpha.pool import StockPool
-        from app.feature.features import FeatureProvider
-        from app.alpha.score import ScoreConfig, ScoreEngine
+        from app.modules.universe.pool import StockPool
+        from app.modules.factor.features import FeatureProvider
+        from app.modules.universe.score import ScoreConfig, ScoreEngine
 
         pool = StockPool(provider=FeatureProvider(ttl=0),
                          engine=ScoreEngine(config=ScoreConfig.load(),
@@ -364,7 +364,7 @@ class TestStockPool(RepoTestCase):
         self.assertEqual(rep["results"][0]["symbol"], "900001")
 
     def test_saved_scores_readable(self):
-        from app.alpha.pool import StockPool
+        from app.modules.universe.pool import StockPool
 
         rows = StockPool.top(day=D0, limit=10)
         syms = {r["symbol"] for r in rows}
@@ -377,7 +377,7 @@ class TestStockPool(RepoTestCase):
         以前只给了前者，结果 `pool top` 和面板表格里总分全是 0/空 ——
         明细里有分、列表里没分，最难查的那种 bug。
         """
-        from app.alpha.pool import StockPool
+        from app.modules.universe.pool import StockPool
 
         rows = StockPool.top(day=D0, limit=10)
         row = next(r for r in rows if r["symbol"] == "900001")
@@ -386,14 +386,14 @@ class TestStockPool(RepoTestCase):
         self.assertEqual(row["total"], row["total_score"])
 
     def test_unknown_source_reports_error(self):
-        from app.alpha.pool import StockPool
+        from app.modules.universe.pool import StockPool
 
         rep = StockPool().refresh(source="no_such_source", do_sync=False)
         self.assertIn("error", rep)
 
     def test_empty_candidates_reports_error(self):
         """候选池拉失败时**不能**静默退化成全市场 —— 那会把几十秒变成几十分钟。"""
-        from app.alpha.pool import StockPool
+        from app.modules.universe.pool import StockPool
 
         syms, info = StockPool().candidates("limitup", date(1899, 1, 1))
         self.assertEqual(syms, [])
@@ -403,13 +403,13 @@ class TestFlowFactors(unittest.TestCase):
     """因子在数据缺失时必须返回 None（而不是 0）。"""
 
     def _ctx(self, features):
-        from app.feature.context import FactorContext
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
 
         return FactorContext("000001", BarSeries("000001"), features=features)
 
     def test_missing_feature_is_none(self):
-        from app.feature import create_factor
+        from app.modules.factor import create_factor
 
         for name in ("main_net_pct", "capital_accel", "capital_pulse",
                      "net_inflow_days", "chip_profit_ratio",
@@ -418,14 +418,14 @@ class TestFlowFactors(unittest.TestCase):
             self.assertIsNone(f.compute(self._ctx({})), name)
 
     def test_present_feature_returned(self):
-        from app.feature import create_factor
+        from app.modules.factor import create_factor
 
         f = create_factor("main_net_pct")
         self.assertAlmostEqual(f.compute(self._ctx({"main_net_pct": 0.12})), 0.12)
 
     def test_limitup_effect_combines_fields(self):
         """涨停效应不是原始字段，而是连板+封板-炸板的合成质量分。"""
-        from app.feature import create_factor
+        from app.modules.factor import create_factor
 
         f = create_factor("limitup_effect")
         v = f.compute(self._ctx({"is_limitup": True, "limitup_continuous": 2,
@@ -434,7 +434,7 @@ class TestFlowFactors(unittest.TestCase):
         self.assertGreater(v, 3.0)   # 1 + 2连板 + 封板加成
 
     def test_limitup_effect_none_when_not_limitup(self):
-        from app.feature import create_factor
+        from app.modules.factor import create_factor
 
         f = create_factor("limitup_effect")
         self.assertIsNone(f.compute(self._ctx({"is_limitup": False})))
@@ -444,7 +444,7 @@ class TestFundamentalScore(unittest.TestCase):
     """基本面综合分：估值 30% + 成长 40% + 质量 30%，缺项重新加权。"""
 
     def test_quality_beats_junk(self):
-        from app.feature.features import fundamental_score
+        from app.modules.factor.features import fundamental_score
 
         good = fundamental_score({
             "pe": 12, "pb": 2.0, "roe": 22, "gross_margin": 45,
@@ -460,7 +460,7 @@ class TestFundamentalScore(unittest.TestCase):
 
     def test_missing_items_reweighted(self):
         """只有估值和 ROE 也能给分（按可用项重新加权），不会被判死。"""
-        from app.feature.features import fundamental_score
+        from app.modules.factor.features import fundamental_score
 
         v = fundamental_score({"pe": 25, "roe": 18})
         self.assertIsNotNone(v)
@@ -468,12 +468,12 @@ class TestFundamentalScore(unittest.TestCase):
 
     def test_empty_is_none(self):
         """没数据返回 None，不是 0 —— 0 会被当成"基本面极差"。"""
-        from app.feature.features import fundamental_score
+        from app.modules.factor.features import fundamental_score
 
         self.assertIsNone(fundamental_score({}))
 
     def test_high_debt_penalised(self):
-        from app.feature.features import fundamental_score
+        from app.modules.factor.features import fundamental_score
 
         low = fundamental_score({"roe": 20, "gross_margin": 40, "debt_ratio": 30})
         high = fundamental_score({"roe": 20, "gross_margin": 40, "debt_ratio": 90})
@@ -481,9 +481,9 @@ class TestFundamentalScore(unittest.TestCase):
 
     def test_factor_and_feature_share_one_implementation(self):
         """因子与特征注入必须算出同一个数 —— 两份实现迟早会漂移。"""
-        from app.feature.features import fundamental_score
-        from app.feature import create_factor
-        from app.feature.context import FactorContext
+        from app.modules.factor.features import fundamental_score
+        from app.modules.factor import create_factor
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
 
         fields = {"pe": 15, "pb": 3, "roe": 16, "revenue_yoy": 20,
@@ -495,13 +495,13 @@ class TestFundamentalScore(unittest.TestCase):
 
 class TestFundamentalFactors(unittest.TestCase):
     def _ctx(self, features):
-        from app.feature.context import FactorContext
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
 
         return FactorContext("000001", BarSeries("000001"), features=features)
 
     def test_raw_factors(self):
-        from app.feature import create_factor
+        from app.modules.factor import create_factor
 
         data = {"pe": 18.0, "pb": 2.5, "roe": 15.0, "revenue_yoy": 12.0,
                 "profit_yoy": 20.0, "debt_ratio": 45.0, "dividend_yield": 2.0,
@@ -514,7 +514,7 @@ class TestFundamentalFactors(unittest.TestCase):
             self.assertAlmostEqual(got, expect, msg=name)
 
     def test_missing_is_none(self):
-        from app.feature import create_factor
+        from app.modules.factor import create_factor
 
         for name in ("pe", "pb", "roe", "revenue_yoy", "profit_yoy",
                      "debt_ratio", "dividend_yield", "market_cap"):
@@ -530,19 +530,19 @@ class TestMultiDimRisk(unittest.TestCase):
         return Signal(symbol="000001", side=side, source=SignalSource.BAR)
 
     def _state(self):
-        from app.strategy.state import DecisionState
+        from app.modules.strategy.state import DecisionState
 
         return DecisionState()
 
     def _ctx(self, features):
-        from app.feature.context import FactorContext
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
 
         return FactorContext("000001", BarSeries("000001"), features=features)
 
     def test_min_score_blocks_low(self):
         from app.domain.types import Side
-        from app.risk.builtin import MinScoreRisk
+        from app.modules.risk.builtin import MinScoreRisk
 
         r = MinScoreRisk(min_score=60.0)
         v = r.check(self._signal(Side.BUY), self._state(),
@@ -551,7 +551,7 @@ class TestMultiDimRisk(unittest.TestCase):
 
     def test_min_score_passes_high(self):
         from app.domain.types import Side
-        from app.risk.builtin import MinScoreRisk
+        from app.modules.risk.builtin import MinScoreRisk
 
         r = MinScoreRisk(min_score=60.0)
         v = r.check(self._signal(Side.BUY), self._state(),
@@ -561,7 +561,7 @@ class TestMultiDimRisk(unittest.TestCase):
     def test_min_score_never_blocks_sell(self):
         """卖出不能被评分挡住 —— 评分掉下来正是该卖的理由。"""
         from app.domain.types import Side
-        from app.risk.builtin import MinScoreRisk
+        from app.modules.risk.builtin import MinScoreRisk
 
         r = MinScoreRisk(min_score=90.0)
         v = r.check(self._signal(Side.SELL), self._state(),
@@ -571,7 +571,7 @@ class TestMultiDimRisk(unittest.TestCase):
     def test_min_score_unknown_passes_with_reason(self):
         """没数据时默认放行但要说明 —— 一律拒绝会让策略莫名其妙一整天不下单。"""
         from app.domain.types import Side
-        from app.risk.builtin import MinScoreRisk
+        from app.modules.risk.builtin import MinScoreRisk
 
         r = MinScoreRisk(min_score=60.0)
         v = r.check(self._signal(Side.BUY), self._state(), ctx=self._ctx({}))
@@ -580,7 +580,7 @@ class TestMultiDimRisk(unittest.TestCase):
 
     def test_fundamental_rejects_loss_making(self):
         from app.domain.types import Side
-        from app.risk.builtin import FundamentalRisk
+        from app.modules.risk.builtin import FundamentalRisk
 
         r = FundamentalRisk(reject_loss=True)
         v = r.check(self._signal(Side.BUY), self._state(),
@@ -589,7 +589,7 @@ class TestMultiDimRisk(unittest.TestCase):
 
     def test_fundamental_debt_limit(self):
         from app.domain.types import Side
-        from app.risk.builtin import FundamentalRisk
+        from app.modules.risk.builtin import FundamentalRisk
 
         r = FundamentalRisk(max_debt_ratio=70.0)
         v = r.check(self._signal(Side.BUY), self._state(),
@@ -598,7 +598,7 @@ class TestMultiDimRisk(unittest.TestCase):
 
     def test_fundamental_passes_clean(self):
         from app.domain.types import Side
-        from app.risk.builtin import FundamentalRisk
+        from app.modules.risk.builtin import FundamentalRisk
 
         r = FundamentalRisk(reject_loss=True, max_debt_ratio=70.0,
                             min_fundamental_score=50.0)

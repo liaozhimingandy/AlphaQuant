@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.engine.bus.components import BusPublisherComponent, BusSubscriberComponent
+from app.runtime.bus.components import BusPublisherComponent, BusSubscriberComponent
 from app.common.config import settings
 from app.engine.hub.spec import ServiceSpec, load_hub_spec
 from app.common.jsonio import json_safe, read_json, write_json_atomic

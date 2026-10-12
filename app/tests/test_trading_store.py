@@ -18,7 +18,7 @@ from datetime import datetime
 
 from app.domain.types import Order, OrderStatus, Side
 from app.monitoring.snapshot import content_fingerprint
-from app.storage.repo.trade_repo import (
+from app.data.repo.trade_repo import (
     TradingRepository,
     _dedup_batch,
     get_repository,
@@ -93,14 +93,14 @@ class TestRepositoryWrites(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from app.storage.engine import Base, engine
-        import app.storage.schema  # noqa: F401
+        from app.data.engine import Base, engine
+        import app.data.schema  # noqa: F401
 
         Base.metadata.create_all(bind=engine)
 
     def setUp(self):
-        from app.storage.engine import SessionLocal
-        from app.storage.schema import (
+        from app.data.engine import SessionLocal
+        from app.data.schema import (
             EquityPoint, OrderRecord, RunRecord, TaskRecord, TradeRecordTable,
         )
 
@@ -329,7 +329,7 @@ class TestSnapshotMode(unittest.TestCase):
         那正是这次要消除的行为。
         """
         from app.monitoring.server import MonitorWebComponent
-        from app.engine.event import StandardEvents
+        from app.runtime.event_bus import StandardEvents
 
         trig = set(MonitorWebComponent.TRIGGER_EVENTS)
         for ev in (StandardEvents.ORDER_CREATED, StandardEvents.ORDER_FILLED,

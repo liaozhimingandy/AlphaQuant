@@ -14,9 +14,9 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from app.engine.base import BaseQuantEngine
-from app.engine.event import EventBus
-from app.engine.settings import EngineContext, EngineStatus, RunMode
+from app.engine.engine import BaseQuantEngine
+from app.runtime.event_bus import EventBus
+from app.engine.context import EngineContext, EngineStatus, RunMode
 from app.domain.types import Bar, Order, OrderStatus, Side
 from app.monitoring.snapshot import SnapshotStore
 from app.monitoring.server import MonitorWebComponent
@@ -47,7 +47,8 @@ def gen_bars(symbol: str, n: int = 40) -> list[Bar]:
 def make_engine(tasks=None) -> BaseQuantEngine:
     """搭一台"能跑但不起 reactor"的引擎，用于验证控制面与监控面。"""
     from app.engine import component
-    from app.engine.component import SchedulerComponent, StrategyComponent
+    from app.runtime.scheduler import SchedulerComponent
+    from app.modules.strategy.component import StrategyComponent
 
     engine = BaseQuantEngine.create({"RUN_MODE": "BACKTEST"})
     engine.register_component(SchedulerComponent())

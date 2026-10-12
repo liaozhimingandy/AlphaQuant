@@ -22,7 +22,7 @@ class StrategyViewsMixin:
         表达式因子）。之前只返回了 factors，导致规则策略的因子下拉只剩
         "（不选）"一个选项 —— 这里同时把 groups 给上。
         """
-        from app.strategy.store import KINDS, get_store
+        from app.modules.strategy.store import KINDS, get_store
 
         store = get_store()
         out: Dict[str, Any] = {
@@ -31,10 +31,10 @@ class StrategyViewsMixin:
             "path": str(store.path),
         }
         try:
-            from app.feature.catalog import CATEGORY_DOCS, factor_catalog
-            from app.feature import list_factors
-            from app.risk import list_risks
-            from app.strategy import list_strategies
+            from app.modules.factor.catalog import CATEGORY_DOCS, factor_catalog
+            from app.modules.factor import list_factors
+            from app.modules.risk import list_risks
+            from app.modules.strategy import list_strategies
 
             out["factors"] = list_factors()
             out["groups"] = factor_catalog()["categories"]
@@ -47,7 +47,7 @@ class StrategyViewsMixin:
 
     def strategy_save(self, body: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            from app.strategy.store import get_store
+            from app.modules.strategy.store import get_store
 
             ok, msg, s = get_store().add(
                 name=str(body.get("name") or ""),
@@ -67,7 +67,7 @@ class StrategyViewsMixin:
 
     def strategy_remove(self, name: str) -> Dict[str, Any]:
         try:
-            from app.strategy.store import get_store
+            from app.modules.strategy.store import get_store
 
             ok, msg = get_store().remove(name)
             return {"ok": ok, "message": msg}
@@ -82,7 +82,7 @@ class StrategyViewsMixin:
           2. 默认带一条 max_drawdown 风控兜底 —— 用户可能忘记配。
         """
         try:
-            from app.strategy.store import get_store
+            from app.modules.strategy.store import get_store
 
             name = str(body.get("name") or "")
             s = get_store().get(name)
@@ -127,13 +127,13 @@ class StrategyViewsMixin:
         """
         out: Dict[str, Any] = {"ok": True}
         try:
-            from app.research.registry import load_user_strategies as bt_load
+            from app.modules.backtest.registry import load_user_strategies as bt_load
 
             out["backtest"] = sorted(bt_load(force=True))
         except Exception as exc:
             out["backtest_error"] = str(exc)
         try:
-            from app.strategy.registry import load_user_strategies as live_load
+            from app.modules.strategy.registry import load_user_strategies as live_load
 
             out["engine"] = sorted(live_load(force=True))
         except Exception as exc:

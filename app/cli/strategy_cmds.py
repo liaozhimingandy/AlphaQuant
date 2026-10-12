@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """策略面命令：列出策略 / 生成模板 / 跑回测。
 
-回测与实盘走同一套自研 IBaseStrategy（见 app.research.adapter 的桥接），
+回测与实盘走同一套自研 IBaseStrategy（见 app.modules.backtest.adapter 的桥接），
 所以这里只有一份策略清单，不再有「回测策略」和「实盘策略」两套。
 """
 from __future__ import annotations
@@ -20,13 +20,13 @@ from app.common.logging import logger
 @click.option("--reload", "do_reload", is_flag=True, help="重新扫描用户策略目录（改完策略代码不用重启）")
 @click.option("--dir", "strategy_dir", default=None, help="临时指定用户策略目录")
 def strategies_cmd(do_reload, strategy_dir) -> None:
-    from app.research.registry import (
+    from app.modules.backtest.registry import (
         list_strategies as bt_list,
         load_user_strategies as bt_load,
         user_strategy_dir,
     )
-    from app.strategy import list_strategies as live_list
-    from app.strategy.registry import load_user_strategies as live_load
+    from app.modules.strategy import list_strategies as live_list
+    from app.modules.strategy.registry import load_user_strategies as live_load
 
     dirs = [strategy_dir] if strategy_dir else None
     user_bt = bt_load(dirs, force=True) if (do_reload or strategy_dir) else {}
@@ -49,7 +49,7 @@ def strategy_group() -> None:
 
 @strategy_group.command(name="dir", help="打印用户策略目录")
 def strategy_dir_cmd() -> None:
-    from app.research.registry import user_strategy_dir
+    from app.modules.backtest.registry import user_strategy_dir
 
     click.echo(user_strategy_dir())
 
@@ -59,7 +59,7 @@ def strategy_dir_cmd() -> None:
               default="both", show_default=True, help="模板类型")
 @click.option("--force", is_flag=True, help="已存在时覆盖")
 def strategy_new_cmd(name, kind, force) -> None:
-    from app.research.registry import user_strategy_dir
+    from app.modules.backtest.registry import user_strategy_dir
 
     target_dir = Path(user_strategy_dir())
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ def strategy_new_cmd(name, kind, force) -> None:
     click.echo("     python main.py ctl strategies           # 运行中的服务")
 
 def _snake_case(name: str) -> str:
-    from app.strategy.discovery import snake
+    from app.modules.strategy.discovery import snake
 
     return snake(name)
 
@@ -159,9 +159,9 @@ class {cls}LiveStrategy(IBaseStrategy):
         "而不是回测用 5/20、实盘手滑写成 5/30。\n"
         '"""\n\n'
         "from __future__ import annotations\n\n"
-        "from app.feature.context import FactorContext  # noqa: F401\n"
+        "from app.modules.factor.context import FactorContext  # noqa: F401\n"
         "from app.domain.types import Side, Signal, SignalSource\n"
-        "from app.strategy.base import IBaseStrategy\n"
+        "from app.modules.strategy.base import IBaseStrategy\n"
     )
     parts = []
     if kind in ("backtest", "both"):
@@ -197,9 +197,9 @@ def backtest_cmd(
     symbol, start, end, strategy, cash, commission, slippage, adjust,
     data_source, param, show_defaults, print_log, plot, do_export, output_dir,
 ) -> None:
-    from app.research import BacktestConfig, run_backtest
-    from app.research.defaults import BacktestDefaults
-    from app.research.report import print_report
+    from app.modules.backtest import BacktestConfig, run_backtest
+    from app.modules.backtest.defaults import BacktestDefaults
+    from app.modules.backtest.report import print_report
 
     # 没填的字段回落到 config/backtest.json —— 三处入口（CLI/面板/作业 API）共用一份默认值
     d = BacktestDefaults.load()
@@ -242,7 +242,7 @@ def backtest_cmd(
 
     print_report(result)
     if do_export or config.export:
-        from app.research.report import export_report
+        from app.modules.backtest.report import export_report
 
         files = export_report(result, output_dir)
         for k, v in files.items():

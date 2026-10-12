@@ -103,7 +103,7 @@ class TestValuationAdaptation(unittest.TestCase):
     """估值：akshare 移除了乐咕接口，必须能自动换百度。"""
 
     def test_falls_back_to_baidu_when_legacy_api_missing(self):
-        import app.datasource.service.facade as MX
+        import app.providers.market.service.facade as MX
 
         calls: list = []
 
@@ -131,7 +131,7 @@ class TestValuationAdaptation(unittest.TestCase):
         self.assertNotIn(MX._LEGACY_VALUATION_API, [c[0] for c in calls])
 
     def test_uses_legacy_api_when_available(self):
-        import app.datasource.service.facade as MX
+        import app.providers.market.service.facade as MX
 
         legacy = pd.DataFrame({
             "trade_date": [date(2026, 10, 11)],
@@ -156,7 +156,7 @@ class TestValuationAdaptation(unittest.TestCase):
 
     def test_partial_baidu_failure_still_returns(self):
         """单个指标拿不到不该让整个估值维度全空。"""
-        import app.datasource.service.facade as MX
+        import app.providers.market.service.facade as MX
 
         def fake_call(name, *args, **kwargs):
             if kwargs.get("indicator") == "市净率":
@@ -175,7 +175,7 @@ class TestLimitupPoolFallback(unittest.TestCase):
 
     def test_falls_back_to_previous_trading_day(self):
         """今天早盘还没有当日数据 → 自动取上一个交易日的。"""
-        import app.datasource.service.facade as MX
+        import app.providers.market.service.facade as MX
 
         tried: list = []
 
@@ -211,8 +211,8 @@ class TestLimitupPoolFallback(unittest.TestCase):
 
     def test_all_days_empty_raises_data_unavailable(self):
         """连续 3 个交易日都没有 → 才算真的没数据（调用方按"暂无"跳过）。"""
-        import app.datasource.service.facade as MX
-        from app.datasource.compat.registry import DataUnavailable
+        import app.providers.market.service.facade as MX
+        from app.providers.market.compat.registry import DataUnavailable
 
         def fake_call(name, *args, **kwargs):
             raise MX.MarketXError("stock_zt_pool_em 返回空数据（非交易日？接口变更？）")
@@ -226,7 +226,7 @@ class TestParseErrorNotNetwork(unittest.TestCase):
     """解析失败不能被当成域名不可达。"""
 
     def test_classify(self):
-        from app.datasource.compat.registry import (
+        from app.providers.market.compat.registry import (
             is_network_error_text,
             is_parse_error,
             is_parse_error_text,
@@ -244,7 +244,7 @@ class TestParseErrorNotNetwork(unittest.TestCase):
 
     def test_penalize_skips_host_mark_on_parse_error(self):
         """解析失败时不回写域名健康度 —— 否则"接口改版"被记成"域名挂了"。"""
-        from app.datasource.compat.registry import SourceRegistry, SourceSpec
+        from app.providers.market.compat.registry import SourceRegistry, SourceSpec
 
         reg = SourceRegistry(circuit_threshold=99, cooldown=1.0, persist_path=None)
         spec = SourceSpec(name="akshare_flow", fetch=lambda *a, **k: pd.DataFrame(),
@@ -273,7 +273,7 @@ class TestFlowRankKindAlias(unittest.TestCase):
     """
 
     def test_alias_normalized(self):
-        from app.datasource.service.facade import _flow_rank_kind
+        from app.providers.market.service.facade import _flow_rank_kind
 
         self.assertEqual(_flow_rank_kind("即时"), "即时")
         self.assertEqual(_flow_rank_kind("3日"), "3日排行")
@@ -283,7 +283,7 @@ class TestFlowRankKindAlias(unittest.TestCase):
         self.assertEqual(_flow_rank_kind("3日排行"), "3日排行")
 
     def test_unknown_falls_back_to_realtime(self):
-        from app.datasource.service.facade import _flow_rank_kind
+        from app.providers.market.service.facade import _flow_rank_kind
 
         self.assertEqual(_flow_rank_kind("垃圾输入"), "即时")
         self.assertEqual(_flow_rank_kind(None), "即时")
@@ -292,7 +292,7 @@ class TestFlowRankKindAlias(unittest.TestCase):
         """多周期视角是 7 列、列名不同且**没有成交额**，必须也能解析。"""
         import pandas as pd
 
-        from app.datasource.service import facade as MX
+        from app.providers.market.service import facade as MX
 
         df = pd.DataFrame({
             "序号": [1],
@@ -316,7 +316,7 @@ class TestFlowRankKindAlias(unittest.TestCase):
         """真正传给 akshare 的必须是带"排行"的规范名。"""
         import pandas as pd
 
-        from app.datasource.service import facade as MX
+        from app.providers.market.service import facade as MX
 
         df = pd.DataFrame({"股票代码": ["000001"], "名称": ["平安银行"],
                            "涨跌幅": [1.0], "净额": [1.0], "成交额": [10.0]})
@@ -335,7 +335,7 @@ class TestBatchBreaker(unittest.TestCase):
     """逐票接口必须有批量熔断：源挂了就别让 60 只票各重试 3 次。"""
 
     def setUp(self):
-        from app.datasource.service import facade as MX
+        from app.providers.market.service import facade as MX
 
         self.MX = MX
         MX._BATCH_BREAKER.clear()
@@ -414,7 +414,7 @@ class TestSnapshotSeriesSynthesis(unittest.TestCase):
         """10 日累计 10 亿应摊成日均 1 亿，而不是某天流入 10 亿。"""
         import pandas as pd
 
-        from app.datasource.service import facade as MX
+        from app.providers.market.service import facade as MX
 
         frames = {}
         for kind, val in (("即时", 1e8), ("3日", 3e8), ("5日", 5e8), ("10日", 10e8)):
@@ -438,7 +438,7 @@ class TestAdaptiveThrottle(unittest.TestCase):
     """撞到限流后必须放慢，否则一輪 60 只票会被持续打掉。"""
 
     def setUp(self):
-        from app.datasource.service import facade as MX
+        from app.providers.market.service import facade as MX
 
         self.MX = MX
         MX._THROTTLE_GAP.clear()

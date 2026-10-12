@@ -37,7 +37,7 @@
 
 2. **因子不知道数据源的存在。**
    因子只见 ``FactorContext``；策略只见 feature/alpha 的输出。
-   出现 ``from app.datasource.something import`` 的地方都值得怀疑。
+   出现 ``from app.providers.market.something import`` 的地方都值得怀疑。
 
 3. **反向依赖是不允许的。**
    storage 不许 import feature，datasource 不许 import alpha，

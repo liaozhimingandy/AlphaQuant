@@ -13,7 +13,7 @@ import unittest
 from datetime import datetime, timedelta
 
 from app.domain.types import Bar, NewsAnalysis, NewsItem, Side
-from app.engine.tasking import TaskRuntime, build_task, parse_task_specs
+from app.runtime.tasking import TaskRuntime, build_task, parse_task_specs
 
 
 def gen_bars(symbol: str, n: int = 150, start: float = 10.0, amp: float = 2.0) -> list[Bar]:

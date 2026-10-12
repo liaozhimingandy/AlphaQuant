@@ -14,7 +14,7 @@ import unittest
 from datetime import datetime, time as dtime
 from pathlib import Path
 
-from app.engine.collect.spec import (
+from app.modules.collection.spec import (
     DAILY_PERIOD,
     A_SHARE_SESSIONS,
     CollectJob,
@@ -31,9 +31,9 @@ from app.engine.collect.spec import (
 # 采集服务已由三个平级组件（K 线 / 日频截面 / 完整性）合并成一个
 # ``CollectionService``，旧模块路径不再存在。K 线那部分的行为在这里按
 # ``_*_kline`` 后缀的方法/属性逐一校验，语义与合并前完全一致。
-from app.engine.component import CollectionService, parse_interval
-from app.engine.event import EventBus, StandardEvents
-from app.engine.settings import EngineContext, EngineStatus, RunMode
+from app.modules.collection.service import CollectionService, parse_interval
+from app.runtime.event_bus import EventBus, StandardEvents
+from app.engine.context import EngineContext, EngineStatus, RunMode
 from app.tests.helpers import TempWorkspaceMixin
 
 
@@ -396,7 +396,7 @@ class TestCollectionServiceShape(TempWorkspaceMixin, unittest.TestCase):
     """
 
     def test_name_and_capabilities(self):
-        from app.engine.component.kinds import Cap
+        from app.engine.capability import Cap
 
         self.assertEqual(CollectionService.name, "collection_service")
         self.assertEqual(

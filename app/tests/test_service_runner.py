@@ -25,7 +25,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.engine import service_runner as sr
-from app.engine.utils import async_sleep as util_async_sleep
+from app.runtime.utils import async_sleep as util_async_sleep
 
 
 class _FakeReactor:
@@ -72,10 +72,10 @@ class TestAsyncSleep(unittest.TestCase):
     """async_sleep 必须真的把 Deferred 回调掉。"""
 
     def _assert_callback_with_result(self, sleep_fn):
-        # 接口方法已委托给 utils.async_sleep，所以排程发生在 utils 模块里
-        from app.engine import utils as engine_utils
+        # 接口方法已委托给 runtime.utils.async_sleep，所以排程发生在那里
+        from app.runtime import utils as runtime_utils
 
-        patch_target = engine_utils
+        patch_target = runtime_utils
         fake = _FakeReactor()
         original = patch_target.reactor
         patch_target.reactor = fake
@@ -96,7 +96,7 @@ class TestAsyncSleep(unittest.TestCase):
             patch_target.reactor = original
 
     def test_interface_async_sleep(self):
-        from app.engine.base import IQuantEngine
+        from app.engine.engine import IQuantEngine
 
         self._assert_callback_with_result(IQuantEngine.async_sleep)
 

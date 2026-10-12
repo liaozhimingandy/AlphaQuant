@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from app.common.config import settings
-from app.storage.repo.trade_repo import TradingRepository, get_repository
+from app.data.repo.trade_repo import TradingRepository, get_repository
 from app.common.jsonio import dumps, json_safe
 from app.common.logging import logger
 
@@ -122,7 +122,7 @@ class BacktestService:
         金额类（cash/commission/slippage）走同一份默认值，
         这样"命令行跑的"和"面板跑的"结果一致 —— 它们读的是同一个来源。
         """
-        from app.research.defaults import BacktestDefaults
+        from app.modules.backtest.defaults import BacktestDefaults
 
         defaults = BacktestDefaults.load()
         merged = defaults.merge(params)
@@ -217,7 +217,7 @@ class BacktestService:
                 self._running = max(0, self._running - 1)
 
     def _execute(self, job: BacktestJob) -> None:
-        from app.research import BacktestConfig, run_backtest
+        from app.modules.backtest import BacktestConfig, run_backtest
 
         p = job.params
         cfg = BacktestConfig(

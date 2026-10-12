@@ -19,9 +19,9 @@ from typing import Any, Dict
 from unittest import mock
 
 from app.domain.types import Order, OrderStatus, Side, Signal, SignalSource
-from app.engine.component.service.portfolio import PortfolioService
-from app.engine.tasking.task import QuantTask
-from app.portfolio.manager import Portfolio
+from app.modules.portfolio.service import PortfolioService
+from app.runtime.tasking.task import QuantTask
+from app.account.portfolio import Portfolio
 
 
 # ===========================================================
@@ -474,7 +474,7 @@ class TestHealthCheckContract(unittest.TestCase):
 
     def test_super_result_is_tuple(self):
         """钉住基类返回值类型 —— 这是当初踩坑的直接原因。"""
-        from app.engine.component.service.portfolio import PortfolioService
+        from app.modules.portfolio.service import PortfolioService
 
         base = super(PortfolioService, _svc([_pf("a", "000001", 1_000.0)])
                      ).health_check()

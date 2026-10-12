@@ -16,8 +16,8 @@ class PoolViewsMixin:
     # ============================================================
     def pool_config_view(self) -> Dict[str, Any]:
         try:
-            from app.alpha.pool import PoolConfig, SOURCES
-            from app.alpha.score import ScoreConfig
+            from app.modules.universe.pool import PoolConfig, SOURCES
+            from app.modules.universe.score import ScoreConfig
 
             return {
                 **PoolConfig.load().to_dict(),
@@ -31,8 +31,8 @@ class PoolViewsMixin:
     def pool_top(self, limit: int = 30, source: str = "", day: Any = None
                  ) -> List[Dict[str, Any]]:
         try:
-            from app.alpha.pool import PoolConfig, StockPool
-            from app.storage.repo import kline_repo as R
+            from app.modules.universe.pool import PoolConfig, StockPool
+            from app.data.repo import kline_repo as R
 
             # 不指定日期时，读"库里最新的一个评分日"——
             # 否则未开盘时分数都按上一交易日存着、列表却读今天，会显示一片空。
@@ -51,7 +51,7 @@ class PoolViewsMixin:
 
     def pool_dates(self) -> List[str]:
         try:
-            from app.alpha.pool import StockPool
+            from app.modules.universe.pool import StockPool
 
             return StockPool.dates()
         except Exception:
@@ -69,7 +69,7 @@ class PoolViewsMixin:
             同一交易日的数据重复拉没有意义，还容易被限流。
         """
         try:
-            from app.alpha.pool import StockPool
+            from app.modules.universe.pool import StockPool
 
             pool = StockPool()
             excl = None
@@ -98,10 +98,10 @@ class PoolViewsMixin:
     def stock_score(self, symbol: str) -> Dict[str, Any]:
         """单只票的多维度评分明细。"""
         try:
-            from app.feature.features import get_provider
-            from app.alpha.score import ScoreEngine
+            from app.modules.factor.features import get_provider
+            from app.modules.universe.score import ScoreEngine
             from app.domain.symbol import normalize_symbol
-            from app.storage.repo import kline_repo as R
+            from app.data.repo import kline_repo as R
 
             sym = normalize_symbol(symbol)
             r = ScoreEngine(provider=get_provider(ttl=0)).score(sym)

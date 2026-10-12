@@ -1,8 +1,8 @@
 # 数据源扩展指南：如何新增一个源并注册到引擎
 
 > 面向"某个源挂了要能自动换下一个、以及我要加自己的源"这两件事。
-> 配套代码：`app/datasource/compat/registry.py`（注册表 + 权重）、`app/datasource/service/facade.py`（内置适配器）、
-> `app/datasource/kline_sources.py`（日线源注册入口）。
+> 配套代码：`app/providers/market/compat/registry.py`（注册表 + 权重）、`app/providers/market/service/facade.py`（内置适配器）、
+> `app/providers/market/compat/kline_sources.py`（日线源注册入口）。
 
 > **⚠️ 迁移中：本文描述的是旧链路（`REGISTRY` + 权重）。**
 > 取数入口（`fetch_hot_rank` / `fetch_fund_flow` / `fetch_fund_flow_rank` /
@@ -123,7 +123,7 @@ CLI：`alphaquant sources`。
 | 主源级 | `_fund_flow_akshare` 内 `_FF_PRIMARY_DEAD_UNTIL` | push2his 这一个域名被拦 → 整批剩余票直接走快照，别各自重试 3 次 |
 | 源级 | `SourceRegistry` | akshare 整源（含快照）都不可用 → 熔断该源 5 分钟，交给 Tushare |
 
-### 统一网络传输层 `app/datasource/transport/net.py`
+### 统一网络传输层 `app/providers/market/transport/net.py`
 
 三个源一起"被限流"时，问题往往不在源、而在**发请求的方式**。这一层把三件
 本来散落在各适配器里的事收敛到一个文件：
@@ -139,7 +139,7 @@ CLI：`alphaquant sources`。
 用法：
 
 ```python
-from app.datasource import net
+from app.providers.market import net
 
 data = net.post_json(url, json_body=payload)      # 自动带头/换通道/记健康度
 text = net.get_text("https://qt.gtimg.cn/q=sh600000", encoding="gbk")
@@ -216,7 +216,7 @@ akshare 之类第三方库内部发请求不会走 `net.request`，所以**源�
 表现就是"数据就在门口，却报所有数据源均失败"。`akshare_spot` 同样压在
 `82.push2` 上，等于三个源里有两条共用同一条死路。
 
-**解法**（`app/datasource/hot_sources.py`）：只用第 1 段，名称和涨跌幅改用腾讯
+**解法**（`app/providers/market/compat/hot_sources.py`）：只用第 1 段，名称和涨跌幅改用腾讯
 批量报价 `qt.gtimg.cn`（一次请求可带 60 个代码）补齐。实测：
 
 ```
@@ -249,7 +249,7 @@ WARNING  人气榜由本地兜底源 local_hot 提供（外网源均不可用）
 
 日线原本走 `DataSourceFactory` 那条老链路，和注册表是两套机制 ——
 结果是新注册的源对 K线根本不起作用。现在 K线也接进注册表了，
-见 `app/datasource/kline_sources.py`（老链路保留不动，两条并存）。
+见 `app/providers/market/compat/kline_sources.py`（老链路保留不动，两条并存）。
 
 | 源 | 说明 | 依赖 |
 | --- | --- | --- |
@@ -261,7 +261,7 @@ WARNING  人气榜由本地兜底源 local_hot 提供（外网源均不可用）
 统一入口：
 
 ```python
-from app.datasource.compat.kline_sources import fetch_daily, daily_sources
+from app.providers.market.compat.kline_sources import fetch_daily, daily_sources
 
 df = fetch_daily("600000", start="2026-09-01", end="2026-10-10")
 print(daily_sources())      # ['baostock_daily', 'akshare_daily', 'astockdata', 'mootdx']
@@ -366,7 +366,7 @@ date, close, pct_change, main_net, main_net_pct,
 super_large_net, large_net, medium_net, small_net, turnover, amount
 ```
 
-日线（`daily`）的返回列固定为 `app.datasource.compat.kline_base.DAILY_COLUMNS`：
+日线（`daily`）的返回列固定为 `app.providers.market.compat.kline_base.DAILY_COLUMNS`：
 
 ```
 date, symbol, open, high, low, close, volume, amount
@@ -386,10 +386,10 @@ REGISTRY.register("my_src", supports=["daily"], fetch=_my_fetch, weight=0.8)
 
 不给就是 1，顺序完全交给 `DATA_SOURCE_PRIORITY` + 运行时健康度。
 
-推荐放在**你自己的模块**里（不污染 `marketx.py`），例如 `app/datasource/my_sources.py`：
+推荐放在**你自己的模块**里（不污染 `marketx.py`），例如 `app/providers/market/my_sources.py`：
 
 ```python
-# app/datasource/my_sources.py
+# app/providers/market/my_sources.py
 from __future__ import annotations
 
 import os
@@ -397,7 +397,7 @@ from typing import Optional
 
 import pandas as pd
 
-from app.datasource.compat.registry import REGISTRY, DataUnavailable, SourceError
+from app.providers.market.compat.registry import REGISTRY, DataUnavailable, SourceError
 
 
 @REGISTRY.register("csv_local", supports=["fund_flow"])
@@ -442,11 +442,11 @@ REGISTRY.register("my_src", supports=["fund_flow", "chip"], fetch=_my_fetch)
 ### 第 3 步：让它被引擎加载 + 配置优先级
 
 **注册发生在 import 时**，所以关键是让你的模块被引擎导入。引擎本来就
-`import app.datasource.service.facade`，因此在 `marketx.py` 末尾加一行即可：
+`import app.providers.market.service.facade`，因此在 `marketx.py` 末尾加一行即可：
 
 ```python
-# app/datasource/service/facade.py 末尾
-import app.datasource.my_sources  # noqa: F401  触发注册
+# app/providers/market/service/facade.py 末尾
+import app.providers.market.my_sources  # noqa: F401  触发注册
 ```
 
 > 放在文件末尾可避开循环导入。
@@ -465,7 +465,7 @@ DATA_SOURCE_PRIORITY=baostock,akshare,csv_local,tushare
 ## 6. 注册到引擎后怎么验证
 
 ```python
-from app.datasource.compat.registry import REGISTRY
+from app.providers.market.compat.registry import REGISTRY
 
 # 1) 源是否已注册、支持哪些类型
 print([(s["name"], s["supports"]) for s in REGISTRY.health()])
@@ -604,19 +604,19 @@ hot_rank: 所有数据源均失败 -> akshare_em: ... | xueqiu_hot: ... ||
 
 | 文件 | 职责 |
 | --- | --- |
-| `app/datasource/transport/net.py` | **统一网络传输层**：请求头、通道兜底、僵尸代理摘除、域名健康度 |
-| `app/datasource/compat/registry.py` | 注册表（含权重）、`SourceError` / `DataUnavailable`、`is_transient`、采集事件、域名级跳过 |
-| `app/datasource/service/facade.py` | 内置适配器（akshare / tushare / 人气榜源 / 资金榜）+ 注册入口 |
-| `app/datasource/hot_sources.py` | `emapp_hot`：不依赖 push2 的可用人气榜源 + 腾讯批量报价 |
-| `app/datasource/kline_base.py` | 日线统一契约：列名、别名映射、归一化（含成交量单位的坑） |
-| `app/datasource/kline_sources.py` | `daily` 源注册入口 + `fetch_daily()` 统一入口 |
-| `app/datasource/mootdx_source.py` | mootdx（通达信）日线适配器 |
-| `app/datasource/astockdata_source.py` | a-stock-data 行情层（腾讯 K线）适配器 |
-| `app/datasource/local_source.py` | 本地兜底人气榜（`local_hot`，外网全挂时顶上） |
-| `app/engine/integrity.py` | 数据完整性校验 + 缺口自动补全（见 `docs/DATA_INTEGRITY.md`） |
-| `app/engine/component/dataguard.py` | 数据校验服务组件（引擎启动后定期体检） |
-| `app/alpha/pool/sync.py` | 各 sync 的采集去重（`force` 开关）与失败日志 |
-| `app/alpha/pool/pool.py` | 候选池读库复用 + 刷新报告里的 `warnings` / `data_sources` |
+| `app/providers/market/transport/net.py` | **统一网络传输层**：请求头、通道兜底、僵尸代理摘除、域名健康度 |
+| `app/providers/market/compat/registry.py` | 注册表（含权重）、`SourceError` / `DataUnavailable`、`is_transient`、采集事件、域名级跳过 |
+| `app/providers/market/service/facade.py` | 内置适配器（akshare / tushare / 人气榜源 / 资金榜）+ 注册入口 |
+| `app/providers/market/compat/hot_sources.py` | `emapp_hot`：不依赖 push2 的可用人气榜源 + 腾讯批量报价 |
+| `app/providers/market/compat/kline_base.py` | 日线统一契约：列名、别名映射、归一化（含成交量单位的坑） |
+| `app/providers/market/compat/kline_sources.py` | `daily` 源注册入口 + `fetch_daily()` 统一入口 |
+| `app/providers/market/compat/mootdx_source.py` | mootdx（通达信）日线适配器 |
+| `app/providers/market/compat/astockdata_source.py` | a-stock-data 行情层（腾讯 K线）适配器 |
+| `app/providers/market/compat/local_source.py` | 本地兜底人气榜（`local_hot`，外网全挂时顶上） |
+| `app/modules/collection/integrity.py` | 数据完整性校验 + 缺口自动补全（见 `docs/DATA_INTEGRITY.md`） |
+| `app/modules/collection/service.py` | 数据校验服务组件（引擎启动后定期体检） |
+| `app/modules/universe/pool/sync.py` | 各 sync 的采集去重（`force` 开关）与失败日志 |
+| `app/modules/universe/pool/pool.py` | 候选池读库复用 + 刷新报告里的 `warnings` / `data_sources` |
 | `app/common/config.py` | `DATA_SOURCE_PRIORITY`、`DATA_SOURCE_WEIGHTS`、`DATA_FETCH_MAX_RETRY`、`DATA_FETCH_MIN_INTERVAL`、`DATA_GUARD_*` |
 | `app/tests/test_marketx_retry_sources.py` | 重试、换源、熔断、注册表的回归测试 |
 | `app/tests/test_source_retry_and_dedup.py` | 重试 N 次后换源、全挂告警、已采集不重复采 |

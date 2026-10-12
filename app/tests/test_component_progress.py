@@ -21,7 +21,7 @@ from datetime import date, timedelta
 from contextlib import contextmanager
 from unittest import mock
 
-from app.engine.component.base import IBaseComponent, Progress
+from app.engine.component import IBaseComponent, Progress
 
 
 class _Dummy(IBaseComponent):
@@ -114,7 +114,7 @@ class TestExtDataProgress(unittest.TestCase):
     """
 
     def _comp(self, **kw):
-        from app.engine.component import CollectionService
+        from app.modules.collection.service import CollectionService
 
         # K 线单元指向一个不存在的配置：隔离工程里的 config/collector.json
         c = CollectionService(
@@ -140,11 +140,11 @@ class TestExtDataProgress(unittest.TestCase):
         def _ok(*a, **k):
             return {"ok": 2, "failed": []}
 
-        with mock.patch("app.alpha.pool.sync_fund_flow", side_effect=_ok), \
-             mock.patch("app.alpha.pool.sync_chip", side_effect=_ok), \
-             mock.patch("app.alpha.pool.sync_fundamentals", side_effect=_ok), \
-             mock.patch("app.alpha.pool.sync_category", side_effect=_ok), \
-             mock.patch("app.feature.features.get_provider",
+        with mock.patch("app.modules.universe.pool.sync_fund_flow", side_effect=_ok), \
+             mock.patch("app.modules.universe.pool.sync_chip", side_effect=_ok), \
+             mock.patch("app.modules.universe.pool.sync_fundamentals", side_effect=_ok), \
+             mock.patch("app.modules.universe.pool.sync_category", side_effect=_ok), \
+             mock.patch("app.modules.factor.features.get_provider",
                         side_effect=Exception("no cache")):
             comp._run_cross_once("post")
 
@@ -165,10 +165,10 @@ class TestExtDataProgress(unittest.TestCase):
             return {"ok": 2, "failed": []}
 
         comp = self._comp(cross_categories=[], cross_with_fundamental=False)
-        with mock.patch("app.alpha.pool.sync_fund_flow", side_effect=_bad), \
-             mock.patch("app.alpha.pool.sync_chip", side_effect=_ok), \
-             mock.patch("app.alpha.pool.sync_category", side_effect=_ok), \
-             mock.patch("app.feature.features.get_provider",
+        with mock.patch("app.modules.universe.pool.sync_fund_flow", side_effect=_bad), \
+             mock.patch("app.modules.universe.pool.sync_chip", side_effect=_ok), \
+             mock.patch("app.modules.universe.pool.sync_category", side_effect=_ok), \
+             mock.patch("app.modules.factor.features.get_provider",
                         side_effect=Exception("no cache")):
             comp._run_cross_once("post")
         p = comp.progress()
@@ -178,7 +178,7 @@ class TestExtDataProgress(unittest.TestCase):
     def test_exception_still_finishes_progress(self):
         """中途炸了也要收尾 —— 否则面板永远显示"进行中"。"""
         comp = self._comp(cross_categories=[], cross_with_fundamental=False)
-        with mock.patch("app.alpha.pool.sync_fund_flow",
+        with mock.patch("app.modules.universe.pool.sync_fund_flow",
                         side_effect=RuntimeError("炸了")):
             with self.assertRaises(RuntimeError):
                 comp._run_cross_once("post")
@@ -186,10 +186,10 @@ class TestExtDataProgress(unittest.TestCase):
 
     def test_daily_batch_has_three_items(self):
         comp = self._comp()
-        with mock.patch("app.alpha.pool.sync_limitup",
+        with mock.patch("app.modules.universe.pool.sync_limitup",
                         return_value={"ok": 10}), \
-             mock.patch("app.alpha.pool.sync_boards", return_value={"ok": 5}), \
-             mock.patch("app.alpha.pool.sync_concept_members",
+             mock.patch("app.modules.universe.pool.sync_boards", return_value={"ok": 5}), \
+             mock.patch("app.modules.universe.pool.sync_concept_members",
                         return_value={"ok": 3}):
             comp._run_cross_daily()
         p = comp.progress()
@@ -207,7 +207,7 @@ class TestCollectorProgress(unittest.TestCase):
     @staticmethod
     def _comp():
         """只装配 K 线单元的采集服务（配置指向不存在的文件，隔离工程配置）。"""
-        from app.engine.component import CollectionService
+        from app.modules.collection.service import CollectionService
 
         return CollectionService(kline_config_path="/nonexistent/collector.json")
 
@@ -262,7 +262,7 @@ class TestDataGuardProgress(unittest.TestCase):
 
     @staticmethod
     def _comp():
-        from app.engine.component import CollectionService
+        from app.modules.collection.service import CollectionService
 
         return CollectionService(
             guard_enabled=True, kline_config_path="/nonexistent/collector.json"
@@ -292,7 +292,7 @@ class TestDataGuardProgress(unittest.TestCase):
 
     def test_scan_reports_progress_callback(self):
         """扫描器必须真的回调，而不是只在组件里自己数。"""
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(lookback_days=3, auto_repair=False,
                                        max_symbols=5)
@@ -314,7 +314,7 @@ class TestDataGuardProgress(unittest.TestCase):
 def _temp_db():
     """临时 in-memory 库，并把**所有**会用到 SessionLocal 的地方都指过去。
 
-    两处必须一起换、一起还原：``app.storage.engine.SessionLocal``（日线/模型）
+    两处必须一起换、一起还原：``app.data.engine.SessionLocal``（日线/模型）
     和 ``kline_repo.SessionLocal``（榜单表）。
     只换一处会让本地兜底源读到半套数据；忘了还原更糟 ——
     后续测试会连到一个已经 dispose 的内存库上，报
@@ -323,10 +323,10 @@ def _temp_db():
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    import app.storage.engine as dbmod
-    from app.storage.engine import apply_sqlite_pragmas
-    from app.storage.schema import Base
-    from app.storage.repo import kline_repo as R
+    import app.data.engine as dbmod
+    from app.data.engine import apply_sqlite_pragmas
+    from app.data.schema import Base
+    from app.data.repo import kline_repo as R
 
     eng = apply_sqlite_pragmas(create_engine("sqlite:///:memory:"))
     Base.metadata.create_all(bind=eng)
@@ -346,7 +346,7 @@ class TestSnapshotExposesProgress(unittest.TestCase):
     """引擎快照必须把进度带出去 —— 否则面板拿得到接口也渲染不出来。"""
 
     def test_engine_snapshot_includes_progress(self):
-        from app.engine.base import BaseQuantEngine
+        from app.engine.engine import BaseQuantEngine
 
         eng = BaseQuantEngine({"RUN_MODE": "LIVE"})
         comp = _Dummy()
@@ -363,7 +363,7 @@ class TestSnapshotExposesProgress(unittest.TestCase):
 
     def test_control_component_states_includes_progress(self):
         """面板 /api/overview 走的是 control.component_states()，同样要带。"""
-        from app.engine.control import ControlCenter
+        from app.control.control_plane import ControlCenter
 
         comp = _Dummy()
         comp.start_progress(2, "x")
@@ -379,8 +379,8 @@ class TestLocalHotFallback(unittest.TestCase):
     """本地兜底人气榜：外网全挂时的最后一道防线。"""
 
     def test_registered_as_fallback_and_last(self):
-        import app.datasource.service.facade  # noqa: F401  触发注册
-        from app.datasource.compat.registry import REGISTRY
+        import app.providers.market.service.facade  # noqa: F401  触发注册
+        from app.providers.market.compat.registry import REGISTRY
 
         names = [s.name for s in REGISTRY.sources_for("hot_rank")]
         self.assertIn("local_hot", names)
@@ -392,7 +392,7 @@ class TestLocalHotFallback(unittest.TestCase):
 
     def test_fallback_never_overtakes_by_weight(self):
         """本地源权重涨到很高也不能超过普通源。"""
-        from app.datasource.compat.registry import REGISTRY, SourceRegistry
+        from app.providers.market.compat.registry import REGISTRY, SourceRegistry
 
         reg = SourceRegistry(circuit_threshold=99, cooldown=0.0, retries=0)
         reg.register("net", supports=["k"], fetch=lambda: None)
@@ -404,8 +404,8 @@ class TestLocalHotFallback(unittest.TestCase):
 
     def test_synthesizes_from_daily_when_no_hot_table(self):
         """库里没人气榜时，用日线合成一份（成交额口径）。"""
-        from app.datasource.compat import local_source
-        from app.storage.schema import StockDaily
+        from app.providers.market.compat import local_source
+        from app.data.schema import StockDaily
 
         day = date(2026, 10, 9)
         with _temp_db() as S:
@@ -426,8 +426,8 @@ class TestLocalHotFallback(unittest.TestCase):
 
     def test_unavailable_when_db_empty(self):
         """连日线都没有 → 报 DataUnavailable（源没坏，是没数据，不该降权）。"""
-        from app.datasource.compat import local_source
-        from app.datasource.compat.registry import DataUnavailable
+        from app.providers.market.compat import local_source
+        from app.providers.market.compat.registry import DataUnavailable
 
         with _temp_db():
             with self.assertRaises(DataUnavailable):
@@ -438,7 +438,7 @@ class TestNetworkHint(unittest.TestCase):
     """全源失败时的排查提示。"""
 
     def test_hint_mentions_proxy_vars(self):
-        from app.datasource.compat.registry import network_hint
+        from app.providers.market.compat.registry import network_hint
 
         with mock.patch.dict("os.environ", {"HTTP_PROXY": "http://127.0.0.1:59258"}):
             hint = network_hint()
@@ -446,12 +446,12 @@ class TestNetworkHint(unittest.TestCase):
         self.assertIn("--probe", hint)
 
     def test_hint_without_proxy(self):
-        from app.datasource.compat.registry import network_hint
+        from app.providers.market.compat.registry import network_hint
 
         # 必须同时关掉自动探测：本机可能真有 Clash 在 7890 监听，
         # 那样走的就不是"无代理"分支，测的也就不是这个用例想测的场景了。
         with mock.patch.dict("os.environ", {}, clear=True), \
-             mock.patch("app.datasource.transport.net._autodetect_proxy",
+             mock.patch("app.providers.market.transport.net._autodetect_proxy",
                         return_value=""):
             hint = network_hint()
         self.assertIn("未设置代理", hint)
@@ -462,10 +462,10 @@ class TestNetworkHint(unittest.TestCase):
         这是守护进程场景的典型形态：shell 里有变量所以手动跑没事，
         服务进程不继承变量于是全部失败，而旧提示会让人误以为是代码问题。
         """
-        from app.datasource.compat.registry import network_hint
+        from app.providers.market.compat.registry import network_hint
 
         with mock.patch.dict("os.environ", {}, clear=True), \
-             mock.patch("app.datasource.transport.net._autodetect_proxy",
+             mock.patch("app.providers.market.transport.net._autodetect_proxy",
                         return_value="http://127.0.0.1:7890"):
             hint = network_hint()
         self.assertIn("7890", hint)
@@ -473,7 +473,7 @@ class TestNetworkHint(unittest.TestCase):
 
     def test_exhausted_error_carries_hint(self):
         """'所有数据源均失败'必须带上排查方向，否则无法行动。"""
-        from app.datasource.compat.registry import REGISTRY, SourceError, SourceRegistry
+        from app.providers.market.compat.registry import REGISTRY, SourceError, SourceRegistry
 
         reg = SourceRegistry(circuit_threshold=99, cooldown=0.0, retries=0)
 
@@ -488,7 +488,7 @@ class TestNetworkHint(unittest.TestCase):
         self.assertIsNotNone(REGISTRY)   # 全局注册表仍然存在
 
     def test_probe_reports_each_source(self):
-        from app.datasource.compat.registry import DataUnavailable, SourceRegistry
+        from app.providers.market.compat.registry import DataUnavailable, SourceRegistry
 
         reg = SourceRegistry(retries=0)
 
@@ -525,21 +525,21 @@ class TestRunModeSingleSource(unittest.TestCase):
 
     def test_both_import_paths_are_the_same_class(self):
         from app.domain.types import RunMode as DomainMode
-        from app.engine.settings import RunMode as EngineMode
+        from app.engine.context import RunMode as EngineMode
 
         self.assertIs(DomainMode, EngineMode)
 
     def test_cross_module_comparison_holds(self):
         """跨模块比较必须成立 —— 这正是当初失效的那条判断。"""
         from app.domain.types import RunMode as DomainMode
-        from app.engine.settings import RunMode as EngineMode
+        from app.engine.context import RunMode as EngineMode
 
         built = DomainMode("BACKTEST")          # builder 造出来的值
         self.assertEqual(built, EngineMode.BACKTEST)   # base 里的比较
         self.assertTrue(built == EngineMode.BACKTEST)
 
     def test_values_stable(self):
-        from app.engine.settings import RunMode
+        from app.engine.context import RunMode
 
         self.assertEqual(
             {m.value for m in RunMode}, {"BACKTEST", "SIMULATE", "LIVE"})

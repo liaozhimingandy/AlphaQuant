@@ -9,13 +9,18 @@
 
 | 想加什么 | 入口 | 需要改几处 |
 |---|---|---|
-| 数据源 | `app/datasource/adapters/` + `routing/config.py` | 2 |
-| 因子 | `app/feature/builtin.py`（或写公式） | 1 |
-| 策略 | `app/strategy/`、`config/factors.json`、或用户目录 | 1 |
-| 风控规则 | `app/risk/builtin.py` | 1 |
-| 引擎组件 | `app/engine/component/` + `builder.py` | 2 |
+| 数据源 | `app/providers/market/adapters/` + `routing/config.py` | 2 |
+| 因子 | `app/modules/factor/builtin.py`（或写公式） | 1 |
+| 策略 | `app/modules/strategy/`、`config/factors.json`、或用户目录 | 1 |
+| 风控规则 | `app/modules/risk/builtin.py` | 1 |
+| 引擎组件 | `app/modules/<模块>/service.py` + `app/engine/builder.py` | 2~3 |
+| 调度节拍 | `app/runtime/scheduler.py`（改节拍本身才动这里，加定时任务不用） | 1 |
 | 面板 API | `app/monitoring/api/` + `resource.py` | 2 |
-| 存储表 | `app/storage/schema.py` + `repo/` | 2~3 |
+| 存储表 | `app/data/schema.py` + `repo/` | 2~3 |
+
+> 判定放哪：`app/engine/` 只放**容器与契约**（生命周期、装配、依赖解析），
+> `app/runtime/` 只放**怎么跑**（调度、并发、事件分发），其余业务一律进
+> `app/modules/` 下对应的模块。完整取舍见 [STRUCTURE.md](STRUCTURE.md)。
 
 ---
 
@@ -23,7 +28,7 @@
 
 ### 改哪些文件
 
-1. `app/datasource/adapters/<你的源>.py` —— 写一个 `DataProvider` 子类
+1. `app/providers/market/adapters/<你的源>.py` —— 写一个 `DataProvider` 子类
 2. `config/providers.json`（或 `routing/config.py:48-56` 的默认 routes）—— 把它挂进候选顺序
 
 > 注册只需把类加进 `adapters/__init__.py` 的 `BUILTIN_PROVIDERS` 列表即可，
@@ -32,8 +37,8 @@
 ### 最小示例
 
 ```python
-# app/datasource/adapters/mysource.py
-from app.datasource.provider.base import DataProvider, DataCapability, capability
+# app/providers/market/adapters/mysource.py
+from app.providers.market.provider.base import DataProvider, DataCapability, capability
 
 @capability(DataCapability.DAILY_KLINE)
 class MySourceProvider(DataProvider):
@@ -46,7 +51,7 @@ class MySourceProvider(DataProvider):
         return df
 ```
 
-然后在 `app/datasource/adapters/__init__.py`：
+然后在 `app/providers/market/adapters/__init__.py`：
 
 ```python
 BUILTIN_PROVIDERS: List[Type[DataProvider]] = [MySourceProvider]
@@ -72,7 +77,7 @@ python main.py data health           # 看健康分/熔断状态
   `MINUTE_KLINE` 甚至已经写好了质量校验器（`routing/quality.py:190`），
   但全仓没有任何 `@capability(MINUTE_KLINE)`——分钟线实际还是走
   `domain/symbol.py:486` 的老路子。
-- **新旧双链路并存**：`app/alpha/pool/sync.py:25` 只依赖 `facade`（老层），
+- **新旧双链路并存**：`app/modules/universe/pool/sync.py:25` 只依赖 `facade`（老层），
   新的 `DataRouter` 只被 `service/data_service.py`、`cli/data_cmds.py`、
   `monitoring/resource.py` 用。`router.py:379-412` 还反过来往老注册表
   补事件来"假装"两边一致——所以面板上看到的健康分，可能并不反映
@@ -100,10 +105,10 @@ python main.py data health           # 看健康分/熔断状态
 ### 2.2 标准：写一个因子类
 
 ```python
-# app/feature/builtin.py
-from app.feature.base import IBaseFactor
-from app.feature.context import FactorContext
-from app.feature.registry import register_factor
+# app/modules/factor/builtin.py
+from app.modules.factor.base import IBaseFactor
+from app.modules.factor.context import FactorContext
+from app.modules.factor.registry import register_factor
 
 @register_factor
 class MyFactor(IBaseFactor):
@@ -123,13 +128,13 @@ class MyFactor(IBaseFactor):
 
 ### 2.3 最重：让机器自己挖
 
-`app/feature/mining/` 的遗传规划 + `app/feature/ml.py` 拟合。
+`app/modules/factor/mining/` 的遗传规划 + `app/modules/factor/mining/ml.py` 拟合。
 产出仍是"因子"，落回同一个注册表和同一张通用因子值表。
 
 ### 怎么验证
 
 ```python
-from app.feature.registry import list_factors, create_factor
+from app.modules.factor.registry import list_factors, create_factor
 print(list_factors())                       # 有没有你的因子
 print(create_factor("my_factor").compute(ctx))
 ```
@@ -146,7 +151,7 @@ print(create_factor("my_factor").compute(ctx))
 ### 3.2 代码式
 
 ```python
-# app/strategy/rule/builtin.py（或 USER_STRATEGY_DIR 指向的目录）
+# app/modules/strategy/rule/builtin.py（或 USER_STRATEGY_DIR 指向的目录）
 class MyStrategy:
     def on_bar(self, ctx, state):
         ...
@@ -165,7 +170,7 @@ class MyStrategy:
 ## 4. 新增一条风控规则
 
 ```python
-# app/risk/builtin.py
+# app/modules/risk/builtin.py
 @register_risk
 class MyRule(IBaseRisk):
     name = "my_rule"
@@ -198,7 +203,7 @@ class MyRule(IBaseRisk):
 最少实现：
 
 ```python
-from app.engine.component.kinds import ServiceComponent, Cap
+from app.engine.capability import ServiceComponent, Cap
 
 class MyService(ServiceComponent):
     name = "my_service"
@@ -232,9 +237,9 @@ class MyService(ServiceComponent):
 
 ## 7. 新增一张存储表
 
-1. `app/storage/schema.py` —— 定义模型（参照 `stock_factor_value` 的索引设计，
+1. `app/data/schema.py` —— 定义模型（参照 `stock_factor_value` 的索引设计，
    `schema.py:596-608` 是写得最完整的一个，可作为模板）
-2. `app/storage/repo/` —— 加仓库方法，走 `session_scope`（`stock_repo.py:41`）
+2. `app/data/repo/` —— 加仓库方法，走 `session_scope`（`stock_repo.py:41`）
 3. 需要的话在 `kline_repo._ensure_pool_tables()` 里加补建逻辑
 
 **坑**：

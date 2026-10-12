@@ -37,21 +37,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.common.config import settings
-from app.engine.base import BaseQuantEngine
+from app.engine.engine import BaseQuantEngine
 from app.domain.types import RunMode
-from app.engine.component import (
-    CollectionService,
-    MarketService,
-    NewsService,
-    PortfolioService,
-    RiskService,
-    SchedulerComponent,
-    StrategyComponent,
-    TradingService,
-    WorkerComponent,
-)
+from app.modules.collection.service import CollectionService
+from app.modules.market.service import MarketService
+from app.modules.news.service import NewsService
+from app.modules.portfolio.service import PortfolioService
+from app.modules.risk.service import RiskService
+from app.runtime.scheduler import SchedulerComponent
+from app.modules.strategy.component import StrategyComponent
+from app.modules.trading.service import TradingService
+from app.runtime.executor import WorkerComponent
 from app.monitoring.server import MonitorWebComponent
-from app.engine.tasking.spec import parse_task_specs
+from app.runtime.tasking.spec import parse_task_specs
 from app.common.logging import logger
 
 DEFAULT_TASK_FILE = "tasks.json"

@@ -14,9 +14,9 @@ from app.cli.base import cli
 @cli.command(name="factors", help="列出可用指标与因子（含每个指标的可配参数）")
 @click.option("--params", is_flag=True, help="展开每个指标的可配参数与默认值")
 def factors_cmd(params) -> None:
-    from app.feature import list_factors
-    from app.feature.indicator import list_indicators
-    from app.feature.indicator.registry import describe_indicator
+    from app.modules.factor import list_factors
+    from app.modules.factor.indicator import list_indicators
+    from app.modules.factor.indicator.registry import describe_indicator
 
     click.secho("指标:", fg="cyan", bold=True)
     for n in list_indicators():
@@ -42,9 +42,9 @@ def factors_cmd(params) -> None:
 
 @cli.command(name="rules", help="列出可组合的规则类型与内置风控")
 def rules_cmd() -> None:
-    from app.risk import list_risks
-    from app.strategy.rule import RULE_TYPES
-    from app.strategy import list_strategies
+    from app.modules.risk import list_risks
+    from app.modules.strategy.rule import RULE_TYPES
+    from app.modules.strategy import list_strategies
 
     click.secho("规则类型:", fg="cyan", bold=True)
     for n in RULE_TYPES:
@@ -61,7 +61,7 @@ def rules_cmd() -> None:
 @click.option("--config", default=None, help="任务配置文件路径，默认 config/tasks.json")
 def tasks_cmd(config) -> None:
     from app.engine.builder import load_task_config
-    from app.engine.tasking.spec import parse_task_specs
+    from app.runtime.tasking.spec import parse_task_specs
 
     cfg = load_task_config(config)
     specs = parse_task_specs(cfg.get("tasks"))
@@ -84,7 +84,7 @@ def tasks_cmd(config) -> None:
 @click.argument("symbol")
 @click.option("--days", default=10, show_default=True, help="看最近几天资金流")
 def flow_cmd(symbol, days) -> None:
-    from app.feature.features import get_provider
+    from app.modules.factor.features import get_provider
     from app.domain.symbol import normalize_symbol
 
     sym = normalize_symbol(symbol)
@@ -120,8 +120,8 @@ def flow_cmd(symbol, days) -> None:
 @click.argument("symbol")
 @click.option("--date", "day", default=None, help="评分日期，默认最新")
 def score_cmd(symbol, day) -> None:
-    from app.feature.features import get_provider
-    from app.alpha.score import ScoreEngine
+    from app.modules.factor.features import get_provider
+    from app.modules.universe.score import ScoreEngine
     from app.domain.symbol import normalize_symbol
 
     sym = normalize_symbol(symbol)
@@ -156,8 +156,8 @@ def _default_symbols(symbols) -> list:
     syms = [str(s) for s in (symbols or ())]
     if syms:
         return syms
-    from app.storage.engine import SessionLocal
-    from app.storage.repo.stock_repo import StockRepository
+    from app.data.engine import SessionLocal
+    from app.data.repo.stock_repo import StockRepository
 
     with SessionLocal() as db:
         return [r["symbol"] for r in StockRepository.list_symbols(db)]
@@ -166,7 +166,7 @@ def _default_symbols(symbols) -> list:
 @click.option("--category", default="", help="按分类过滤")
 @click.option("--source", default="", help="按来源过滤：user/mined/preset")
 def factor_list(category, source) -> None:
-    from app.feature.library import get_library
+    from app.modules.factor.library import get_library
 
     lib = get_library()
     rows = lib.list(category=category, source=source)
@@ -184,7 +184,7 @@ def factor_list(category, source) -> None:
 
 @factor_group.command(name="ops", help="列出表达式可用算子")
 def factor_ops() -> None:
-    from app.feature.expr import func_catalog
+    from app.modules.factor.expr import func_catalog
 
     for f in func_catalog():
         arity = (f"{f['min_args']}" if f["min_args"] == f["max_args"]
@@ -194,7 +194,7 @@ def factor_ops() -> None:
 
 @factor_group.command(name="vars", help="列出表达式可用变量")
 def factor_vars() -> None:
-    from app.feature.expr import variable_catalog
+    from app.modules.factor.expr import variable_catalog
 
     for v in variable_catalog():
         click.secho(f"  {v['name']:<10}", fg="cyan", nl=False)
@@ -207,7 +207,7 @@ def factor_vars() -> None:
 @click.option("--category", default="自定义", help="分类")
 @click.option("--overwrite", is_flag=True, help="已存在时覆盖")
 def factor_add(name, expr, desc, category, overwrite) -> None:
-    from app.feature.library import get_library
+    from app.modules.factor.library import get_library
 
     ok, msg, spec = get_library().add(
         name, expr, description=desc, category=category, overwrite=overwrite)
@@ -219,7 +219,7 @@ def factor_add(name, expr, desc, category, overwrite) -> None:
 @factor_group.command(name="remove", help="删除一条因子")
 @click.argument("name")
 def factor_remove(name) -> None:
-    from app.feature.library import get_library
+    from app.modules.factor.library import get_library
 
     ok, msg = get_library().remove(name)
     click.secho(("✅ " if ok else "❌ ") + msg, fg="green" if ok else "red")
@@ -229,7 +229,7 @@ def factor_remove(name) -> None:
 @factor_group.command(name="presets", help="装入预置经典因子（只补不覆盖）")
 @click.option("--overwrite", is_flag=True, help="覆盖已存在的同名因子")
 def factor_presets(overwrite) -> None:
-    from app.feature.library import install_presets
+    from app.modules.factor.library import install_presets
 
     n = install_presets(overwrite=overwrite)
     click.secho(f"✅ 已写入 {n} 个预置因子", fg="green")
@@ -242,7 +242,7 @@ def factor_presets(overwrite) -> None:
 @click.option("--horizon", default=5, show_default=True, help="未来多少天收益作为标签")
 @click.option("--groups", default=5, show_default=True, help="分层组数")
 def factor_check(expr, symbol, start, end, horizon, groups) -> None:
-    from app.feature.evaluate import evaluate_factor
+    from app.modules.factor.evaluate import evaluate_factor
 
     syms = _default_symbols(symbol)
     if len(syms) < 3:
@@ -284,9 +284,9 @@ def factor_mine(symbol, start, end, horizon, generations, population, top,
 
     要入库请显式加 `--save`，并且先用 `--min-score` 把门槛调高。
     """
-    from app.feature.evaluate import load_panel
-    from app.feature.library import SOURCE_MINED, get_library
-    from app.feature.mining.mining import FactorMiner
+    from app.modules.factor.evaluate import load_panel
+    from app.modules.factor.library import SOURCE_MINED, get_library
+    from app.modules.factor.mining.mining import FactorMiner
 
     syms = _default_symbols(symbol)
     panel = load_panel(syms, start, end)
@@ -329,9 +329,9 @@ def factor_mine(symbol, start, end, horizon, generations, population, top,
               help="用哪些来源的因子，逗号分隔")
 def factor_fit(symbol, start, end, horizon, method, source) -> None:
     """把因子库里的因子一起喂给线性模型，看谁能活下来。"""
-    from app.feature.evaluate import load_panel
-    from app.feature.library import get_library
-    from app.feature.mining.ml import fit_factors
+    from app.modules.factor.evaluate import load_panel
+    from app.modules.factor.library import get_library
+    from app.modules.factor.mining.ml import fit_factors
 
     syms = _default_symbols(symbol)
     panel = load_panel(syms, start, end)
@@ -348,7 +348,7 @@ def factor_fit(symbol, start, end, horizon, method, source) -> None:
     # 把每只票的因子序列首尾相接：目标是"因子值 → 未来收益"的映射
     import numpy as np
 
-    from app.feature.evaluate import compute_factor
+    from app.modules.factor.evaluate import compute_factor
 
     cols: Dict[str, list] = {}
     ys: list = []

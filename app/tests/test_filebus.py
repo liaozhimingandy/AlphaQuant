@@ -15,8 +15,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from app.engine.bus.components import bar_from_dict, news_from_dict
-from app.engine.bus.filebus import FileBus
+from app.runtime.bus.components import bar_from_dict, news_from_dict
+from app.runtime.bus.filebus import FileBus
 from app.domain.types import Bar, NewsAnalysis, NewsItem
 from app.tests.helpers import TempWorkspaceMixin
 

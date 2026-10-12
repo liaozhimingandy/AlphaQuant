@@ -104,7 +104,7 @@ def rewrite_line(mp: dict[str, str], line: str, hits: dict[str, int]) -> str:
                 target = resolve(mp, module)
         if target and target != module:
             hits[module] = hits.get(module, 0) + 1
-            # from app.data import net  ->  from app.datasource.transport import net
+            # from app.data import net  ->  from app.providers.market.transport import net
             if target.count(".") >= 1 and not names.startswith("*"):
                 parent, _, child = target.rpartition(".")
                 if parent:

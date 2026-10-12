@@ -59,7 +59,7 @@ IBaseComponent                      ← 生命周期（initialize / start / stop
 └── （PLAIN）MonitorWebComponent    观测者，不参与上面四种角色
 ```
 
-四个基类都在 `app/engine/component/kinds.py`。**它们不新增生命周期**——
+四个基类都在 `app/engine/capability.py`。**它们不新增生命周期**——
 `initialize / start / stop` 的语义完全沿用 `IBaseComponent`，
 只是在该接口之上加"角色语义"。这是刻意的：引擎主循环不需要为服务单独写一套启停逻辑。
 
@@ -93,7 +93,7 @@ IBaseComponent                      ← 生命周期（initialize / start / stop
 服务不再用"名字"互相找，而是用**能力**。能力名是常量，不是裸字符串：
 
 ```python
-from app.engine.component.kinds import Cap
+from app.engine.capability import Cap
 
 Cap.BAR_FEED          # "market.bar_feed"     推送/回放 K 线
 Cap.SNAPSHOT_QUOTE    # "market.quote"        最新快照行情
@@ -118,7 +118,7 @@ Cap.NEWS_FEED         # "news.feed"           新闻采集与分析
 
 ## 四、服务注册表与依赖注入
 
-`app/engine/component/registry.py` 的 `ServiceRegistry` 是这一层的核心。
+`app/engine/registry.py` 的 `ServiceRegistry` 是这一层的核心。
 引擎在 `BaseQuantEngine.__init__` 里持有一份：`engine.services`。
 
 ### 4.1 对外接口
@@ -223,24 +223,63 @@ KIND_LAYER = {
 
 ## 六、目录与文件
 
+> **2026-10 目录重构后**，组件按「容器 / 运行时 / 模块」三层归位。
+> 引擎本体被收窄成纯容器，业务实现全部搬去了 `app/modules/`，
+> 调度与 жертв作业搬去了 `app/runtime/`。详见 [STRUCTURE.md](STRUCTURE.md)。
+
 ```
-app/engine/component/
-├── base.py        IBaseComponent：生命周期 + 进度 + 事件订阅（不新增角色语义）
-├── kinds.py       ★ 四种组件基类 + ComponentKind + KIND_LAYER + Cap + RestartPolicy
-├── registry.py    ★ ServiceRegistry：能力登记 / 别名 / 拓扑排序 / 依赖注入
-├── service/       ★ 服务层（不消费别人输出、只提供能力的都在这里）
-│   ├── market.py       MarketService
-│   ├── collection.py   CollectionService（K线 + 日频截面 + 完整性 三合一）
-│   ├── trading.py      TradingService（券商网关 + 交易落库 二合一）
-│   ├── risk.py         RiskService（全局风控闸门 + 一键熔断）
-│   └── news.py         NewsService
-├── strategy.py    StrategyComponent
-├── worker.py      WorkerComponent
-└── scheduler.py   SchedulerComponent（任务队列 + 周期定时器 二合一）
+app/engine/                     ← 容器层：只管生命周期、装配、依赖
+├── engine.py       BaseQuantEngine / IQuantEngine（原 base.py）
+├── builder.py      build_engine：配置 → 组件的唯一装配入口
+├── context.py      EngineContext / EngineStatus（原 settings.py）
+├── component.py    IBaseComponent：生命周期 + 进度 + 事件订阅（原 component/base.py）
+├── capability.py   ★ 四种角色基类 + ComponentKind + KIND_LAYER + Cap（原 component/kinds.py）
+├── registry.py     ★ ServiceRegistry：别名 / 拓扑排序 / 依赖注入（原 component/registry.py）
+├── service.py      Twisted Service 包装
+├── service_runner.py  常驻进程入口
+├── daemon.py       PID / 进程管控
+└── hub/            多进程协作（一个 hub 拉起 N 个独立引擎进程）
 ```
 
-`service/__init__.py` 的 docstring 就是这张图加唯一判定标准，
-改目录前先看它。
+```text
+业务实现已归位到这里（不再是 engine 的子目录）
+─────────────────────────────────────────────
+app/runtime/        调度与执行，不含业务语义
+├── scheduler.py    SchedulerComponent（原 component/scheduler.py）
+├── executor.py     WorkerComponent（原 component/worker.py）
+├── event_bus.py    EventBus / StandardEvents（原 engine/event.py）
+├── task.py         ITask / TaskStatus（原 engine/task.py）
+├── tasking/        TaskRuntime / TaskSpec / QuantTask（原 engine/tasking/）
+└── bus/            FileBus 跨进程事件总线（原 engine/bus/）
+
+app/modules/        业务能力层
+├── market/         MarketService
+├── collection/     CollectionService（K线 + 日频截面 + 完整性 三合一）
+│                   spec.py / schedule.py / integrity.py（原 engine/collect/、integrity.py）
+├── trading/        TradingService + live_broker.py
+├── risk/           RiskService + 闸门链
+├── portfolio/      PortfolioService + Reservation
+├── news/           NewsService + NewsCenter
+├── strategy/       StrategyComponent + 策略注册表
+├── factor/         因子 / 指标 / 挖掘（原 feature/）
+├── universe/       股票池 + 打分排序（原 alpha/）
+└── backtest/       回测引擎（原 research/）
+```
+
+重构前后同一个类的路径对照：
+
+| 类 | 旧路径 | 新路径 |
+|---|---|---|
+| `MarketService` | `app.engine.component.service.market` | `app.modules.market.service` |
+| `CollectionService` | `app.engine.component.service.collection` | `app.modules.collection.service` |
+| `TradingService` | `app.engine.component.service.trading` | `app.modules.trading.service` |
+| `RiskService` | `app.engine.component.service.risk` | `app.modules.risk.service` |
+| `PortfolioService` | `app.engine.component.service.portfolio` | `app.modules.portfolio.service` |
+| `NewsService` | `app.engine.component.service.news` | `app.modules.news.service` |
+| `StrategyComponent` | `app.engine.component.strategy` | `app.modules.strategy.component` |
+| `SchedulerComponent` | `app.engine.component.scheduler` | `app.runtime.scheduler` |
+| `WorkerComponent` | `app.engine.component.worker` | `app.runtime.executor` |
+| `IBaseComponent` | `app.engine.component.base` | `app.engine.component` |
 
 ---
 
@@ -409,7 +448,7 @@ d.addErrback(...)                            # 槽位满时这里会收到错误
 槽位满时返回的是**已失败的 Deferred**——显式的"现在忙"，
 而不是把请求悄悄排队、让用户以为它在跑。
 
-`app/engine/control.py` 的 `_submit_job()` 统一走这里，
+`app/control/control_plane.py` 的 `_submit_job()` 统一走这里，
 没有工作单元时才退回线程池。
 
 ---
@@ -558,14 +597,19 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 **加一个服务**（比如"因子服务"）：
 
 ```
-1. 在 app/engine/component/service/ 下新建，继承 ServiceComponent
+1. 在 app/modules/<新模块>/service.py 下新建，继承 ServiceComponent
+   （ServiceComponent 本身在 app/engine/capability.py）
 2. 声明 name / provides（用 Cap 常量）/ depends_on / restart_policy
 3. 需要别人的能力时用 self.need("xxx")（取不到即抛）或 self.optional("xxx")
 4. 在 builder.py 的服务层注册（注册位置不再影响启停顺序）
 ```
 
-**加一个策略**：继承 `StrategyComponent`，填 `required_services`
-（缺一个就起不来，这是刻意的），实现 `on_bar()`。
+> 判定放哪：`engine/` 只放**容器与契约**，`runtime/` 只放**怎么跑**，
+> 剩下的业务一律进 `modules/`。如果一个东西既不提供业务能力、
+> 也不决定执行节拍，它多半属于 `app/common/` 或 `app/domain/`。
+
+**加一个策略**：继承 `StrategyComponent`（在 `app/modules/strategy/component.py`），
+填 `required_services`（缺一个就起不来，这是刻意的），实现 `on_bar()`。
 
 **加一个定时任务**：不要新建组件。用
 `engine.get_component("scheduler").start_timer(interval, event_name)`。
@@ -603,7 +647,7 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 | `EngineApp` 顶层容器：装配/注册/生命周期/优雅关闭 | `BaseQuantEngine` + `builder.build_engine()` | ✅ |
 | `EngineScheduler` 调度中枢：定时 + 事件触发 | `SchedulerComponent`（定时器 + 优先级队列合并为一个） | ✅ |
 | `registry.py` 只是简单字典 | `ServiceRegistry`：能力登记 + 别名 + 拓扑排序 + 注入。**比建议更进一步** | ✅ |
-| Scheduler 管调度，EventBus 管分发，两者不混 | `app/engine/event.py` 的 `EventBus` 与调度器完全独立 | ✅ |
+| Scheduler 管调度，EventBus 管分发，两者不混 | `app/runtime/event_bus.py` 的 `EventBus` 与调度器完全独立 | ✅ |
 
 ### 14.2 Component 层
 
@@ -615,12 +659,12 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 | `RiskComponent` | `RiskService`（`risk.gate` 全局闸门 + 一键熔断） | ✅ |
 | `TradingComponent` | `TradingService`（券商网关 + 落库二单元） | ✅ |
 | `PortfolioComponent` | `PortfolioService`（账户聚合 + 额度预留） | ✅ |
-| `BacktestComponent` | `app/research/`：由面板/CLI 直接调函数，**不是引擎组件** | ❌ |
-| 共享基础设施：EventBus | `app/engine/event.py` | ✅ |
+| `BacktestComponent` | `app/modules/backtest/`：由面板/CLI 直接调函数，**不是引擎组件** | ❌ |
+| 共享基础设施：EventBus | `app/runtime/event_bus.py` | ✅ |
 | TaskQueue / Worker（并发与积压控制） | `WorkerComponent`（有槽位上限） | ✅ |
-| Provider / Broker Registry | `app/datasource` 数据源注册表 + `app/execution` 网关注册表 | ✅ |
+| Provider / Broker Registry | `app/providers/market` 数据源注册表 + `app/providers/broker` 网关注册表 | ✅ |
 | Observability（日志/指标/健康检查/告警） | `app/monitoring`（面板 + 快照 + API） | ✅ |
-| Persistence（行情库 / Raw 原始 / 交易记录） | `app/storage`（行情 + 交易审计 + 原始归档） | ✅ |
+| Persistence（行情库 / Raw 原始 / 交易记录） | `app/data`（行情 + 交易审计 + 原始归档） | ✅ |
 
 ### 14.3 三条核心业务链路
 
@@ -639,7 +683,7 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 标准化 → 质量检查 → 入库 → 更新任务状态）：
 
 `CollectionService` 三单元已覆盖"抓 + 质量检查 + 入库"，增量计划与数据源
-路由分别在 `app/engine/collect` 与 `app/datasource`。
+路由分别在 `app/modules/collection` 与 `app/providers/market`。
 **任务由调度器启动**这一点是 ✅，但下面这条不是：
 
 | 建议 | 现状 |
@@ -657,7 +701,7 @@ engine.snapshot()["components"][n]["kind_label"]  # "服务" / "策略" / …
 | 类别 | 建议的例子 | 本项目 |
 |---|---|---|
 | 常驻 | EventBus、实时行情连接、回报监听 | `EventBus`、`MarketService`、`TradingService` 的回报轮询、`CollectionService` 的定时器 |
-| 任务驱动 | 历史K线采集、每日结算、定期财务更新、回测 | `CollectionService` 的 K线/截面单元、回测作业（`app/research`，非组件） |
+| 任务驱动 | 历史K线采集、每日结算、定期财务更新、回测 | `CollectionService` 的 K线/截面单元、回测作业（`app/modules/backtest`，非组件） |
 | 事件驱动 | 行情→策略、信号→风控、通过→交易、成交→持仓 | `BAR_RECEIVED` → `on_bar` → 风控 → 预留 → 报单 → `ORDER_FILLED` → 落库 |
 
 三条链路都已经按这个分类跑着，只是"任务驱动"那一类还没接交易日历。
@@ -700,7 +744,7 @@ app/engine/component/
 |---|---|---|
 | 一 | 引擎骨架：`EngineApp`、`IBaseComponent`、注册、生命周期、简单 Scheduler | ✅ |
 | 二 | 数据闭环：采集组件、数据源适配器、质量检查、持久化 | ✅ |
-| 三 | 回测闭环：接入 Backtrader 作**回测执行器** | ✅（`app/research` 用 `bt.Cerebro` 当执行器，策略本身是自研 `IBaseStrategy` 桥接进去的，正是建议里说的用法） |
+| 三 | 回测闭环：接入 Backtrader 作**回测执行器** | ✅（`app/modules/backtest` 用 `bt.Cerebro` 当执行器，策略本身是自研 `IBaseStrategy` 桥接进去的，正是建议里说的用法） |
 | 四 | 实盘能力：实时行情、风控、交易、账户同步、故障恢复、告警 | ✅（账户级聚合与额度预留即本次补齐的部分） |
 
 ### 14.7 仍未做的三件事（按优先级）

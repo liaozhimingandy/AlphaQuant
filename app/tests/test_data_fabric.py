@@ -24,11 +24,11 @@ from typing import Optional
 
 import pandas as pd
 
-from app.datasource.model.enums import AdjustType, Frequency
-from app.datasource.model.fundflow import FundFlowRow
-from app.datasource.model.kline import KLINE_COLUMNS, Kline, KlineRequest
-from app.datasource.model.rank import RankKind, RankRow
-from app.datasource.provider.base import (
+from app.providers.market.model.enums import AdjustType, Frequency
+from app.providers.market.model.fundflow import FundFlowRow
+from app.providers.market.model.kline import KLINE_COLUMNS, Kline, KlineRequest
+from app.providers.market.model.rank import RankKind, RankRow
+from app.providers.market.provider.base import (
     DataCapability,
     DataProvider,
     ProviderError,
@@ -38,12 +38,12 @@ from app.datasource.provider.base import (
     capability,
     classify,
 )
-from app.datasource.routing.config import ProviderConfig
-from app.datasource.provider.health import CircuitBreaker, HealthBook, ProviderState
-from app.datasource.routing.quality import check, check_kline, check_rank
-from app.datasource.provider.registry import ProviderRegistry
-from app.datasource.routing.router import DataRouter
-from app.datasource.raw.raw_store import RawStore
+from app.providers.market.routing.config import ProviderConfig
+from app.providers.market.provider.health import CircuitBreaker, HealthBook, ProviderState
+from app.providers.market.routing.quality import check, check_kline, check_rank
+from app.providers.market.provider.registry import ProviderRegistry
+from app.providers.market.routing.router import DataRouter
+from app.providers.market.raw.raw_store import RawStore
 
 
 def _good_kline(rows: int = 2) -> pd.DataFrame:
@@ -172,11 +172,11 @@ class TestErrorClassification(unittest.TestCase):
         self._t(RuntimeError("TUSHARE token 无效"), ProviderErrorType.AUTH_ERROR)
 
     def test_no_data_is_not_a_fault(self):
-        from app.datasource.compat.registry import DataUnavailable
+        from app.providers.market.compat.registry import DataUnavailable
 
         self._t(DataUnavailable("停牌，未返回数据"), ProviderErrorType.NO_DATA)
         self.assertNotIn(ProviderErrorType.NO_DATA,
-                         __import__("app.datasource.provider.base",
+                         __import__("app.providers.market.provider.base",
                                     fromlist=["PENALIZE"]).PENALIZE)
 
     def test_parse_error_not_retried(self):
@@ -425,7 +425,7 @@ class TestRouter(unittest.TestCase):
     def test_no_data_does_not_penalize(self):
         reg = self._reg()
         p = reg.provider("flaky")
-        from app.datasource.compat.registry import DataUnavailable
+        from app.providers.market.compat.registry import DataUnavailable
 
         def no_data(**kw):
             raise DataUnavailable("停牌")

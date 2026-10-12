@@ -448,7 +448,7 @@ config/services.json
                          └─ 零依赖、可审计、进程崩了消息也不丢
 ```
 
-跨进程通信用**文件消息总线**（`app/engine/bus/`）：发布者 append JSONL，订阅者按
+跨进程通信用**文件消息总线**（`app/runtime/bus/`）：发布者 append JSONL，订阅者按
 byte offset 增量读，进度落盘所以进程重启能接着读。语义是「至少一次」，
 重复消费由下游幂等兜住（新闻去重、bar_count）。
 
@@ -633,7 +633,7 @@ python main.py providers --capability hot_rank
 同样是涨 5%，**主力持续净流入**和**散户情绪拉抬**后续的持续性完全不是一回事。
 K线只告诉你价格怎么走的，资金流告诉你谁在推动它。
 
-数据链路：`akshare 日频截面` → `app/datasource/service/facade.py`（封装+降级）→ SQLite
+数据链路：`akshare 日频截面` → `app/providers/market/service/facade.py`（封装+降级）→ SQLite
 → `FeatureProvider`（注入因子上下文，TTL 缓存）→ `Factor` → `ScoreEngine` → `StockPool`。
 
 **新增的因子**（都可直接在规则/策略里引用）：
@@ -1027,7 +1027,7 @@ python main.py ctl component disable news_service
 | **加一个数据源** | [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md) |
 | **加因子 / 策略 / 风控 / 组件 / API** | [`docs/EXTENDING.md`](docs/EXTENDING.md) |
 | **查某个配置项是什么意思** | [`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md) |
-| **目录逐层取舍 + 新旧路径对照** | [`docs/STRUCTURE.md`](docs/STRUCTURE.md) |
+| **改某个东西去哪个文件** | [`docs/STRUCTURE.md`](docs/STRUCTURE.md)（五层边界 + 新旧路径对照） |
 | **数据校验 / 补全服务** | [`docs/DATA_INTEGRITY.md`](docs/DATA_INTEGRITY.md) |
 
 **第一次读建议**：README（跑起来）→ `RUNTIME.md`（知道它怎么转）
@@ -1073,55 +1073,73 @@ per-task 的，以前没人能回答这个问题），以及在报单前把预�
 
 > 完整说明见 [docs/STRUCTURE.md](docs/STRUCTURE.md)（含新旧路径对照表）。
 
-按数据流向分层，**每层只依赖它下面的层**：
+按**五层边界**分层（Engine → Runtime → Modules → Account → Provider/Data），
+每层只依赖它下面的层：
 
 ```
 app/
-├── common/                 L0 配置 / 日志 / JSON（零业务依赖）
-├── domain/                 L1 领域模型：Bar/Order/Signal/Position、交易日历、代码标准化
+├── domain/                 共享内核：Bar/Order/Signal/Position、交易日历、代码标准化
+├── common/                 配置 / 日志 / JSON（零业务依赖）
 │
-├── datasource/             L2 数据源全链路（详见 docs/DATA_FABRIC.md）
-│   ├── model/               ★ Canonical Model：Kline / RankRow / FundFlowRow + Request
-│   ├── transport/           统一 HTTP：UA/Referer、代理→直连回退、域名健康
-│   ├── provider/            ★ Provider + Capability + 能力级熔断 + 注册表
-│   ├── adapters/            ★ Adapter：外部格式 → 标准模型（8 个源）
-│   ├── routing/             ★ Router（四层决策）+ 质量校验 + providers.json
-│   ├── service/             ★ DataService —— 对上层的唯一出口
-│   ├── raw/                 Raw/Bronze：原始响应存档，供审计与重放
-│   └── compat/              兼容期保留的旧注册表，逐步下线
+├── engine/                 ── 容器层：只管生命周期与装配 ──
+│   ├── engine.py           BaseQuantEngine
+│   ├── builder.py          配置 → 组件的唯一装配入口
+│   ├── component.py        IBaseComponent 契约
+│   ├── capability.py       Cap 能力常量 + 四种组件角色
+│   ├── registry.py         ServiceRegistry 依赖解析
+│   └── hub/                多进程编排（一个 hub 拉起 N 个引擎进程）
 │
-├── storage/                L3 engine.py(会话) / schema.py(ORM) / repo/(四个仓储)
-├── feature/                L4 指标(向量) → 因子(标量) → mining(挖掘)
-├── alpha/                  L5 score.py(多维打分) + pool/(候选池)
+├── runtime/                ── 运行时层：怎么跑，不含业务 ──
+│   ├── scheduler.py        SchedulerComponent（节拍）
+│   ├── executor.py         WorkerComponent（并发槽位）
+│   ├── event_bus.py        EventBus / StandardEvents
+│   ├── tasking/            TaskRuntime / TaskSpec / QuantTask
+│   └── bus/                FileBus 跨进程事件总线
 │
-├── strategy/               L6 策略本体 + rule/(规则 DSL)
-├── risk/                   L6 风控闸门链
-├── portfolio/              L6 账户 / 持仓 / 仓位
-├── execution/              L7 撮合网关 / 券商接入
+├── modules/                ── 业务模块层：跑什么 ──
+│   ├── market/             实时行情 → 标准 Bar
+│   ├── collection/         采集 / 清洗 / 落库 / 完整性核验
+│   ├── universe/           全市场 → 股票池 → 候选股 + 打分
+│   ├── factor/             指标 → 因子 → mining 挖掘
+│   ├── strategy/           策略本体 + rule/(规则 DSL)
+│   ├── risk/               风控闸门链
+│   ├── portfolio/          跨任务额度预留与组合视图
+│   ├── trading/            订单生命周期 → 网关 → 成交
+│   ├── news/               舆情：采集 → 去重 → 分析
+│   └── backtest/           回测 runner/result/report + strategies/
 │
-├── engine/                 L8 运行时
-│   ├── component/          采集/行情/新闻/策略/数据校验/实盘网关等组件
-│   ├── tasking/            单进程内多任务容器
-│   ├── collect/            采集调度
-│   ├── bus/                跨进程文件总线
-│   └── hub/                多进程编排
+├── account/                资金 / 持仓账本 / 仓位 sizing
+├── data/                   SQLite engine / schema(ORM) / repo(四个仓储)
+├── providers/
+│   ├── market/             行情数据源全链路（详见 docs/DATA_FABRIC.md）
+│   │   ├── model/          Canonical Model：Kline / RankRow / FundFlowRow
+│   │   ├── transport/      统一 HTTP：UA/Referer、代理→直连回退、域名健康
+│   │   ├── provider/       Provider + Capability + 能力级熔断
+│   │   ├── adapters/       外部格式 → 标准模型（8 个源）
+│   │   ├── routing/        Router 四层决策 + providers.json
+│   │   ├── service/        facade：对上层的唯一出口
+│   │   ├── raw/            Raw/Bronze 原始响应存档
+│   │   └── compat/         兼容期保留的旧注册表，逐步下线
+│   └── broker/             券商网关 / 端点配置
 │
-├── news/                   舆情：采集 → 去重 → 分析
-├── research/               回测：runner/result/report + adapter.py(策略桥)
-│   └── strategies/         legacy backtrader 实现（对照基线，勿新增）
-├── monitoring/             监控：server.py(组件核心) + resource.py(HTTP)
+├── control/                ControlCenter：任务增删、组件启停、采集遥控
+├── monitoring/             面板 server.py + resource.py(HTTP)
 │   ├── api/                业务视图 mixin：overview/live/brokers/factors/pool/…
 │   └── static/             dashboard.html（面板前端，自包含单文件）
-├── cli/                    命令行包：base + data/strategy/engine/control/
-│                           research/pool/hub/broker 八个 *_cmds.py
+├── cli/                    命令行包：data/strategy/engine/control/
+│                           research/pool/hub/broker 八组 *_cmds.py
 └── tests/                  测试
+```
 
 docs/                       文档
+  STRUCTURE.md              目录结构与五层边界（**改东西去哪找**）
   ARCHITECTURE.md           运行时数据流（推荐深入阅读入口）
-  ENGINE_ARCHITECTURE.md    引擎四类组件与服务化（服务/策略/工作单元/调度）
-  STRUCTURE.md              目录重构说明（含新旧路径对照表）
-  DATA_FABRIC.md            L2 数据源层设计
+  RUNTIME.md                启动流程、三条链路、线程模型
+  ENGINE_ARCHITECTURE.md    引擎四类组件与能力注入
+  DATA_FABRIC.md            数据源层设计
   DATA_SOURCES.md           如何新增数据源
+  EXTENDING.md              加因子/策略/风控/组件/API 与已知坑
+  CONFIG_REFERENCE.md       配置项速查
   DATA_INTEGRITY.md         数据完整性校验与自动补全
 strategies/                 用户自定义策略（自动发现，回测与实盘通用）
 config/

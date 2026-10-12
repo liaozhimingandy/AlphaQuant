@@ -27,9 +27,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.calendar import TradeCalendar
-from app.storage.engine import apply_sqlite_pragmas
-from app.storage.schema import Base
-from app.storage.repo import stock_repo as stock_repo
+from app.data.engine import apply_sqlite_pragmas
+from app.data.schema import Base
+from app.data.repo import stock_repo as stock_repo
 from app.tests.helpers import reap_async
 
 
@@ -82,7 +82,7 @@ class TestGapDetection(_DbMixin, unittest.TestCase):
     """缺哪几天，能不能算对。"""
 
     def _checker(self, **kw):
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         return DataIntegrityChecker(db=None, **kw)
 
@@ -170,7 +170,7 @@ class TestAnomalyDetection(_DbMixin, unittest.TestCase):
                 "volume": 1.0, "amount": 10.0,
             }], commit=False)
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=7,
                                        auto_repair=False)
@@ -189,7 +189,7 @@ class TestAnomalyDetection(_DbMixin, unittest.TestCase):
                 "volume": 1.0, "amount": 1.0,
             }], commit=False)
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=7,
                                        auto_repair=False)
@@ -213,11 +213,11 @@ class TestAutoRepair(_DbMixin, unittest.TestCase):
             "low": 9.9, "close": 10.05, "volume": 100.0, "amount": 1005.0,
         } for d in days])
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=30,
                                        auto_repair=True)
-        with mock.patch("app.datasource.compat.kline_sources.fetch_daily",
+        with mock.patch("app.providers.market.compat.kline_sources.fetch_daily",
                         return_value=fetched):
             rep = checker.check_symbol("000001")
 
@@ -241,11 +241,11 @@ class TestAutoRepair(_DbMixin, unittest.TestCase):
             "low": 9.9, "close": 10.05, "volume": 100.0, "amount": 1005.0,
         } for d in (outside, days[1])])
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=30,
                                        auto_repair=True)
-        with mock.patch("app.datasource.compat.kline_sources.fetch_daily",
+        with mock.patch("app.providers.market.compat.kline_sources.fetch_daily",
                         return_value=fetched):
             checker.check_symbol("000003")
 
@@ -263,11 +263,11 @@ class TestAutoRepair(_DbMixin, unittest.TestCase):
         with stock_repo.session_scope(None) as db:
             _seed(db, "000004", [days[0]])
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=30,
                                        auto_repair=True)
-        with mock.patch("app.datasource.compat.kline_sources.fetch_daily",
+        with mock.patch("app.providers.market.compat.kline_sources.fetch_daily",
                         side_effect=RuntimeError("所有源都挂了")):
             rep = checker.check_symbol("000004")
         self.assertIn("补全失败", rep.error)
@@ -280,11 +280,11 @@ class TestAutoRepair(_DbMixin, unittest.TestCase):
         with stock_repo.session_scope(None) as db:
             _seed(db, "000005", [days[0]])
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=7,
                                        auto_repair=False)
-        with mock.patch("app.datasource.compat.kline_sources.fetch_daily",
+        with mock.patch("app.providers.market.compat.kline_sources.fetch_daily",
                         side_effect=AssertionError("不该联网")):
             rep = checker.check_symbol("000005")
         self.assertEqual(rep.repaired, 0)
@@ -302,7 +302,7 @@ class TestScan(_DbMixin, unittest.TestCase):
             _seed(db, "000001", days)
             _seed(db, "000002", days[:-1])     # 少一天
 
-        from app.engine.integrity import DataIntegrityChecker, summarize
+        from app.modules.collection.integrity import DataIntegrityChecker, summarize
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=10,
                                        auto_repair=False, max_symbols=10)
@@ -319,7 +319,7 @@ class TestScan(_DbMixin, unittest.TestCase):
             for sym in ("000001", "000002", "000003"):
                 _seed(db, sym, days)
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=3,
                                        auto_repair=False, max_symbols=2)
@@ -333,7 +333,7 @@ class TestScan(_DbMixin, unittest.TestCase):
             _seed(db, "000001", days)
             _seed(db, "000002", days)
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=3,
                                        auto_repair=False)
@@ -354,11 +354,11 @@ class TestScan(_DbMixin, unittest.TestCase):
             "low": 0.9, "close": 1.0, "volume": 1.0, "amount": 1.0,
         }])
 
-        from app.engine.integrity import DataIntegrityChecker
+        from app.modules.collection.integrity import DataIntegrityChecker
 
         checker = DataIntegrityChecker(calendar=cal, lookback_days=10,
                                        auto_repair=True, max_repair=1)
-        with mock.patch("app.datasource.compat.kline_sources.fetch_daily",
+        with mock.patch("app.providers.market.compat.kline_sources.fetch_daily",
                         return_value=fetched) as fn:
             checker.scan()
         self.assertEqual(fn.call_count, 1)
@@ -383,7 +383,7 @@ class TestDataGuardComponent(unittest.TestCase):
     }
 
     def _comp(self, **kw):
-        from app.engine.component import CollectionService
+        from app.modules.collection.service import CollectionService
 
         for flat, namespaced in self._GUARD_KWARGS.items():
             if flat in kw:
@@ -410,7 +410,7 @@ class TestDataGuardComponent(unittest.TestCase):
         """
         from twisted.internet import defer
 
-        import app.engine.component.service.collection as C
+        import app.modules.collection.service as C
 
         comp = self._comp(enabled=True, lookback_days=3, auto_repair=False)
         fake_report = mock.MagicMock()
@@ -420,7 +420,7 @@ class TestDataGuardComponent(unittest.TestCase):
         fake_report.anomaly_total = 0
         fake_report.failed = []
 
-        with mock.patch("app.engine.integrity.DataIntegrityChecker.scan",
+        with mock.patch("app.modules.collection.integrity.DataIntegrityChecker.scan",
                         return_value=fake_report), \
              mock.patch.object(C.threads, "deferToThread",
                                side_effect=lambda fn: defer.succeed(fn())):
@@ -443,7 +443,7 @@ class TestDataGuardComponent(unittest.TestCase):
         self.assertIn("尚未体检", detail)
 
     def test_health_check_reports_gaps(self):
-        from app.engine.integrity import IntegrityReport
+        from app.modules.collection.integrity import IntegrityReport
 
         comp = self._comp(enabled=True)
         comp._guard_report = IntegrityReport(missing_total=3, checked=2)

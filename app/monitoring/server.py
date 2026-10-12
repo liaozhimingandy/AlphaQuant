@@ -31,8 +31,8 @@ from twisted.web.server import Site
 
 from app.common.config import settings
 from app.common.logging import logger
-from app.engine.component.base import IBaseComponent
-from app.engine.event import StandardEvents
+from app.engine.component import IBaseComponent
+from app.runtime.event_bus import StandardEvents
 from app.monitoring.api.backtest import get_backtest_service
 from app.monitoring.snapshot import SnapshotStore, content_fingerprint
 

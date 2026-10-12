@@ -10,13 +10,13 @@ from __future__ import annotations
 import unittest
 
 from app.domain.types import NewsItem
-from app.news import (
+from app.modules.news import (
     KeywordAnalyzer,
     LLMAnalyzer,
     MockNewsSource,
     NewsCenter,
 )
-from app.news.source import extract_symbols, parse_feed, parse_published
+from app.modules.news.source import extract_symbols, parse_feed, parse_published
 
 RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>

@@ -11,13 +11,13 @@ import math
 import unittest
 from datetime import datetime, timedelta
 
-from app.feature import FactorContext, create_factor, list_factors
-from app.feature.indicator import create_indicator, list_indicators
+from app.modules.factor import FactorContext, create_factor, list_factors
+from app.modules.factor.indicator import create_indicator, list_indicators
 from app.domain import Bar, BarSeries
-from app.strategy.rule import AllRule, AnyRule, NotRule, build_rule
-from app.strategy.rule.builtin import AlwaysRule, NeverRule, ThresholdRule
-from app.strategy import build_strategy, list_strategies
-from app.strategy.state import DecisionState
+from app.modules.strategy.rule import AllRule, AnyRule, NotRule, build_rule
+from app.modules.strategy.rule.builtin import AlwaysRule, NeverRule, ThresholdRule
+from app.modules.strategy import build_strategy, list_strategies
+from app.modules.strategy.state import DecisionState
 
 
 def make_series(n: int = 120, start: float = 10.0, slope: float = 0.08) -> BarSeries:

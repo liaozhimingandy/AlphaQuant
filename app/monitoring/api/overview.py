@@ -11,7 +11,7 @@ from typing import Any, Deque, Dict, List, Optional
 from app.common.config import settings
 from app.common.jsonio import dumps, tail_lines
 from app.common.logging import logger
-from app.storage.repo.trade_repo import TradingRepository, get_repository
+from app.data.repo.trade_repo import TradingRepository, get_repository
 
 # 原文件缺失、按实际引用补齐：
 from app.common.jsonio import json_safe
@@ -130,19 +130,19 @@ class OverviewViewsMixin:
         也把**接入点**与**回测默认参数**一并返回：面板要能显示"我现在连的是哪个账户"，
         以及"表单里没填的字段默认是什么"。
         """
-        from app.research.defaults import BacktestDefaults
-        from app.research.registry import (
+        from app.modules.backtest.defaults import BacktestDefaults
+        from app.modules.backtest.registry import (
             list_strategies as bt_strategies,
             user_strategy_dir,
             user_strategy_names,
         )
-        from app.execution.endpoints import describe_endpoints
-        from app.execution.gateway import gateway_signature, list_gateways
-        from app.feature import list_factors
-        from app.feature.indicator.registry import describe_indicator, list_indicators
-        from app.strategy.rule import RULE_TYPES
-        from app.risk import list_risks
-        from app.strategy import list_strategies as live_strategies
+        from app.providers.broker.endpoints import describe_endpoints
+        from app.providers.broker.gateway import gateway_signature, list_gateways
+        from app.modules.factor import list_factors
+        from app.modules.factor.indicator.registry import describe_indicator, list_indicators
+        from app.modules.strategy.rule import RULE_TYPES
+        from app.modules.risk import list_risks
+        from app.modules.strategy import list_strategies as live_strategies
 
         def _safe(fn, default):
             try:

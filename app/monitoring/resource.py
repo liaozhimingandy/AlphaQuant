@@ -19,7 +19,7 @@ from app.common.jsonio import dumps, tail_lines
 from app.common.logging import logger
 from app.monitoring.dashboard import dashboard_html
 from app.monitoring.snapshot import SnapshotStore, content_fingerprint
-from app.storage.repo.trade_repo import TradingRepository, get_repository
+from app.data.repo.trade_repo import TradingRepository, get_repository
 
 
 class MonitorResource(Resource):
@@ -123,9 +123,9 @@ class MonitorResource(Resource):
             return self._json(request, c.control.data_guard_status())
         if head == "providers":
             # 新采集层：能力 / 路由 / 健康分 / 熔断（"谁在、能干什么、现在健康吗"）
-            import app.datasource.service.facade  # noqa: F401  触发数据源装配
+            import app.providers.market.service.facade  # noqa: F401  触发数据源装配
 
-            from app.datasource.provider import PROVIDERS
+            from app.providers.market.provider import PROVIDERS
 
             return self._json(request, {
                 "routes": PROVIDERS.snapshot(),
@@ -135,14 +135,14 @@ class MonitorResource(Resource):
             })
         if head == "sources":
             # 数据源权重与健康度（排障"为什么先试这个源"时看这里）
-            import app.datasource.service.facade  # noqa: F401  确保内置源已注册
+            import app.providers.market.service.facade  # noqa: F401  确保内置源已注册
 
-            from app.datasource.compat.registry import REGISTRY
+            from app.providers.market.compat.registry import REGISTRY
 
             # hosts 是"网络层实测的域名健康度"：多个源常共用同一域名
             # （push2 一挂，三个人气榜源一起挂），只看源列表会误判成源不行。
             # 旧路径 ``app.data`` 已随数据层重构迁走，网络层现在在 transport 下
-            from app.datasource.transport import net
+            from app.providers.market.transport import net
 
             return self._json(request, {
                 "health": REGISTRY.health(),
@@ -487,12 +487,12 @@ class MonitorResource(Resource):
 
         # POST /api/sources/reset —— 权重与熔断恢复默认（修完环境问题用）
         if seg[1] == "sources" and len(seg) >= 3 and seg[2] == "reset":
-            from app.datasource.compat.registry import REGISTRY
+            from app.providers.market.compat.registry import REGISTRY
 
             REGISTRY.reset()
             # 新链路的健康分/熔断一起清 —— 修完代理端口要能让所有源重新公平竞争
             try:
-                from app.datasource.provider import PROVIDERS
+                from app.providers.market.provider import PROVIDERS
 
                 PROVIDERS.reset()
             except Exception:

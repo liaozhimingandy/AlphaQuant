@@ -21,7 +21,7 @@ from unittest import mock
 
 import pandas as pd
 
-from app.datasource.compat.registry import (
+from app.providers.market.compat.registry import (
     DEFAULT_WEIGHT,
     REGISTRY,
     DataUnavailable,
@@ -63,7 +63,7 @@ class TestWeightBasics(unittest.TestCase):
         只要有一个源被写死了别的初值，排序的初始状态就不再等于
         DATA_SOURCE_PRIORITY，配置就失去意义了。
         """
-        import app.datasource.service.facade  # noqa: F401  触发注册
+        import app.providers.market.service.facade  # noqa: F401  触发注册
 
         for spec in REGISTRY._specs.values():
             self.assertEqual(spec.base_weight, DEFAULT_WEIGHT,
@@ -71,7 +71,7 @@ class TestWeightBasics(unittest.TestCase):
 
     def test_new_sources_registered_for_daily(self):
         """mootdx 与 a-stock-data 必须注册在 daily 能力上。"""
-        import app.datasource.service.facade  # noqa: F401  触发注册
+        import app.providers.market.service.facade  # noqa: F401  触发注册
 
         names = [s.name for s in REGISTRY.sources_for("daily")]
         self.assertIn("mootdx", names)

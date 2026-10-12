@@ -25,8 +25,8 @@ from unittest import mock
 
 import pandas as pd
 
-from app.datasource.compat.kline_base import DAILY_COLUMNS, normalize_daily
-from app.datasource.compat.registry import DataUnavailable, SourceError
+from app.providers.market.compat.kline_base import DAILY_COLUMNS, normalize_daily
+from app.providers.market.compat.registry import DataUnavailable, SourceError
 
 
 class TestNormalizeDaily(unittest.TestCase):
@@ -81,7 +81,7 @@ class TestMootdxAdapter(unittest.TestCase):
     """mootdx：可选依赖，未安装 → DataUnavailable；装了 → 解析正确。"""
 
     def setUp(self):
-        import app.datasource.compat.mootdx_source as M
+        import app.providers.market.compat.mootdx_source as M
 
         self.M = M
         M.reset_client()
@@ -144,7 +144,7 @@ class TestAStockDataAdapter(unittest.TestCase):
     """a-stock-data 行情层（腾讯 K线）。"""
 
     def setUp(self):
-        import app.datasource.compat.astockdata_source as A
+        import app.providers.market.compat.astockdata_source as A
 
         self.A = A
 
@@ -200,7 +200,7 @@ class TestAStockDataAdapter(unittest.TestCase):
         让它返回一个"内容是 HTML 拦截页"的响应，json() 必然失败，
         传输层把它翻译成 NetworkError，适配器再翻译成 SourceError。
         """
-        from app.datasource.transport import net
+        from app.providers.market.transport import net
 
         resp = mock.MagicMock()
         resp.raise_for_status.return_value = None
@@ -210,7 +210,7 @@ class TestAStockDataAdapter(unittest.TestCase):
                 self.A.fetch_tx_kline("600000")
 
     def test_http_get_parses_json(self):
-        from app.datasource.transport import net
+        from app.providers.market.transport import net
 
         resp = mock.MagicMock()
         resp.raise_for_status.return_value = None
@@ -235,9 +235,9 @@ class TestDailyRouteChain(unittest.TestCase):
     """
 
     def setUp(self):
-        import app.datasource.service.facade  # noqa: F401  触发装配
-        from app.datasource.transport import net
-        from app.datasource.provider import PROVIDERS
+        import app.providers.market.service.facade  # noqa: F401  触发装配
+        from app.providers.market.transport import net
+        from app.providers.market.provider import PROVIDERS
 
         self.PROVIDERS = PROVIDERS
         # 熔断/健康分/域名健康度都是**全局状态**，用例之间会互相污染：
@@ -247,7 +247,7 @@ class TestDailyRouteChain(unittest.TestCase):
         net.reset()
 
     def test_daily_routes_registered(self):
-        from app.datasource.compat.kline_sources import daily_sources
+        from app.providers.market.compat.kline_sources import daily_sources
 
         names = daily_sources()
         self.assertIn("baostock_daily", names)
@@ -255,8 +255,8 @@ class TestDailyRouteChain(unittest.TestCase):
         self.assertIn("mootdx", names)
 
     def test_fetch_daily_switches_route_on_failure(self):
-        import app.datasource.compat.kline_sources as K
-        from app.datasource.provider.base import DataCapability, Route
+        import app.providers.market.compat.kline_sources as K
+        from app.providers.market.provider.base import DataCapability, Route
 
         def boom(**kw):
             raise RuntimeError("主源挂了: ProxyError")
@@ -282,9 +282,9 @@ class TestDailyRouteChain(unittest.TestCase):
             self.PROVIDERS._routes.update(saved)
 
     def test_fetch_daily_raises_when_all_routes_fail(self):
-        import app.datasource.compat.kline_sources as K
-        from app.datasource.provider import PROVIDERS
-        from app.datasource.provider.base import DataCapability, Route
+        import app.providers.market.compat.kline_sources as K
+        from app.providers.market.provider import PROVIDERS
+        from app.providers.market.provider.base import DataCapability, Route
 
         saved = dict(PROVIDERS._routes)
         try:
@@ -302,8 +302,8 @@ class TestDailyRouteChain(unittest.TestCase):
 
     def test_explicit_source_bypasses_chain(self):
         """指定源排障：不走排序。"""
-        import app.datasource.compat.kline_sources as K
-        from app.datasource.provider import PROVIDERS
+        import app.providers.market.compat.kline_sources as K
+        from app.providers.market.provider import PROVIDERS
 
         route = PROVIDERS.route("astockdata")
         self.assertIsNotNone(route, "astockdata 路由应已注册")

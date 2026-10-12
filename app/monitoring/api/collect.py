@@ -22,7 +22,7 @@ class CollectViewsMixin:
         而不是等下一个采集窗口。所以这里把所有类别都跑一遍。
         """
         try:
-            from app.alpha.pool import sync_category
+            from app.modules.universe.pool import sync_category
 
             syms = self._factor_symbols(symbols)
             if not syms:
@@ -34,7 +34,7 @@ class CollectViewsMixin:
 
             # 先采量价类（有行情才能算技术/表达式因子）
             try:
-                from app.storage.service import MarketDataService
+                from app.data.service import MarketDataService
 
                 rows = 0
                 for s in syms:
@@ -46,7 +46,7 @@ class CollectViewsMixin:
                 report["detail"]["daily"] = {"ok": 0, "error": str(exc)[:120]}
 
             # 再采日频截面
-            from app.alpha.pool import sync_chip, sync_fund_flow, sync_fundamentals
+            from app.modules.universe.pool import sync_chip, sync_fund_flow, sync_fundamentals
 
             for label, fn in (("fundflow", lambda: sync_fund_flow(syms)),
                               ("chip", lambda: sync_chip(syms)),
@@ -80,7 +80,7 @@ class CollectViewsMixin:
 
             # 采完必须失效特征缓存，否则界面上看到的还是旧值
             try:
-                from app.feature.features import get_provider
+                from app.modules.factor.features import get_provider
 
                 get_provider().invalidate()
             except Exception:
@@ -93,7 +93,7 @@ class CollectViewsMixin:
     def schedule_view(self) -> Dict[str, Any]:
         """采集时间窗口 + 当前处在哪个窗口。"""
         try:
-            from app.engine.collect.schedule import get_schedule
+            from app.modules.collection.schedule import get_schedule
             from app.domain.calendar import get_calendar
 
             sch = get_schedule()
@@ -111,7 +111,7 @@ class CollectViewsMixin:
 
     def schedule_save(self, body: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            from app.engine.collect.schedule import (
+            from app.modules.collection.schedule import (
                 CollectionSchedule,
                 get_schedule,
                 set_schedule,

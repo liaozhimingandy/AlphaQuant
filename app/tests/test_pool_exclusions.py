@@ -14,13 +14,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.alpha.pool import pool as pool_mod
-from app.alpha.pool.pool import (
+from app.modules.universe.pool import pool as pool_mod
+from app.modules.universe.pool.pool import (
     PoolConfig, StockPool, classify_board, apply_exclusions,
 )
-from app.storage.repo import kline_repo as R
-from app.storage.engine import SessionLocal
-from app.storage.schema import StockScore
+from app.data.repo import kline_repo as R
+from app.data.engine import SessionLocal
+from app.data.schema import StockScore
 
 
 class TestClassifyBoard(unittest.TestCase):

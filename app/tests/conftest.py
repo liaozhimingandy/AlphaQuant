@@ -35,7 +35,7 @@ _tempfile.tempdir = _PROJECT_TMP
 
 def pytest_configure(config) -> None:
     try:
-        from app.datasource.compat.registry import REGISTRY
+        from app.providers.market.compat.registry import REGISTRY
 
         REGISTRY.persist_path = None
     except Exception:  # pragma: no cover - 注册表不可用时不拦着测试

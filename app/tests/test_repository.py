@@ -11,9 +11,9 @@ from pathlib import Path
 
 from sqlalchemy.orm import sessionmaker
 
-from app.storage.engine import Base, create_sqlite_engine
-from app.storage.repo import stock_repo as stock_repo
-from app.storage.repo.stock_repo import StockRepository, session_scope
+from app.data.engine import Base, create_sqlite_engine
+from app.data.repo import stock_repo as stock_repo
+from app.data.repo.stock_repo import StockRepository, session_scope
 
 
 class RepositoryTestCase(unittest.TestCase):

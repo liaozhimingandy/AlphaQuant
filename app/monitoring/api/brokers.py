@@ -13,8 +13,8 @@ class BrokerViewsMixin:
     # ============================================================
     def endpoints_view(self) -> Dict[str, Any]:
         """接入点配置视图（凭据已由 endpoints 层脱敏）。"""
-        from app.execution.endpoints import describe_endpoints
-        from app.execution.gateway import gateway_signature, list_gateways
+        from app.providers.broker.endpoints import describe_endpoints
+        from app.providers.broker.gateway import gateway_signature, list_gateways
 
         try:
             data = describe_endpoints()
@@ -39,7 +39,7 @@ class BrokerViewsMixin:
         用途很具体：改完 brokers.json 先验一下能不能连上、账号对不对，
         别等到开了实盘才发现连错账户。
         """
-        from app.execution.endpoints import load_endpoints
+        from app.providers.broker.endpoints import load_endpoints
 
         try:
             cfg = load_endpoints()
@@ -58,7 +58,7 @@ class BrokerViewsMixin:
         if not endpoint.enabled:
             return {"ok": False, "error": f"接入点 {endpoint.id} 已禁用"}
 
-        from app.execution.gateway import create_gateway, has_gateway, list_gateways
+        from app.providers.broker.gateway import create_gateway, has_gateway, list_gateways
 
         if not has_gateway(endpoint.gateway):
             return {

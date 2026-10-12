@@ -163,7 +163,7 @@ def main() -> int:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"迷你券商已启动: http://127.0.0.1:{port}\n")
 
-    from app.execution.gateway import (
+    from app.providers.broker.gateway import (
         GatewayError,
         OrderRejected,
         OrderRequest,

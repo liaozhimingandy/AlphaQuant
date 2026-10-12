@@ -13,8 +13,8 @@ from unittest import mock
 
 import pandas as pd
 
-from app.datasource.transport import net
-from app.datasource.compat.registry import REGISTRY, SourceError, SourceRegistry
+from app.providers.market.transport import net
+from app.providers.market.compat.registry import REGISTRY, SourceError, SourceRegistry
 
 
 def _ok_df(n: int = 2) -> pd.DataFrame:
@@ -283,21 +283,21 @@ class TestEmappHotSource(unittest.TestCase):
     """人气榜必须有一个不依赖 push2 的可用源。"""
 
     def test_emapp_hot_registered_first(self):
-        import app.datasource.service.facade  # noqa: F401  触发注册
+        import app.providers.market.service.facade  # noqa: F401  触发注册
 
         names = [s.name for s in REGISTRY.sources_for("hot_rank")]
         self.assertEqual(names[0], "emapp_hot",
                          "人气榜首个源必须是实测可用的 emapp_hot，不是压在 push2 上的源")
 
     def test_emapp_hot_not_depending_on_push2(self):
-        import app.datasource.service.facade  # noqa: F401
+        import app.providers.market.service.facade  # noqa: F401
 
         spec = [s for s in REGISTRY.sources_for("hot_rank")
                 if s.name == "emapp_hot"][0]
         self.assertFalse(any("push2" in h for h in spec.hosts))
 
     def test_parse_emapp_payload(self):
-        from app.datasource.compat import hot_sources
+        from app.providers.market.compat import hot_sources
 
         body = {"data": [
             {"sc": "SH600418", "rk": 1},
@@ -307,15 +307,15 @@ class TestEmappHotSource(unittest.TestCase):
         ]}
         with mock.patch.object(hot_sources.net, "post_json", return_value=body), \
              mock.patch.object(hot_sources, "fetch_tx_quotes", return_value={}), \
-             mock.patch("app.storage.repo.kline_repo.resolve_names",
+             mock.patch("app.data.repo.kline_repo.resolve_names",
                         return_value={}):
             df = hot_sources._hot_rank_emapp(top=10)
         self.assertEqual(list(df["symbol"]), ["600418", "002475"])
         self.assertEqual(list(df["rank"]), [1, 2])
 
     def test_empty_payload_is_data_unavailable(self):
-        from app.datasource.compat import hot_sources
-        from app.datasource.compat.registry import DataUnavailable
+        from app.providers.market.compat import hot_sources
+        from app.providers.market.compat.registry import DataUnavailable
 
         with mock.patch.object(hot_sources.net, "post_json", return_value={"data": []}):
             with self.assertRaises(DataUnavailable):
@@ -323,7 +323,7 @@ class TestEmappHotSource(unittest.TestCase):
 
     def test_network_error_propagates_for_switch(self):
         """域名挂了要抛出可重试的异常，让注册表换下一个源。"""
-        from app.datasource.compat import hot_sources
+        from app.providers.market.compat import hot_sources
 
         with mock.patch.object(hot_sources.net, "post_json",
                                side_effect=net.NetworkError("域名凉了")):
@@ -331,7 +331,7 @@ class TestEmappHotSource(unittest.TestCase):
                 hot_sources._emapp_rank()
 
     def test_tx_quote_parsing(self):
-        from app.datasource.compat import hot_sources
+        from app.providers.market.compat import hot_sources
 
         text = ('v_sh600000="1~浦发银行~600000~9.54~9.70~9.70~947958~";'
                 'v_sz000001="1~平安银行~000001~11.00~10.00~10.10~123~";')
@@ -343,7 +343,7 @@ class TestEmappHotSource(unittest.TestCase):
 
     def test_tx_quote_failure_degrades_not_raise(self):
         """补不了名称可以降级，不该把已经拿到的榜单丢掉。"""
-        from app.datasource.compat import hot_sources
+        from app.providers.market.compat import hot_sources
 
         with mock.patch.object(hot_sources.net, "get_text",
                                side_effect=net.NetworkError("腾讯也挂了")):

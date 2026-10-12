@@ -7,12 +7,12 @@ import json
 import unittest
 from pathlib import Path
 
-from app.execution.endpoints import (
+from app.providers.broker.endpoints import (
     BrokerEndpoint,
     load_endpoints,
     mask_secret,
 )
-from app.execution.gateway import (
+from app.providers.broker.gateway import (
     OrderRequest,
     OrderRejected,
     SimulatedGateway,

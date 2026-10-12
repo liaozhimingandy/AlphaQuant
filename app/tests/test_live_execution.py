@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.execution.gateway import (
+from app.providers.broker.gateway import (
     AccountSnapshot,
     FillEvent,
     GatewayError,
@@ -28,18 +28,18 @@ from app.execution.gateway import (
     has_gateway,
     list_gateways,
 )
-from app.execution.live_broker import LiveBroker
+from app.modules.trading.live_broker import LiveBroker
 from app.domain.types import OrderStatus, Side
-from app.portfolio.manager import Portfolio
-from app.risk.base import RiskVerdict
-from app.risk.builtin import (
+from app.account.portfolio import Portfolio
+from app.modules.risk.base import RiskVerdict
+from app.modules.risk.builtin import (
     DailyTradeLimitRisk,
     OrderValueLimitRisk,
     PriceLimitRisk,
     SellablePositionRisk,
     TPlusOneRisk,
 )
-from app.strategy.state import DecisionState
+from app.modules.strategy.state import DecisionState
 from app.domain.types import Signal, SignalSource
 
 
@@ -274,7 +274,7 @@ class TestReconcile(unittest.TestCase):
         """有人在同一账户手工下单时，只有对账能发现。"""
         br, gw, pf = _broker()
         gw._positions["000001"] = type(gw.query_positions().get("000001") or
-                                       __import__("app.execution.gateway",
+                                       __import__("app.providers.broker.gateway",
                                                   fromlist=["PositionSnapshot"]
                                                   ).PositionSnapshot(symbol="000001"))(symbol="000001")
         gw._positions["000001"].size = 5000     # 券商侧凭空多出持仓
@@ -303,12 +303,12 @@ class TestGatewayCapitalSeeding(unittest.TestCase):
     def _component(self, gateway):
         # 券商网关原是独立的 LiveGatewayComponent，现在与落库单元一起
         # 并进 TradingService（网关那一半是它的 ``gateway`` 单元）。
-        from app.engine.component import TradingService
+        from app.modules.trading.service import TradingService
 
         return TradingService(gateway=gateway)
 
     def test_endpoint_cash_not_counted_twice(self):
-        from app.execution.gateway import SimulatedGateway
+        from app.providers.broker.gateway import SimulatedGateway
 
         # 接入点配置里的 initial_cash 只是"单独用网关"的兜底值
         gw = SimulatedGateway(initial_cash=100_000)
@@ -318,7 +318,7 @@ class TestGatewayCapitalSeeding(unittest.TestCase):
         self.assertEqual(gw._cash, 180_000)
 
     def test_same_task_attached_twice_seeds_once(self):
-        from app.execution.gateway import SimulatedGateway
+        from app.providers.broker.gateway import SimulatedGateway
 
         gw = SimulatedGateway(initial_cash=100_000)
         comp = self._component(gw)
@@ -328,7 +328,7 @@ class TestGatewayCapitalSeeding(unittest.TestCase):
 
     def test_non_simulated_gateway_untouched(self):
         """真实券商的资金以券商为准，绝不能被本地任务本金覆盖。"""
-        from app.execution.gateway import SimulatedGateway
+        from app.providers.broker.gateway import SimulatedGateway
 
         gw = SimulatedGateway(initial_cash=500_000)
         gw.name = "real_broker"

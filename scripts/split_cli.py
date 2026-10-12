@@ -83,7 +83,7 @@ HEADERS: dict[str, str] = {
 """数据面命令：建库 / 采集 / 完整性校验 / 数据源与 Provider 观测。
 
 对应链路 DataSource → Provider → Capability → Router → DataService，
-这里只做「人读得懂的呈现」，业务一律下沉到 app.datasource / app.storage。
+这里只做「人读得懂的呈现」，业务一律下沉到 app.providers.market / app.data。
 """
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ from app.common.logging import logger
 # -*- coding: utf-8 -*-
 """策略面命令：列出策略 / 生成模板 / 跑回测。
 
-回测与实盘走同一套自研 IBaseStrategy（见 app.research.adapter 的桥接），
+回测与实盘走同一套自研 IBaseStrategy（见 app.modules.backtest.adapter 的桥接），
 所以这里只有一份策略清单，不再有「回测策略」和「实盘策略」两套。
 """
 from __future__ import annotations

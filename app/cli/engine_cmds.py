@@ -32,8 +32,9 @@ from app.common.logging import logger
 @click.option("--no-auto-stop", is_flag=True, help="禁用回测模式自动停止")
 def engine_cmd(mode, symbol, idle_timeout, no_auto_stop) -> None:
     from app.engine import component
-    from app.engine.component import SchedulerComponent, WorkerComponent
-    from app.engine.base import BaseQuantEngine
+    from app.runtime.scheduler import SchedulerComponent
+    from app.runtime.executor import WorkerComponent
+    from app.engine.engine import BaseQuantEngine
     from twisted.internet import reactor
 
     config = {
@@ -201,7 +202,7 @@ def serve_cmd(config, mode, symbol, market_mode, interval, start, end, data_sour
     # 所以这里一次把三块状态都报出来 —— 以前要查三个组件。
     col = engine.get_component("collection_service")
     if col is not None:
-        from app.engine.collect.spec import humanize_frequency
+        from app.modules.collection.spec import humanize_frequency
 
         buckets: dict = {}
         for job in col.kline_spec.jobs:

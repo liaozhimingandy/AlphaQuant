@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from app.feature.expr import ExprError, evaluate, func_catalog, validate
+from app.modules.factor.expr import ExprError, evaluate, func_catalog, validate
 
 
 def _bars(close: np.ndarray, spread: float = 0.01) -> dict:
@@ -126,7 +126,7 @@ class TestFactorLibrary(unittest.TestCase):
         from pathlib import Path
 
         self.dir = Path(tempfile.mkdtemp(prefix="aq-lib-"))
-        from app.feature.library import FactorLibrary
+        from app.modules.factor.library import FactorLibrary
 
         self.lib = FactorLibrary(path=str(self.dir / "factors.json"))
 
@@ -155,13 +155,13 @@ class TestFactorLibrary(unittest.TestCase):
 
     def test_persists_to_disk(self):
         self.lib.add("persisted", "close / MA(close, 5)")
-        from app.feature.library import FactorLibrary
+        from app.modules.factor.library import FactorLibrary
 
         again = FactorLibrary(path=str(self.dir / "factors.json")).load(force=True)
         self.assertIsNotNone(again.get("persisted"))
 
     def test_register_unregister(self):
-        from app.feature.registry import has_factor
+        from app.modules.factor.registry import has_factor
 
         self.lib.add("reg_me", "close / MA(close, 3)")
         self.assertTrue(has_factor("reg_me"))
@@ -169,9 +169,9 @@ class TestFactorLibrary(unittest.TestCase):
         self.assertFalse(has_factor("reg_me"))
 
     def test_registered_factor_computes(self):
-        import app.feature  # noqa: F401  确保注册表已初始化
-        from app.feature.context import FactorContext
-        from app.feature.registry import create_factor
+        import app.modules.factor  # noqa: F401  确保注册表已初始化
+        from app.modules.factor.context import FactorContext
+        from app.modules.factor.registry import create_factor
         from app.domain.series import BarSeries
         from app.domain.types import Bar
 
@@ -225,13 +225,13 @@ class TestFactorEvaluation(unittest.TestCase):
         return panel
 
     def _matrix(self, expr: str, panel: dict, horizon: int = 5):
-        from app.feature.evaluate import build_matrix
+        from app.modules.factor.evaluate import build_matrix
 
         return build_matrix(expr, panel, horizon=horizon)
 
     def test_detects_real_signal(self):
         """20 日反转因子应当被判定为有效（IC 显著为负、分层单调）。"""
-        from app.feature.evaluate import evaluate_matrix, FactorReport
+        from app.modules.factor.evaluate import evaluate_matrix, FactorReport
 
         panel = self._panel()
         m = self._matrix("-(close / REF(close, 20) - 1) * 100", panel)
@@ -244,7 +244,7 @@ class TestFactorEvaluation(unittest.TestCase):
 
     def test_rejects_pure_noise(self):
         """纯噪音因子不该被判成有效 —— 否则挖掘出来的全是垃圾。"""
-        from app.feature.evaluate import evaluate_matrix, FactorReport
+        from app.modules.factor.evaluate import evaluate_matrix, FactorReport
 
         panel = self._panel(seed=99)
         # 用成交量构造一个与收益无关的量（成交量是独立生成的随机数）
@@ -256,7 +256,7 @@ class TestFactorEvaluation(unittest.TestCase):
 
     def test_momentum_factor_has_negative_ic_for_reversal_data(self):
         """反向验证：在反转数据上，动量因子 IC 应为负。"""
-        from app.feature.evaluate import evaluate_matrix, FactorReport
+        from app.modules.factor.evaluate import evaluate_matrix, FactorReport
 
         panel = self._panel()
         m = self._matrix("(close / REF(close, 20) - 1) * 100", panel)
@@ -266,7 +266,7 @@ class TestFactorEvaluation(unittest.TestCase):
         self.assertLess(rep.ic_mean, 0)
 
     def test_quantile_returns_have_all_groups(self):
-        from app.feature.evaluate import evaluate_matrix, FactorReport
+        from app.modules.factor.evaluate import evaluate_matrix, FactorReport
 
         panel = self._panel()
         m = self._matrix("-(close / REF(close, 20) - 1) * 100", panel)
@@ -276,7 +276,7 @@ class TestFactorEvaluation(unittest.TestCase):
 
     def test_too_few_samples_refuses_to_conclude(self):
         """样本不够时必须说"无法下结论"，而不是给一个漂亮的数字。"""
-        from app.feature.evaluate import evaluate_matrix, FactorReport
+        from app.modules.factor.evaluate import evaluate_matrix, FactorReport
 
         m = pd.DataFrame({"date": pd.bdate_range("2024-01-01", periods=3).repeat(2),
                           "symbol": ["a", "b"] * 3,
@@ -299,7 +299,7 @@ class TestML(unittest.TestCase):
         return feats, y
 
     def test_lasso_recovers_true_weights(self):
-        from app.feature.mining.ml import fit_factors
+        from app.modules.factor.mining.ml import fit_factors
 
         feats, y = self._data()
         r = fit_factors(feats, y, method="lasso")
@@ -310,7 +310,7 @@ class TestML(unittest.TestCase):
 
     def test_lasso_selects_only_real_factors(self):
         """8 个候选里应该只留下 3 个真因子 —— 这正是 Lasso 的用途。"""
-        from app.feature.mining.ml import fit_factors
+        from app.modules.factor.mining.ml import fit_factors
 
         feats, y = self._data()
         r = fit_factors(feats, y, method="lasso")
@@ -318,7 +318,7 @@ class TestML(unittest.TestCase):
 
     def test_collinear_factor_is_dropped_before_fit(self):
         """共线的因子必须先剔除：否则 Lasso 会在两列之间**随机**留一个。"""
-        from app.feature.mining.ml import fit_factors
+        from app.modules.factor.mining.ml import fit_factors
 
         feats, y = self._data()
         r = fit_factors(feats, y, method="lasso")
@@ -330,7 +330,7 @@ class TestML(unittest.TestCase):
 
         这也是为什么要同时提供 Lasso：Lasso 的 L1 惩罚能把权重压到 0。
         """
-        from app.feature.mining.ml import fit_factors
+        from app.modules.factor.mining.ml import fit_factors
 
         feats, y = self._data()
         r = fit_factors(feats, y, method="ridge")
@@ -342,14 +342,14 @@ class TestML(unittest.TestCase):
 
     def test_relative_selection_ignores_tiny_weights(self):
         """数值求解后 Lasso 也很少压到严格的 0，所以要按相对量级判显著。"""
-        from app.feature.mining.ml import significant_factors
+        from app.modules.factor.mining.ml import significant_factors
 
         w = {"a": 1.0, "b": 0.4, "c": 0.02, "d": 0.001}
         self.assertEqual(significant_factors(w), ["a", "b"])
 
     def test_time_split_not_random(self):
         """训练集必须严格在测试集之前 —— 随机切分会让样本外表现失真。"""
-        from app.feature.mining.ml import time_split
+        from app.modules.factor.mining.ml import time_split
 
         X = np.arange(100).reshape(100, 1).astype(float)
         y = np.arange(100).astype(float)
@@ -358,7 +358,7 @@ class TestML(unittest.TestCase):
 
     def test_nan_rows_dropped_not_filled(self):
         """用均值填 NaN 会凭空造出"这个因子当时是中性"的假象。"""
-        from app.feature.mining.ml import prepare
+        from app.modules.factor.mining.ml import prepare
 
         X, y, names = prepare({"a": np.array([1.0, np.nan, 3.0, 4.0]),
                                "b": np.array([1.0, 2.0, 3.0, 4.0])},
@@ -378,8 +378,8 @@ class TestMining(unittest.TestCase):
         """在树上做变异/交叉的意义：生成出来的每一个候选都保证能解析。"""
         import random
 
-        from app.feature.expr import validate
-        from app.feature.mining.mining import mutate, random_tree, render, crossover
+        from app.modules.factor.expr import validate
+        from app.modules.factor.mining.mining import mutate, random_tree, render, crossover
 
         rng = random.Random(1)
         trees = [random_tree(rng, depth=3) for _ in range(30)]
@@ -392,7 +392,7 @@ class TestMining(unittest.TestCase):
     def test_mutation_changes_expression(self):
         import random
 
-        from app.feature.mining.mining import mutate, random_tree, render
+        from app.modules.factor.mining.mining import mutate, random_tree, render
 
         rng = random.Random(2)
         t = random_tree(rng, depth=3)
@@ -401,7 +401,7 @@ class TestMining(unittest.TestCase):
 
     def test_mining_finds_signal(self):
         """在"反转规律真实存在"的数据上，挖掘应该能挖出可用因子。"""
-        from app.feature.mining.mining import FactorMiner
+        from app.modules.factor.mining.mining import FactorMiner
 
         miner = FactorMiner(self._panel(), horizon=5, seed=42)
         found = miner.run(generations=6, population=30, top=5,
@@ -411,7 +411,7 @@ class TestMining(unittest.TestCase):
         self.assertIsNotNone(best.ic)
         self.assertGreater(best.score, 60)
         # 挖出来的因子必须能被引擎重新算出来（否则入库了也用不了）
-        from app.feature.expr import validate
+        from app.modules.factor.expr import validate
 
         self.assertTrue(validate(best.expr)["ok"])
 
@@ -419,7 +419,7 @@ class TestMining(unittest.TestCase):
         """挖掘很容易跑飞 —— 必须有时间预算兜底。"""
         import time
 
-        from app.feature.mining.mining import FactorMiner
+        from app.modules.factor.mining.mining import FactorMiner
 
         s = time.monotonic()
         FactorMiner(self._panel(n_days=400), horizon=5, seed=7).run(
@@ -431,7 +431,7 @@ class TestMultiFactorStrategy(unittest.TestCase):
     """多因子策略：把因子库里的因子加权成决策。"""
 
     def _ctx(self, n: int = 120, seed: int = 9):
-        from app.feature.context import FactorContext
+        from app.modules.factor.context import FactorContext
         from app.domain.series import BarSeries
         from app.domain.types import Bar
 
@@ -447,12 +447,12 @@ class TestMultiFactorStrategy(unittest.TestCase):
         return FactorContext("000001", s)
 
     def _strategy(self, **kw):
-        from app.strategy import create_strategy
+        from app.modules.strategy import create_strategy
 
         return create_strategy("multi_factor", **kw)
 
     def test_registered(self):
-        from app.strategy import has_strategy
+        from app.modules.strategy import has_strategy
 
         self.assertTrue(has_strategy("multi_factor"))
 
@@ -492,13 +492,13 @@ class TestMultiFactorStrategy(unittest.TestCase):
         self.assertIsNotNone(v)
 
     def test_no_factor_at_all_refuses_to_trade(self):
-        from app.strategy.state import DecisionState
+        from app.modules.strategy.state import DecisionState
 
         st = self._strategy(factors=[{"name": "no_such_factor", "weight": 1.0}])
         self.assertIsNone(st.decide(self._ctx(), DecisionState()))
 
     def test_buy_and_sell_thresholds(self):
-        from app.strategy.state import DecisionState
+        from app.modules.strategy.state import DecisionState
 
         # 入口压到极低（必然买入），出口更低（不会立刻卖出）
         st = self._strategy(factors=[{"name": "mom_20", "weight": 1.0}],

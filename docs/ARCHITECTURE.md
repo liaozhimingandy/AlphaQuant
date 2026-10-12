@@ -24,39 +24,39 @@
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ ①
 ┌───────────────────────────▼─────────────────────────────────────────────┐
-│ L1 采集与清洗                    app/engine/collect/  app/domain/clean │
+│ L1 采集与清洗                    app/modules/collection/  app/domain/clean │
 │    行情采集服务（分桶定时器）→ 数据清洗（去重/排序/校验/标记）              │
 │    扩展数据采集（资金流/筹码/涨停池/题材，日频截面）                        │
 │    新闻中心（RSS → 去重 → 关键词或大模型分析）                             │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ ②
 ┌───────────────────────────▼─────────────────────────────────────────────┐
-│ L2 存储                          app/storage/  app/storage/repo/                 │
+│ L2 存储                          app/data/  app/data/repo/                 │
 │    SQLite: 日线/分钟线（行情）  +  订单/成交/权益/事件（交易审计）          │
 │           + 资金流/筹码/涨停池/题材/评分（截面数据，见 §十）              │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ ③
 ┌───────────────────────────▼─────────────────────────────────────────────┐
-│ L3 计算（纯函数、无副作用、可复现）  app/feature/indicator/  app/feature/ │
+│ L3 计算（纯函数、无副作用、可复现）  app/modules/factor/indicator/  app/modules/factor/ │
 │    Indicator 指标 → Factor 因子     （带共享缓存，按序列版本号失效）        │
 │    FeatureProvider：把日频截面特征注入 FactorContext（TTL 缓存）           │
 │    ScoreEngine：资金/题材/筹码/技术/涨停 多维加权 → 总分 + 等级            │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ ④
 ┌───────────────────────────▼─────────────────────────────────────────────┐
-│ L4 决策（只读、可组合）          app/strategy/rule/  app/strategy/        │
+│ L4 决策（只读、可组合）          app/modules/strategy/rule/  app/modules/strategy/        │
 │    Rule 规则(All/Any/Not/阈值/穿越) → Strategy 策略 → Signal 交易意图      │
 │    StockPool：候选池收窄 → 打分 → 排序推荐（score 策略直接消费总分）       │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ ⑤
 ┌───────────────────────────▼─────────────────────────────────────────────┐
-│ L5 风控前置检查（闸门，只否决/缩仓，绝不下单）  app/risk/             │
+│ L5 风控前置检查（闸门，只否决/缩仓，绝不下单）  app/modules/risk/             │
 │    回撤 / 仓位 / 资金 / 冷却 / 新闻置信度 / 单日亏损                       │
 │    + A股实盘特有：T+1 可卖 / 涨跌停 / 单笔金额 / 单日笔数 / 可卖数量        │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ ⑥
 ┌───────────────────────────▼─────────────────────────────────────────────┐
-│ L6 仓位与执行                    app/portfolio/  app/execution/ │
+│ L6 仓位与执行                    app/account/  app/providers/broker/ │
 │    Sizer 仓位计算 → Broker 撮合（模拟即时成交 / 实盘报单待回报）           │
 │    实盘：IBrokerGateway 券商网关（下单/撤单/查询/回报）                    │
 └───────────────────────────┬─────────────────────────────────────────────┘
@@ -400,7 +400,7 @@ IBaseComponent
 
 ### 4.9 SQLite 必须开 WAL 并把等待时间放宽
 
-`app/storage/engine.py` 在连接时设 `journal_mode=WAL`、`synchronous=NORMAL`、
+`app/data/engine.py` 在连接时设 `journal_mode=WAL`、`synchronous=NORMAL`、
 `busy_timeout=30000`。
 
 不是"优化"，是**必须**：本项目同时有
@@ -450,7 +450,7 @@ IBaseComponent
 | 回测 | `backtrader.Strategy` | `cerebro` | backtrader 自带撮合/指标/分析器，重写代价太大 |
 | 实盘/模拟 | `IBaseStrategy` | 本项目事件引擎（Twisted） | 需要回报驱动、T+1、账户级对账 |
 
-但**发现机制是同一套**（`app/strategy/discovery.py`）：
+但**发现机制是同一套**（`app/modules/strategy/discovery.py`）：
 扫描目录 → 按文件路径指纹导入模块 → 从模块里挑出各自基类的子类 → 按
 `STRATEGY_NAME`（缺省由类名推导）注册。
 
@@ -588,7 +588,7 @@ K线是**时间序列**，一天一只票有几十~几百根。两者的粒度�
 - **PE 为负（亏损）是确定的坏消息，不是"没数据"**。
   所以风控里它可以拦，而缺失的 ROE 不行。
 
-基本面算分只有**一份实现**（`app.feature.features.fundamental_score`），
+基本面算分只有**一份实现**（`app/modules/factor/features.py` 的 `fundamental_score`），
 因子、特征注入、风控闸门三处共用 —— 三处各写一份，迟早算出三个不同的分数。
 
 ### 4.22 因子是策略的核心，所以因子必须能被"积累"和"验证"
@@ -597,13 +597,13 @@ K线是**时间序列**，一天一只票有几十~几百根。两者的粒度�
 
 落到本项目是三件事：
 
-1. **写因子不该有摩擦** —— 表达式因子（`app/feature/expr.py`）：
+1. **写因子不该有摩擦** —— 表达式因子（`app/modules/factor/expr.py`）：
    写一句 `close / MA(close, 20) - 1` 就是一个因子，界面上就能加。
    用自写的 tokenizer + 白名单函数表，**不用 eval**：
    表达式来自输入框，eval 等于给它一个任意代码执行的口子。
 2. **因子要能沉淀** —— 因子库（`config/factors.json`）：
    加载即注册，规则/策略/回测/面板都能直接引用。没有库，研究就没有复利。
-3. **因子要能证伪** —— 检验（`app/feature/evaluate.py`）：
+3. **因子要能证伪** —— 检验（`app/modules/factor/evaluate.py`）：
    IC / RankIC / ICIR / 分层单调性 / t 值。**没有判据就谈不上自动挖掘**。
 
 三个必须守住的坑：
@@ -846,7 +846,7 @@ python main.py serve --mode LIVE --market-mode poll \
     --broker-endpoint sim --collect-interval 1m
 
 # 2. 接真实券商：实现一个 IBrokerGateway 子类并注册
-#    （见 app/execution/gateway.py，只需实现 7 个方法 + 加一个装饰器）
+#    （见 app/providers/broker/gateway.py，只需实现 7 个方法 + 加一个装饰器）
 #    然后在 config/brokers.json 里加一个接入点指向它。
 CUSTOM_GATEWAY=your_broker   # 环境变量名随你的网关而定
 
@@ -981,22 +981,22 @@ python main.py ctl live account          # 看券商账户是不是你预期的�
 
 | 想搞清楚 | 从这里开始 |
 |---|---|
-| 一根K线怎么变成一笔订单 | `app/engine/tasking/task.py` 的 `on_bar` → `_process_signal` |
-| 实盘的成交怎么进账本 | `app/execution/live_broker.py` 的 `on_fill` |
+| 一根K线怎么变成一笔订单 | `app/runtime/tasking/task.py` 的 `on_bar` → `_process_signal` |
+| 实盘的成交怎么进账本 | `app/modules/trading/live_broker.py` 的 `on_fill` |
 | 引擎怎么把组件串起来 | `app/engine/engine.py`（生命周期）+ `builder.py`（装配） |
-| 风控到底怎么判的 | `app/risk/builtin.py`（每条规则都很短，读起来快） |
-| 回测为什么赚钱实盘亏钱 | `app/execution/broker.py` vs `live_broker.py` 的注释对比 |
-| 面板 API 有哪些 | `app/monitoring/web.py` 的 `_route_get` / `_route_post` |
-| 快照到底什么时候写 | `app/monitoring/web.py` 的 `TRIGGER_EVENTS` + `mark_dirty` |
-| 采集的频率怎么算的 | `app/engine/collect/spec.py` |
+| 风控到底怎么判的 | `app/modules/risk/builtin.py`（每条规则都很短，读起来快） |
+| 回测为什么赚钱实盘亏钱 | `app/providers/broker/simulated.py` vs `live_broker.py` 的注释对比 |
+| 面板 API 有哪些 | `app/monitoring/server.py` 的 `_route_get` / `_route_post` |
+| 快照到底什么时候写 | `app/monitoring/server.py` 的 `TRIGGER_EVENTS` + `mark_dirty` |
+| 采集的频率怎么算的 | `app/modules/collection/spec.py` |
 | 数据被清洗过什么 | `app/domain/clean.py` 的 `FLAG_*` 常量与 `CleanReport` |
-| 怎么接一家新券商 | `app/execution/gateway.py`（接口） + `endpoints.py`（配置） |
-| 自定义策略怎么被发现的 | `app/strategy/discovery.py` |
-| 不写代码怎么定义策略 | `app/strategy/spec_strategy.py`（声明式策略） |
-| 回测默认值从哪来 | `app/research/defaults.py` |
-| 资金流这类数据从哪来 | `app/datasource/service/facade.py`（获取层）+ `app/feature/features.py`（特征注入） |
-| 综合分是怎么算出来的 | `app/alpha/engine.py`（维度、权重、缺维度再分配） |
-| 股票池怎么筛出来的 | `app/alpha/pool/pool.py`（候选池）+ `app/alpha/pool/sync.py`（同步） |
+| 怎么接一家新券商 | `app/providers/broker/gateway.py`（接口） + `endpoints.py`（配置） |
+| 自定义策略怎么被发现的 | `app/modules/strategy/discovery.py` |
+| 不写代码怎么定义策略 | `app/modules/backtest/strategies/spec_strategy.py`（声明式策略） |
+| 回测默认值从哪来 | `app/modules/backtest/defaults.py` |
+| 资金流这类数据从哪来 | `app/providers/market/service/facade.py`（获取层）+ `app/modules/factor/features.py`（特征注入） |
+| 综合分是怎么算出来的 | `app/modules/universe/score.py`（维度、权重、缺维度再分配） |
+| 股票池怎么筛出来的 | `app/modules/universe/pool/pool.py`（候选池）+ `app/modules/universe/pool/sync.py`（同步） |
 
 ---
 
@@ -1010,25 +1010,25 @@ python main.py ctl live account          # 看券商账户是不是你预期的�
 
 ```
 akshare 日频截面源
-   │  app/datasource/service/facade.py      封装 + 失败降级 + 节流
+   │  app/providers/market/service/facade.py      封装 + 失败降级 + 节流
    ▼
-app/alpha/pool/sync.py          同步编排（单只失败不影响其它）
+app/modules/universe/pool/sync.py          同步编排（单只失败不影响其它）
    ▼
 SQLite 表                      FundFlow / ChipDistribution / LimitUpPool
    │                           ThemeFlow / StockTheme / StockScore
    ▼
-FeatureProvider               app/feature/features.py
+FeatureProvider               app/modules/factor/features.py
    │  读库 → 装配成特征字典 → 注入 FactorContext（TTL 缓存 300s）
    ▼
-Factor                        app/feature/flow.py
+Factor                        app/modules/factor/flow.py
    │  main_net_pct / capital_accel / capital_pulse / net_inflow_days
    │  chip_profit_ratio / chip_concentration / chip_peak_gap
    │  theme_rank / theme_pct / limitup_effect / composite_score
    ▼
-ScoreEngine                   app/alpha/engine.py
+ScoreEngine                   app/modules/universe/engine.py
    │  资金 / 题材 / 筹码 / 技术 / 涨停 加权 → 总分 + 等级 + 扣分理由
    ▼
-StockPool                     app/alpha/pool/pool.py
+StockPool                     app/modules/universe/pool/pool.py
       候选池 → 打分 → 排序 → 落库 → 推荐
 ```
 
@@ -1095,18 +1095,18 @@ python main.py pool demo
 
 `score` 策略同时注册在**两条链路**上，共用同一套打分口径：
 
-- 实盘：`app/strategy/score_strategy.py`（读 `composite_score` 因子，
+- 实盘：`app/modules/strategy/score_strategy.py`（读 `composite_score` 因子，
   按 `entry_score` / `exit_score` 阈值开平仓）
-- 回测：`app/strategy/score_strategy.py`（注册为 `"score"`，同样读因子）
+- 回测：`app/modules/strategy/score_strategy.py`（注册为 `"score"`，同样读因子）
 
-> ⚠️ **两个 `score_strategy.py` 不是一个东西**：一个在 `app/strategy/`
-> （实盘，跟 TaskRuntime 走），一个在 `app/strategy/`（回测，跟 backtrader 走）。
+> ⚠️ **两个 `score_strategy.py` 不是一个东西**：一个在 `app/modules/strategy/`
+> （实盘，跟 TaskRuntime 走），一个在 `app/modules/strategy/`（回测，跟 backtrader 走）。
 > 它们的**打分逻辑必须保持一致**，否则回测好看实盘难看。
 > 改打分口径时两个文件都要过一遍。
 
 ### 10.5 网络不可用时会怎样
 
-获取层（`app/datasource/service/facade.py`）被代理/限流拦住时**降级而不是崩**：
+获取层（`app/providers/market/service/facade.py`）被代理/限流拦住时**降级而不是崩**：
 拉不到就记一条警告、该项计入 `failed`，其余标的数据照常入库。
 所以 `pool sync` 的输出里"成功 N 项"加几行失败原因是常态，不是报错。
 

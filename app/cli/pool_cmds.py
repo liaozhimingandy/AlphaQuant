@@ -17,7 +17,7 @@ def pool_group() -> None:
 
 @pool_group.command(name="refresh", help="刷新股票池（拉候选 → 同步数据 → 打分 → 落库）")
 # 刻意写成字面量而不是 import SOURCES：CLI 启动不该为了一个选项列表
-# 就把 akshare 那一串依赖拉起来（app.alpha.pool 会间接导入它）。
+# 就把 akshare 那一串依赖拉起来（app.modules.universe.pool 会间接导入它）。
 @click.option("--source", default=None,
               type=click.Choice(["limitup", "hot", "theme", "flow", "watch", "all"]),
               help="候选池来源，默认取 config/pool.json")
@@ -26,7 +26,7 @@ def pool_group() -> None:
 @click.option("--sync/--no-sync", "do_sync", default=None,
               help="是否联网同步（--no-sync 只用库里已有数据，离线可用）")
 def pool_refresh(source, limit, day, do_sync) -> None:
-    from app.alpha.pool import StockPool
+    from app.modules.universe.pool import StockPool
 
     pool = StockPool()
     report = pool.refresh(source=source, day=day, limit=limit, do_sync=do_sync)
@@ -45,7 +45,7 @@ def pool_refresh(source, limit, day, do_sync) -> None:
 @click.option("--date", "day", default=None, help="默认最新一天")
 @click.option("--min-score", default=None, type=float)
 def pool_top(limit, day, min_score) -> None:
-    from app.alpha.pool import StockPool
+    from app.modules.universe.pool import StockPool
 
     rows = StockPool.top(day=day, limit=limit, min_score=min_score)
     if not rows:
@@ -63,7 +63,7 @@ def pool_top(limit, day, min_score) -> None:
                 default="all")
 @click.option("--symbol", multiple=True, help="标的，可重复；不传则用 config/pool.json 的 watch")
 def pool_sync(what, symbol) -> None:
-    from app.alpha.pool import (
+    from app.modules.universe.pool import (
         sync_boards,
         sync_category,
         sync_chip,
@@ -78,7 +78,7 @@ def pool_sync(what, symbol) -> None:
                    "forecast", "holders", "rating", "news")
     syms = [str(s) for s in symbol]
     if not syms:
-        from app.alpha.pool import PoolConfig
+        from app.modules.universe.pool import PoolConfig
 
         syms = PoolConfig.load().watch
     if not syms and what in STOCK_LEVEL + ("all",):
@@ -125,8 +125,8 @@ def pool_sync(what, symbol) -> None:
 
 @pool_group.command(name="categories", help="列出可采集的数据类别与库里已有指标")
 def pool_categories() -> None:
-    from app.datasource.service.facade import CATEGORIES
-    from app.storage.repo import kline_repo as R
+    from app.providers.market.service.facade import CATEGORIES
+    from app.data.repo import kline_repo as R
 
     click.secho("可采集类别：", fg="cyan", bold=True)
     for key, info in CATEGORIES.items():
@@ -146,11 +146,11 @@ def pool_demo(symbols, day) -> None:
     这不是"假数据糊弄" —— 它验证的是**打分与排序链路本身**，
     数据获取那一段（marketx）在联网后单独用 `pool sync` 验证。
     """
-    from app.alpha.pool.demo import seed_demo
+    from app.modules.universe.pool.demo import seed_demo
 
     d = seed_demo(int(symbols), day)
     click.secho(f"已生成 {d['symbols']} 只票的合成数据（日期 {d['date']}）", fg="green")
-    from app.alpha.pool import StockPool
+    from app.modules.universe.pool import StockPool
 
     # 直接指定标的，不走候选池 —— 候选池要联网拉名单，而这里就是要验证离线链路
     report = StockPool().refresh(symbols=d["all"], day=d["date"],

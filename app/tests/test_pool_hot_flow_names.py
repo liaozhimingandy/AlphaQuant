@@ -16,11 +16,11 @@ import unittest
 import pandas as pd
 
 from app.monitoring.server import MonitorWebComponent
-from app.alpha.pool import pool as pool_mod
-from app.alpha.pool.pool import StockPool
-from app.storage.engine import SessionLocal
-from app.storage.schema import StockFlowRank, StockHotRank, StockInfo, StockScore
-from app.storage.repo import kline_repo as R
+from app.modules.universe.pool import pool as pool_mod
+from app.modules.universe.pool.pool import StockPool
+from app.data.engine import SessionLocal
+from app.data.schema import StockFlowRank, StockHotRank, StockInfo, StockScore
+from app.data.repo import kline_repo as R
 
 
 DAY = "2026-10-09"
@@ -114,7 +114,7 @@ class TestCandidatesHotFlow(unittest.TestCase):
         with mock.patch.object(R, "hot_pool", return_value=[]), \
              mock.patch.object(R, "latest_pool",
                                return_value=[{"symbol": "600000", "date": "2026-10-08"}]), \
-             mock.patch("app.alpha.pool.sync.sync_hot_rank") as m_sync, \
+             mock.patch("app.modules.universe.pool.sync.sync_hot_rank") as m_sync, \
              mock.patch.object(pool, "_live_symbols", return_value=["LIVE"]) as m_live:
             syms, info = pool.candidates("hot", DAY)
         self.assertEqual(syms, ["600000"])
@@ -133,7 +133,7 @@ class TestCandidatesHotFlow(unittest.TestCase):
 
         with mock.patch.object(R, "hot_pool", side_effect=fake_hot), \
              mock.patch.object(R, "latest_pool", return_value=[]), \
-             mock.patch("app.alpha.pool.sync.sync_hot_rank", return_value={"ok": 1, "failed": []}) as m_sync, \
+             mock.patch("app.modules.universe.pool.sync.sync_hot_rank", return_value={"ok": 1, "failed": []}) as m_sync, \
              mock.patch.object(pool, "_live_symbols", return_value=["LIVE"]) as m_live:
             syms, info = pool.candidates("hot", DAY)
         self.assertEqual(syms, ["600000"])
@@ -162,7 +162,7 @@ class TestPoolTopSourceDefault(unittest.TestCase):
         # 配置默认来源 = limitup：空来源读取应只返回 limitup 的 2 条
         stub_cfg = mock.MagicMock()
         stub_cfg.source = "limitup"
-        with mock.patch("app.alpha.pool.PoolConfig") as m_cfg:
+        with mock.patch("app.modules.universe.pool.PoolConfig") as m_cfg:
             m_cfg.load.return_value = stub_cfg
             rows = MonitorWebComponent().pool_top(limit=100, source="", day=DAY)
         self.assertEqual(len(rows), 2)
@@ -171,7 +171,7 @@ class TestPoolTopSourceDefault(unittest.TestCase):
     def test_explicit_source_not_overridden(self):
         stub_cfg = mock.MagicMock()
         stub_cfg.source = "limitup"
-        with mock.patch("app.alpha.pool.PoolConfig") as m_cfg:
+        with mock.patch("app.modules.universe.pool.PoolConfig") as m_cfg:
             m_cfg.load.return_value = stub_cfg
             # 显式传 other：即便默认是 limitup，也应返回 other 的 3 条
             rows = MonitorWebComponent().pool_top(limit=100, source="other", day=DAY)
