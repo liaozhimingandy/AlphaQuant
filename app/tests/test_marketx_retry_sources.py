@@ -527,10 +527,15 @@ class TestSyncFundFlowLogging(unittest.TestCase):
     """失败日志必须带上原因样例，否则用户只能看到"N 只失败"。"""
 
     def test_warning_includes_reason_sample(self):
+        # 必须先钉住"库里没有当日数据"：否则只要**当天跑过采集**
+        # （服务在跑、或别人刚同步过），sync 会走"库内已有 → 跳过"分支，
+        # failed 为 0，这个用例就在真机上随机失败。
         with mock.patch.object(MX, "fetch_fund_flow",
                                side_effect=MX.MarketXError(
                                    "stock_individual_fund_flow 调用失败: "
-                                   "ProxyError: HTTPSConnectionPool(host='push2his.eastmoney.com')")):
+                                   "ProxyError: HTTPSConnectionPool(host='push2his.eastmoney.com')")), \
+             mock.patch.object(S.R, "latest_dates", return_value={}), \
+             mock.patch.object(S.R, "save_fund_flow", lambda *a, **k: 1):
             with mock.patch.object(S, "log_throttled") as m_log:
                 res = S.sync_fund_flow(["600000"])
         self.assertEqual(res["ok"], 0)

@@ -59,9 +59,36 @@ class MarketXError(RuntimeError):
 _LAST_CALL: Dict[str, float] = {}
 
 
+#: 被限流后**临时**上调的间隔（秒），按 limit_key 独立。
+#: ``DATA_FETCH_MIN_INTERVAL`` 是"平时"的节奏（默认 0.3s），
+#: 但东财对高频访问会直接 RST —— 这时再按 0.3s 打就是持续撞墙：
+#: 一輪 60 只票会被限流打掉大半，且每次被拒后下一只票又从 0.3s 重新开始。
+#: 所以检测到限流式失败就把间隔翻倍，成功后回落。
+_THROTTLE_GAP: Dict[str, float] = {}
+_THROTTLE_GAP_MAX = 5.0
+
+
+def _throttle_gap(key: str) -> float:
+    base = float(settings.DATA_FETCH_MIN_INTERVAL or 0.0)
+    return max(base, float(_THROTTLE_GAP.get(key) or 0.0))
+
+
+def _throttle_penalize(key: str) -> None:
+    """撞到限流/连接被重置：把该类接口的间隔翻倍，别继续硬撞。"""
+    base = float(settings.DATA_FETCH_MIN_INTERVAL or 0.0)
+    cur = max(base, float(_THROTTLE_GAP.get(key) or 0.0))
+    _THROTTLE_GAP[key] = min(max(cur * 2.0, 0.5), _THROTTLE_GAP_MAX)
+
+
+def _throttle_relax(key: str) -> None:
+    """一次成功后回落一档（不直接清零，避免立刻又打满）。"""
+    if key in _THROTTLE_GAP:
+        _THROTTLE_GAP[key] = max(0.0, _THROTTLE_GAP[key] / 2.0)
+
+
 def _throttle(key: str = "marketx") -> None:
     """同类接口的限速。被限流封 IP 是最常见也最难恢复的故障。"""
-    gap = float(settings.DATA_FETCH_MIN_INTERVAL or 0.0)
+    gap = _throttle_gap(key)
     if gap <= 0:
         return
     last = _LAST_CALL.get(key, 0.0)
@@ -248,12 +275,17 @@ def _call(name: str, *args: Any, limit_key: str = "marketx",
             df = fn(*args, **kwargs)
         except Exception as exc:
             last_exc = exc
-            if _is_retryable(exc) and attempt < max_retry:
-                continue
+            if _is_retryable(exc):
+                # 瞬时失败多半是限流：拉长**后续**同类请求的间隔。
+                # 重试循环内的退避只管这一只票，不管下一只。
+                _throttle_penalize(limit_key)
+                if attempt < max_retry:
+                    continue
             raise MarketXError(f"{name} 调用失败: {type(exc).__name__}: {exc}") from exc
         if df is None or (hasattr(df, "empty") and df.empty):
             # 空数据：非交易日 / 接口变更 —— 重试无意义，直接上报
             raise MarketXError(f"{name} 返回空数据（非交易日？接口变更？）")
+        _throttle_relax(limit_key)
         return df
     # 理论上走不到（循环内已 raise），保险兜底
     raise MarketXError(

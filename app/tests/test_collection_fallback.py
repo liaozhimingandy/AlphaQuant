@@ -432,6 +432,54 @@ class TestSnapshotSeriesSynthesis(unittest.TestCase):
             self.assertAlmostEqual(v, 1e8, delta=1e7)
 
 
+class TestAdaptiveThrottle(unittest.TestCase):
+    """撞到限流后必须放慢，否则一輪 60 只票会被持续打掉。"""
+
+    def setUp(self):
+        from app.datasource.service import facade as MX
+
+        self.MX = MX
+        MX._THROTTLE_GAP.clear()
+
+    def tearDown(self):
+        self.MX._THROTTLE_GAP.clear()
+
+    def test_penalize_then_relax(self):
+        MX = self.MX
+        self.assertEqual(MX._throttle_gap("unit-t"),
+                         float(__import__("app.common.config",
+                                          fromlist=["settings"]).settings
+                               .DATA_FETCH_MIN_INTERVAL))
+        MX._throttle_penalize("unit-t")
+        first = MX._throttle_gap("unit-t")
+        self.assertGreater(first, 0.3)
+        MX._throttle_penalize("unit-t")
+        self.assertGreater(MX._throttle_gap("unit-t"), first)
+        MX._throttle_relax("unit-t")
+        self.assertLess(MX._throttle_gap("unit-t"),
+                        MX._throttle_gap("unit-t") * 2 + 1)
+
+    def test_capped(self):
+        MX = self.MX
+        for _ in range(20):
+            MX._throttle_penalize("unit-c")
+        self.assertLessEqual(MX._throttle_gap("unit-c"), MX._THROTTLE_GAP_MAX,
+                             "退避要封顶，否则一次限流能把采集拖到不可用")
+
+    def test_success_relaxes(self):
+        """成功后要回落 —— 否则一次抖动会让后续采集长期变慢。"""
+        import pandas as pd
+
+        MX = self.MX
+        MX._THROTTLE_GAP["unit-r"] = 4.0
+        with mock.patch.object(MX, "_require_akshare", lambda: None), \
+             mock.patch.object(MX.ak, "fake_ok",
+                               lambda *a, **k: pd.DataFrame({"a": [1]}),
+                               create=True):
+            MX._call("fake_ok", limit_key="unit-r", retry=0)
+        self.assertLess(MX._throttle_gap("unit-r"), 4.0)
+
+
 class TestCalendarStateNaming(unittest.TestCase):
     """交易日清晨不能显示成"非交易日"。"""
 
