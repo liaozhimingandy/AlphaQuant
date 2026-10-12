@@ -204,12 +204,100 @@ def offline(flag: Optional[bool] = None) -> bool:
 # 代理通道
 # ============================================================
 
-def _env_proxy() -> str:
-    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-        val = os.environ.get(var)
-        if val:
-            return val
+#: 常见代理客户端的默认端口。Clash 7890 / Clash Meta 7897 /
+#: Shadowsocks 1080 / V2Ray 10808 / 10809 / Fiddler 8888。
+#: 只探测**回环地址**，且只是 TCP 握手，不发包。
+COMMON_PROXY_PORTS: Tuple[int, ...] = (
+    7890, 7897, 7891, 10809, 10808, 1080, 8888, 8080,
+)
+
+
+def _listen_probe(port: int, timeout: float = 0.3) -> bool:
+    """本机某个端口有没有程序在监听。"""
+    import socket
+
+    try:
+        with socket.socket() as s:
+            s.settimeout(timeout)
+            return s.connect_ex(("127.0.0.1", int(port))) == 0
+    except Exception:
+        return False
+
+
+def _autodetect_proxy() -> str:
+    """在本机回环上找一个真在监听的代理端口。
+
+    为什么要有这个：用户装了 Clash（7890 在监听），但**没设环境变量** ——
+    命令行里手动跑采集没事（shell 里有变量），守护进程/服务里跑就全部失败，
+    报错还是"未设置代理环境变量"，让人以为是代码问题。
+
+    自动探测把这类"装了却没配"的情况兜住。找到之后由
+    :func:`ensure_proxy` 写回环境变量，这样 akshare 内部的请求也走同一条通道。
+    """
+    try:
+        from app.common.config import settings
+
+        if not getattr(settings, "DATA_PROXY_AUTODETECT", True):
+            return ""
+    except Exception:
+        pass
+    for port in COMMON_PROXY_PORTS:
+        if _listen_probe(port):
+            return f"http://127.0.0.1:{port}"
     return ""
+
+
+def _configured_proxy() -> str:
+    """显式配置的代理（``DATA_PROXY`` 配置项 / 同名环境变量）。
+
+    它优先于 ``HTTP_PROXY``：环境变量是"进程继承来的、说不清是谁设的"，
+    而 DATA_PROXY 是"这个项目明确要用它"，后者必须说了算。
+    """
+    try:
+        from app.common.config import settings
+
+        val = str(getattr(settings, "DATA_PROXY", "") or "").strip()
+    except Exception:
+        val = ""
+    if not val:
+        val = (os.getenv("DATA_PROXY") or "").strip()
+    return val
+
+
+def _env_proxy() -> str:
+    """最终生效的代理地址：显式配置 → 环境变量 → 自动探测。"""
+    val = _configured_proxy()
+    if val:
+        return val
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        raw = os.environ.get(var)
+        if raw:
+            return raw
+    return _autodetect_proxy()
+
+
+def ensure_proxy() -> str:
+    """把生效的代理**写回环境变量**并返回它。
+
+    为什么要写回：akshare 及其内部依赖自己也会发 HTTP 请求，
+    它们只认 ``HTTP_PROXY`` 环境变量。只在传输层传 ``proxies=`` 的话，
+    会出现"一半请求走代理、一半直连"的诡异现象 ——
+    表现是某些接口通、某些接口 RST，排查方向完全被带偏。
+    """
+    forced = _configured_proxy()
+    if forced:
+        # 显式配置**覆盖**环境变量：环境变量可能是别的进程塞进来的
+        # 僵尸端口/白名单代理，只有本项目的 DATA_PROXY 是明确意图。
+        for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+            os.environ[var] = forced
+        return forced
+    raw = _env_proxy()
+    if not raw:
+        return ""
+    # 没有显式配置时只补空缺，不去动别人设的值
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        os.environ.setdefault(var, raw)
+    return raw
 
 
 def proxy_configured() -> bool:
@@ -316,6 +404,10 @@ def request(method: str, url: str, *, params: Optional[Dict] = None,
     if offline():
         raise NetworkError("离线模式：禁止真实联网（net.offline(True)）")
 
+    # 把生效的代理写回环境变量，让 akshare 内部自己发的请求也走同一条通道
+    # （只在首次调用时真正生效，之后是纯 dict 查询）。
+    ensure_proxy()
+
     host = host_of(url)
     if is_blocked(host):
         raise HostBlocked(f"域名 {host} 处于冷却期，本次直接跳过")
@@ -373,5 +465,6 @@ __all__ = [
     "host_of", "headers_for", "mark", "is_blocked", "blocked_reason",
     "host_state", "reset", "offline",
     "proxy_configured", "proxy_reachable", "sanitize_proxy",
+    "ensure_proxy", "_autodetect_proxy", "COMMON_PROXY_PORTS",
     "request", "get_text", "get_json", "post_json",
 ]

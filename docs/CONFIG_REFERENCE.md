@@ -52,6 +52,14 @@
 | `DATA_FETCH_MIN_INTERVAL` | `0.3` | 同类接口最小间隔（秒）；**会自适应**：瞬时失败翻倍，成功回落（封顶 5s） |
 | `DATA_SOURCE_WEIGHTS` | 空 | `name=weight` 形式，不配就是全 1 |
 | `PROVIDERS_CONFIG` | `config/providers.json` | 新采集层编排配置 |
+| **`DATA_PROXY`** | 空 | 出口代理，如 `http://127.0.0.1:7890`。**优先于** `HTTP_PROXY` 环境变量，并会写回环境变量（让 akshare 内部请求也走同一条通道） |
+| **`DATA_PROXY_AUTODETECT`** | `true` | 没配代理时自动探测本机常见端口（7890/7897/10809/1080/8888…）。仅回环 TCP 握手，不发包 |
+
+> **代理是"能采到数据"的前提，不是可选项。** 直连东财会被 RST，
+> 表现为 `network_error` / `RemoteDisconnected`，看起来像被限流其实是网络不通。
+> 采集服务以守护进程启动时**不继承** shell 里的 `HTTP_PROXY`，
+> 所以别只依赖环境变量 —— 设 `DATA_PROXY` 最稳。
+> 排查命令：`alphaquant sources --probe`，看提示里报的是哪种情况。
 
 ---
 

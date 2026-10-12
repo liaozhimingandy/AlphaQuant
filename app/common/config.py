@@ -90,6 +90,15 @@ class Settings:
     DATA_FETCH_MAX_RETRY: int = _env_int("DATA_FETCH_MAX_RETRY", 3)
     # 两次请求之间的最小间隔（秒），防止被数据源限流封 IP
     DATA_FETCH_MIN_INTERVAL: float = _env_float("DATA_FETCH_MIN_INTERVAL", 0.3)
+    # 显式指定出口代理，例如 "http://127.0.0.1:7890"。
+    # 为什么需要它而不只是依赖 HTTP_PROXY 环境变量：采集服务常以守护进程/
+    # 计划任务方式启动，那种进程**不继承**你在 shell 里设的环境变量，
+    # 于是直连东财被 RST，报"所有源都失败"，而你在命令行里手动跑却是好的。
+    # 留空则按 HTTP_PROXY 环境变量，再不行就自动探测常见端口。
+    DATA_PROXY: str = os.getenv("DATA_PROXY", "")
+    # 是否允许自动探测本机常见代理端口（Clash/Shadowsocks/V2Ray 默认端口）。
+    # 探测只在本机回环地址上做 TCP 连接，不发包，开销可忽略。
+    DATA_PROXY_AUTODETECT: bool = _env_bool("DATA_PROXY_AUTODETECT", True)
     # 数据源初始权重覆盖，JSON 对象，例如 '{"mootdx":0.5,"tushare":2}'。
     # 不配就是全部 1（顺序完全由 DATA_SOURCE_PRIORITY 决定）；
     # 运行时会根据成败自动调整，并落盘到 data/source_weights.json。

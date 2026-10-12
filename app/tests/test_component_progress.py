@@ -448,9 +448,28 @@ class TestNetworkHint(unittest.TestCase):
     def test_hint_without_proxy(self):
         from app.datasource.compat.registry import network_hint
 
-        with mock.patch.dict("os.environ", {}, clear=True):
+        # 必须同时关掉自动探测：本机可能真有 Clash 在 7890 监听，
+        # 那样走的就不是"无代理"分支，测的也就不是这个用例想测的场景了。
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             mock.patch("app.datasource.transport.net._autodetect_proxy",
+                        return_value=""):
             hint = network_hint()
         self.assertIn("未设置代理", hint)
+
+    def test_hint_detects_local_proxy_when_env_empty(self):
+        """环境变量里没有，但本机有代理在监听 —— 必须提示，不能说"没设代理"。
+
+        这是守护进程场景的典型形态：shell 里有变量所以手动跑没事，
+        服务进程不继承变量于是全部失败，而旧提示会让人误以为是代码问题。
+        """
+        from app.datasource.compat.registry import network_hint
+
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             mock.patch("app.datasource.transport.net._autodetect_proxy",
+                        return_value="http://127.0.0.1:7890"):
+            hint = network_hint()
+        self.assertIn("7890", hint)
+        self.assertIn("DATA_PROXY", hint)
 
     def test_exhausted_error_carries_hint(self):
         """'所有数据源均失败'必须带上排查方向，否则无法行动。"""

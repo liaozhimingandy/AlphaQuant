@@ -59,7 +59,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from twisted.internet import defer
 
@@ -523,9 +523,20 @@ class PortfolioService(ServiceComponent):
         self._sweep()
         return bool(self._reservations)
 
-    def health_check(self) -> Dict[str, Any]:
-        h = super().health_check()
-        h["budget"] = self.budget
-        h["reserved"] = round(self.reserved, 2)
-        h["pending"] = len(self._reservations)
-        return h
+    def health_check(self) -> Tuple[bool, str]:
+        """健康检查。**契约是 ``(是否健康, 说明文本)``，不是 dict。**
+
+        这里以前写成 dict：``h = super().health_check()`` 拿到的是基类
+        返回的**元组**，接着 ``h["budget"] = ...`` 就抛
+        ``TypeError: 'tuple' object does not support item assignment``。
+        服务注册表在 ``registry.py`` 里捕获它，面板上就只显示
+        "health_check 异常"，真正的额度信息一条都看不到。
+
+        要暴露的预算/预留信息放进说明文本；结构化数据走 :meth:`snapshot`。
+        """
+        ok, detail = super().health_check()
+        parts = [detail]
+        if self.budget is not None:
+            parts.append(f"预算 {self.budget:.0f}")
+        parts.append(f"在途预留 {self.reserved:.2f}（{len(self._reservations)} 笔）")
+        return ok, " | ".join(parts)

@@ -124,7 +124,10 @@ class TestTransportFallback(unittest.TestCase):
 
         env = {k: v for k, v in __import__("os").environ.items()
                if k.lower() not in ("http_proxy", "https_proxy")}
-        with mock.patch.dict("os.environ", env, clear=True):
+        # 同时关掉自动探测：本机若有 Clash 在监听，会被当成"已配代理"，
+        # 于是先试代理再试直连，变成 2 次调用 —— 本用例要测的是"无代理"场景。
+        with mock.patch.dict("os.environ", env, clear=True), \
+             mock.patch.object(net, "_autodetect_proxy", return_value=""):
             with mock.patch.object(net.requests, "request", fake):
                 with self.assertRaises(net.NetworkError):
                     net.request("GET", "https://a.com/x")
@@ -200,7 +203,9 @@ class TestZombieProxy(unittest.TestCase):
         self._reset_cache()
         env = {k: v for k, v in __import__("os").environ.items()
                if k.lower() not in ("http_proxy", "https_proxy")}
-        with mock.patch.dict("os.environ", env, clear=True):
+        # 关掉自动探测，否则本机真在监听的代理端口会让"无代理"前提不成立
+        with mock.patch.dict("os.environ", env, clear=True), \
+             mock.patch.object(net, "_autodetect_proxy", return_value=""):
             self.assertIsNone(net.sanitize_proxy())
 
 
@@ -373,6 +378,76 @@ class TestPoolRankAndBanner(unittest.TestCase):
     def test_warn_box_cleared_when_no_warnings(self):
         self.assertIn("box.classList.add('hidden')", self.script)
         self.assertIn("box.innerHTML = ''", self.script)
+
+
+class TestProxyResolution(unittest.TestCase):
+    """代理的解析顺序：显式配置 > 环境变量 > 自动探测。
+
+    为什么要有显式配置这一层：采集服务常以守护进程方式启动，
+    **不继承** shell 里的 HTTP_PROXY，于是直连东财被 RST，
+    报"所有源都失败"，而手动在命令行跑却是好的 —— 极难定位。
+    """
+
+    def setUp(self):
+        self._saved = {k: v for k, v in __import__("os").environ.items()
+                       if k.lower() in ("http_proxy", "https_proxy")}
+
+    def tearDown(self):
+        import os
+        for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+            if k in self._saved:
+                os.environ[k] = self._saved[k]
+            else:
+                os.environ.pop(k, None)
+
+    def test_explicit_config_beats_env(self):
+        """DATA_PROXY 是本项目明确意图，必须压过继承来的环境变量。"""
+        from app.common.config import settings
+
+        env = {"HTTP_PROXY": "http://127.0.0.1:1", "http_proxy": "http://127.0.0.1:1",
+               "HTTPS_PROXY": "http://127.0.0.1:1", "https_proxy": "http://127.0.0.1:1"}
+        with mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(settings, "DATA_PROXY", "http://127.0.0.1:7890"), \
+             mock.patch.object(net, "_autodetect_proxy", return_value=""):
+            self.assertEqual(net._env_proxy(), "http://127.0.0.1:7890")
+
+    def test_ensure_proxy_writes_env_for_akshare(self):
+        """必须写回环境变量 —— akshare 内部自己发请求，只认环境变量。
+
+        只在传输层传 proxies= 会造成"一半走代理、一半直连"的诡异现象。
+        """
+        from app.common.config import settings
+        import os
+
+        env = {k: v for k, v in os.environ.items()
+               if k.lower() not in ("http_proxy", "https_proxy")}
+        with mock.patch.dict("os.environ", env, clear=True), \
+             mock.patch.object(settings, "DATA_PROXY", "http://127.0.0.1:7890"), \
+             mock.patch.object(net, "_autodetect_proxy", return_value=""):
+            got = net.ensure_proxy()
+            # 断言必须在 patch 内：退出 with 后 mock 会把环境变量还原
+            self.assertEqual(got, "http://127.0.0.1:7890")
+            self.assertEqual(os.environ.get("HTTP_PROXY"), "http://127.0.0.1:7890")
+            self.assertEqual(os.environ.get("https_proxy"), "http://127.0.0.1:7890")
+
+    def test_autodetect_used_only_as_last_resort(self):
+        """自动探测只在前面都没有时才用。"""
+        from app.common.config import settings
+
+        env = {"HTTP_PROXY": "http://127.0.0.1:9999"}
+        with mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(settings, "DATA_PROXY", ""), \
+             mock.patch.object(net, "_autodetect_proxy",
+                               return_value="http://127.0.0.1:7890") as fn:
+            self.assertEqual(net._env_proxy(), "http://127.0.0.1:9999")
+            fn.assert_not_called()
+
+    def test_autodetect_returns_loopback_url(self):
+        """探测结果必须是回环地址 —— 绝不能把请求引到别的机器。"""
+        found = net._autodetect_proxy()
+        if found:
+            self.assertTrue(found.startswith("http://127.0.0.1:")
+                            or found.startswith("http://localhost:"), found)
 
 
 if __name__ == "__main__":

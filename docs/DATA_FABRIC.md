@@ -340,6 +340,71 @@ class Kline:
 
 ---
 
+## 9.5 采集方式全景（有哪些、各几条、怎么扩）
+
+> 这一节回答两个高频问题：**"我现在到底采了哪些东西"**、
+> **"某个数据想再加一个源，动哪里"**。
+
+### 三条链路并存，别改错地方
+
+| 链路 | 入口 | 覆盖范围 | 有没有多源降级 |
+|---|---|---|---|
+| **新链路 Router** | `datasource/routing/router.py` | **只有 4 种能力**（见下表） | ✅ 有：多源排序 + 重试 + 熔断 + 质量校验 |
+| **老链路 facade** | `datasource/service/facade.py` | 20 个 `fetch_*` 函数 | ❌ **没有**：单源直连，挂了就是挂了 |
+| **股票池同步** | `alpha/pool/sync.py` | 14 个 `sync_*` 类别 | ❌ 没有，直接调 facade / 直连仓储 |
+
+**这是当前最大的结构性缺口**：真正走多源降级的只有 4 种能力，
+其余 16 个取数函数（筹码、涨停池、估值、新闻、宏观、龙虎榜、融资融券…）
+都是单源直连 —— 它们一挂就全挂，而且报出来的错和网络层故障长得一模一样。
+这也是"股票池采集还是有问题"的深层原因：`flow_rank` 这类**进了 Router 的**
+能力至少有熔断兜底，没进 Router 的连兜底都没有。
+
+### 新链路 Router：4 种能力
+
+| 能力 | 路由条数 | 源（按尝试顺序） | 备注 |
+|---|---|---|---|
+| `daily_kline` | **4** | baostock_daily → akshare_daily → astockdata → mootdx | 最稳的一条，东财被拦时有后手 |
+| `hot_rank` | **4** | emapp_hot → xueqiu_hot → akshare_em → akshare_spot | 跨了东财/雪球两个风控面 |
+| `fund_flow` | **2** | akshare → tushare | tushare 需 token |
+| `flow_rank` | **1** ⚠️ | akshare_flow | **单点**：唯一的源挂了就"1 条路由已全部用尽" |
+
+> `flow_rank` 只有一条，是**当前最容易整片失败的能力**。
+> 你看到的 `路由[flow_rank] 失败：1 条路由已全部用尽` 就是它 ——
+> 不是"所有源都试过了"，而是**压根没有第二个源可试**。
+
+### 老链路 facade：20 个取数函数（单源）
+
+```
+资金面  fetch_fund_flow / fetch_fund_flow_rank / fetch_chip
+        fetch_board_fund_flow / fetch_margin / fetch_dragon_tiger
+行情面  fetch_spot / fetch_limitup_pool / fetch_boards / fetch_concept_cons
+        fetch_market_breadth / fetch_trade_dates
+基本面  fetch_valuation / fetch_financial_indicator / fetch_forecast
+        fetch_holders / fetch_rating
+消息面  fetch_news / fetch_macro
+人气面  fetch_hot_rank
+```
+
+### 股票池同步：14 个类别
+
+`sync_fund_flow` / `sync_chip` / `sync_fundamentals` / `sync_factors` /
+`sync_news` / `sync_macro` / `sync_breadth` / `sync_category` /
+`sync_limitup` / `sync_hot_rank` / `sync_flow_rank` / `sync_stock_info` /
+`sync_boards` / `sync_concept_members` / `sync_board_members`
+
+### 想扩展：看清你要扩的是哪一层
+
+| 你想做的事 | 改哪里 | 几处 |
+|---|---|---|
+| 给**已有能力**加一个备选源（如给 flow_rank 加第二个源） | 写 Adapter + 加进 `config/providers.json` 的 `routes` | **2** |
+| 加一个**新能力**（如"北向资金"） | 加 `DataCapability` 常量 + Adapter + `routes` | 3 |
+| 加一个**新的 sync 类别**（如"大宗交易"） | facade 写 `fetch_*` + sync 写 `sync_*` + 建表 | 3~4 |
+| 把某个老 `fetch_*` **迁进 Router**（获得多源降级） | 加 Capability + Adapter 包一层 + `routes` | 3 |
+
+最小可用的"加一个备选源"见下一节 §10。
+
+---
+
 ## 10. 新增一个数据源：两步
 
 ### 第 1 步：写 Adapter

@@ -445,5 +445,41 @@ class TestQuotaInOrderPath(unittest.TestCase):
         self.assertIsNotNone(order)
 
 
+class TestHealthCheckContract(unittest.TestCase):
+    """``health_check`` 的契约是 ``(bool, str)`` —— **不是 dict**。
+
+    踩过的坑：``PortfolioService`` 曾返回 dict，而它内部又调
+    ``super().health_check()``（基类返回元组），于是 ``h["budget"] = ...``
+    抛 ``TypeError: 'tuple' object does not support item assignment``。
+    服务注册表把这个异常吞成一行"health_check 异常"，面板上看不到
+    任何额度信息，而日志里也没有 ERROR —— 极难定位。
+    """
+
+    def test_returns_two_tuple(self):
+        s = _svc([_pf("a", "000001", 50_000.0)])
+        res = s.health_check()
+        self.assertIsInstance(res, tuple, "必须是元组，不是 dict")
+        self.assertEqual(len(res), 2)
+        self.assertIsInstance(res[0], bool)
+        self.assertIsInstance(res[1], str)
+
+    def test_detail_carries_quota_info(self):
+        """说明文本要能看出额度占用，否则这条健康检查没有诊断价值。"""
+        s = _svc([_pf("a", "000001", 50_000.0)], budget=10_000.0)
+        s.reserve("t1", "000001", 3_000.0)
+        _, detail = s.health_check()
+        # 不断言 ok：服务没启动，基类按状态判定为不健康，这是对的
+        self.assertIn("预算", detail)
+        self.assertIn("3000", detail)
+
+    def test_super_result_is_tuple(self):
+        """钉住基类返回值类型 —— 这是当初踩坑的直接原因。"""
+        from app.engine.component.service.portfolio import PortfolioService
+
+        base = super(PortfolioService, _svc([_pf("a", "000001", 1_000.0)])
+                     ).health_check()
+        self.assertIsInstance(base, tuple)
+
+
 if __name__ == "__main__":
     unittest.main()

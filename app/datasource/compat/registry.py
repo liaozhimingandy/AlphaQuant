@@ -185,17 +185,37 @@ def network_hint() -> str:
     **是不是代理拦的、代理指向哪、该去哪里验证**。
     环境变量是硬事实，直接打出来比让人猜快得多。
     """
+    from app.datasource.transport import net
+
     parts = []
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         val = os.environ.get(var)
         if val:
             parts.append(f"{var}={val}")
     if not parts:
-        return ("排查：本机未设置代理环境变量；若处在公司网络/Clash 后面，"
-                "请确认代理端口真实在监听（netstat -ano | findstr :端口）")
-    return ("排查：当前代理环境变量 " + " ".join(parts)
-            + " —— 端口若无程序监听即为僵尸代理，改指向可用端口或临时取消；"
-              "验证命令：alphaquant sources --probe")
+        # 环境变量里没有，不代表"这台机器不能走代理" ——
+        # 很可能装了 Clash（7890 在监听）只是没设变量，
+        # 守护进程又不继承 shell 变量。先探一下再说，别误导人去改代码。
+        found = net._autodetect_proxy()
+        if found:
+            return (
+                "排查：未设代理环境变量，但检测到本机 " + found + " 有代理在监听 "
+                "（疑似 Clash）—— 直连东财会被 RST。"
+                "请在 config 里设 DATA_PROXY=" + found + "，或给启动进程设 HTTP_PROXY；"
+                "验证命令：alphaquant sources --probe"
+            )
+        return ("排查：本机未设置代理环境变量，且未在常见端口"
+                f"（{'/'.join(str(p) for p in net.COMMON_PROXY_PORTS[:4])}…）"
+                "发现代理。若处在公司网络/Clash 后面，请确认代理端口真实在监听"
+                "（netstat -ano | findstr :端口），并设 DATA_PROXY 指向它")
+    reach = net.proxy_reachable()
+    tail = (" —— 端口若无程序监听即为僵尸代理，改指向可用端口或临时取消；"
+            "验证命令：alphaquant sources --probe")
+    if reach is False:
+        return ("排查：当前代理环境变量 " + " ".join(parts)
+                + " **但端口连不上（僵尸代理）**，所有请求都会卡到超时后失败。"
+                " 改指向可用端口，或在配置里设 DATA_PROXY 覆盖它。" + tail)
+    return "排查：当前代理环境变量 " + " ".join(parts) + tail
 
 
 @dataclass
