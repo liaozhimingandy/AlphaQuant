@@ -46,6 +46,18 @@ class ServiceSpec:
     tasks: List[Mapping[str, Any]] = field(default_factory=list)
     task_config: str = ""
 
+    # 采集分工：本服务负责采哪些标的、哪些类别。
+    #
+    # 为什么要有这一段：hub 的每个服务都装配了同一套采集服务，
+    # 不开分工的话三个服务会把同一批标的各采一遍——数据源配额是共享的，
+    # 重复采三遍等于把请求额度浪费掉三分之二，还更容易触发限流。
+    # 空的 dict 表示"不干预，跟随全局设置"。
+    collector: Dict[str, Any] = field(default_factory=dict)
+
+    # 资讯配置：直接写进本服务的任务文件，等价于 tasks.json 里的 "news" 段。
+    # 有了它，一个纯新闻服务可以完全自包含，不必依赖环境变量 NEWS_SOURCES。
+    news_config: Dict[str, Any] = field(default_factory=dict)
+
     # 服务协作：发布/订阅的总线主题
     publish: List[str] = field(default_factory=list)
     subscribe: List[str] = field(default_factory=list)
@@ -79,6 +91,8 @@ class ServiceSpec:
             "publish": list(self.publish),
             "subscribe": list(self.subscribe),
             "autorestart": self.autorestart,
+            "collector": dict(self.collector),
+            "news_config": dict(self.news_config),
         }
 
 
@@ -134,6 +148,17 @@ def _as_list(v: Any) -> List[str]:
     return []
 
 
+def _as_dict(v: Any) -> Dict[str, Any]:
+    """只接受 JSON object；布尔/数组/标量一律当成"没配"，返回空。
+
+    ``"collector": true`` 这种写法看起来合理，但语义不明（到底开哪些类别），
+    与其猜，不如当没配并让全局设置兜底。
+    """
+    if isinstance(v, Mapping):
+        return {str(k): x for k, x in v.items()}
+    return {}
+
+
 def parse_service(raw: Mapping[str, Any]) -> ServiceSpec:
     sid = str(raw.get("id") or "").strip()
     if not sid:
@@ -171,6 +196,8 @@ def parse_service(raw: Mapping[str, Any]) -> ServiceSpec:
         ),
         tasks=[dict(t) for t in tasks],
         task_config=str(raw.get("task_config") or ""),
+        collector=_as_dict(raw.get("collector")),
+        news_config=_as_dict(raw.get("news_config") or raw.get("news_cfg")),
         publish=_as_list(raw.get("publish")),
         subscribe=_as_list(raw.get("subscribe")),
         bus_interval=float(raw.get("bus_interval") or 1.0),

@@ -5,7 +5,14 @@
     "  · market      行情服务：连数据源，把 bar 发布到总线，自己不跑策略",
     "  · alpha/beta  策略服务：不连行情源（market_mode=none），从总线订阅 bar 驱动策略",
     "  这样行情采集与策略执行可以各自扩容、各自重启，互不影响。",
-    "启动：python main.py hub start   （聚合面板默认 http://127.0.0.1:8899/）"
+    "启动：python main.py hub start   （聚合面板默认 http://127.0.0.1:8899/）",
+    "",
+    "采集分工：每个服务都装配了同一套采集服务，不开分工就会各采一遍、烧掉多倍配额。",
+    "  用服务的 collector 段声明本服务负责哪些标的/类别（见末尾的 fundamental 示例）。",
+    "只想临时采一次、不启服务：python main.py ctl collector categories --symbols 600519 --categories fundamental",
+    "",
+    "健康判定分三层，hub 面板分开显示：进程存活 → 引擎容器 running → 组件无异常。",
+    "  只有三层都过才是「健康」；进程在但引擎没起来/组件挂了，会标成「降级运行」。"
   ],
   "hub": { "host": "127.0.0.1", "port": 8899 },
   "state_dir": "output/services",
@@ -31,7 +38,13 @@
       "publish": ["bar"],
       "subscribe": [],
       "autorestart": true,
-      "tasks": []
+      "tasks": [],
+      "collector": {
+        "symbols": ["000001"],
+        "with_fundamental": true,
+        "with_flow": true,
+        "with_chip": true
+      }
     },
     {
       "id": "alpha",
@@ -143,7 +156,7 @@
     },
     {
       "id": "news",
-      "role": "新闻服务（需配置 NEWS_SOURCES 才会真正采集）",
+      "role": "新闻服务（启用前先填 news_config.sources）",
       "enabled": false,
       "port": 8791,
       "mode": "SIMULATE",
@@ -153,7 +166,43 @@
       "publish": ["news"],
       "subscribe": [],
       "autorestart": true,
-      "tasks": []
+      "tasks": [],
+      "news_config": {
+        "interval": 60,
+        "sources": [ { "type": "rss", "urls": [] } ],
+        "analyzers": [ { "type": "keyword" } ]
+      },
+      "_note": [
+        "开启步骤：1) 填 urls（或设环境变量 NEWS_SOURCES）；2) enabled 改 true；3) python main.py hub start",
+        "也可以不停 hub 单独起：python main.py hub cmd news start",
+        "urls 留空时服务照常启动但一条都不采 —— hub 面板会把它标成「降级运行」而不是健康"
+      ]
+    },
+    {
+      "id": "fundamental",
+      "role": "基本面采集服务（示例，默认关闭）",
+      "enabled": false,
+      "port": 8792,
+      "mode": "SIMULATE",
+      "market_mode": "none",
+      "publish": [],
+      "subscribe": [],
+      "autorestart": true,
+      "tasks": [],
+      "collector": {
+        "enabled": true,
+        "ext_enabled": true,
+        "symbols": ["600519", "000858"],
+        "with_fundamental": true,
+        "with_flow": false,
+        "with_chip": false,
+        "categories": []
+      },
+      "_note": [
+        "采集分工示例：只采基本面，资金流/筹码交给 market 服务，",
+        "同一批标的因此不会被采两遍（数据源配额是整台机器共享的）。",
+        "把 enabled 改成 true 即启用；symbols 换成你关心的标的。"
+      ]
     }
   ]
 }

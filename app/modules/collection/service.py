@@ -118,6 +118,8 @@ class CollectionService(ServiceComponent):
         cross_theme_top: Optional[int] = None,
         cross_enabled: Optional[bool] = None,
         cross_with_fundamental: Optional[bool] = None,
+        cross_with_flow: Optional[bool] = None,
+        cross_with_chip: Optional[bool] = None,
         cross_categories: Optional[List[str]] = None,
         # ---- 完整性单元 ----
         guard_symbols: Optional[Sequence[str]] = None,
@@ -140,7 +142,10 @@ class CollectionService(ServiceComponent):
 
         # ---------------- K 线单元 ----------------
         self._pending_kline_spec = kline_spec
-        self._kline_symbols = list(kline_symbols or self.symbols)
+        # 同理：显式 ``[]`` = "本单元不采个股"，不能退回默认标的集合
+        self._kline_symbols = list(
+            kline_symbols if kline_symbols is not None else self.symbols
+        )
         self._kline_interval = kline_interval
         self._kline_period = kline_period
         self._kline_adjust = kline_adjust
@@ -162,10 +167,15 @@ class CollectionService(ServiceComponent):
         self._cross_enabled = (
             settings.EXT_DATA_ENABLED if cross_enabled is None else bool(cross_enabled)
         )
-        self.cross_categories: List[str] = list(cross_categories) if cross_categories else [
-            "lhb", "margin", "forecast", "holders", "rating", "news",
-        ]
-        self.cross_symbols: List[str] = list(cross_symbols or self._kline_symbols)
+        # 判空用 ``is not None`` 而不是真值判断：``[]`` 是有意义的配置
+        # ——"我一个都不要"（服务分工时很常见），不能退化成"全都采"。
+        self.cross_categories: List[str] = (
+            list(cross_categories) if cross_categories is not None
+            else ["lhb", "margin", "forecast", "holders", "rating", "news"]
+        )
+        self.cross_symbols: List[str] = list(
+            cross_symbols if cross_symbols is not None else self._kline_symbols
+        )
         self.cross_interval = float(
             cross_interval if cross_interval is not None else settings.EXT_DATA_INTERVAL
         )
@@ -181,6 +191,11 @@ class CollectionService(ServiceComponent):
             settings.EXT_DATA_FUNDAMENTAL if cross_with_fundamental is None
             else bool(cross_with_fundamental)
         )
+        # 资金流/筹码默认开（与合并前的行为一致）。
+        # 关掉它们的唯一理由是**服务分工**：一个专门采基本面的服务
+        # 再去拉一遍全市场资金流，等于替行情服务重复烧掉一份请求额度。
+        self.cross_with_flow = True if cross_with_flow is None else bool(cross_with_flow)
+        self.cross_with_chip = True if cross_with_chip is None else bool(cross_with_chip)
         self._cross_loop: Optional[task.LoopingCall] = None
         self._cross_daily_loop: Optional[task.LoopingCall] = None
         self._busy_cross = False
@@ -200,7 +215,9 @@ class CollectionService(ServiceComponent):
         self._guard_enabled = (
             settings.DATA_GUARD_ENABLED if guard_enabled is None else bool(guard_enabled)
         )
-        self.guard_symbols: List[str] = list(guard_symbols or self._kline_symbols)
+        self.guard_symbols: List[str] = list(
+            guard_symbols if guard_symbols is not None else self._kline_symbols
+        )
         self.guard_interval = float(
             guard_interval if guard_interval is not None
             else settings.DATA_GUARD_INTERVAL
@@ -483,6 +500,113 @@ class CollectionService(ServiceComponent):
         d = threads.deferToThread(self._run_cross_once, slot)
         d.addBoth(self._release_cross)
         return d
+
+    #: 定向采集支持的类别。写死一张表而不是"传什么跑什么"，
+    #: 是为了让未知类别当场报错 —— 拼错一个字母然后拿到
+    #: "采集成功 0 条"的假成功，是排查成本最高的一种失败。
+    MANUAL_CATEGORIES = (
+        "fund_flow", "chip", "fundamental",
+        "lhb", "margin", "forecast", "holders", "rating", "news",
+    )
+    #: 类别 → 统计字段。新增类别时别忘在这里登记，否则面板永远显示 0。
+    _CROSS_STAT_KEY = {
+        "fund_flow": "fund_flow_ok",
+        "chip": "chip_ok",
+        "fundamental": "fundamental_ok",
+    }
+
+    def collect_categories(self, symbols: Optional[Sequence[str]] = None,
+                           categories: Optional[Sequence[str]] = None
+                           ) -> defer.Deferred:
+        """按**指定标的 + 指定类别**采一轮（人工触发，不看时间窗口）。
+
+        与 :meth:`collect_cross_now` 的分工：后者按服务的既定配置跑完整一轮，
+        这里听调用方的 —— "把 600519 的基本面现在采一遍"就是这条路径，
+        不必等到盘后窗口，也不必为此改 services.json。
+        """
+        syms = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+        cats = [str(c).strip() for c in (categories or []) if str(c).strip()] or ["fundamental"]
+        unknown = [c for c in cats if c not in self.MANUAL_CATEGORIES]
+        if unknown:
+            return defer.fail(ValueError(
+                f"未知采集类别: {unknown} | 可选: {list(self.MANUAL_CATEGORIES)}"
+            ))
+        if not syms:
+            syms = list(self.cross_symbols)
+        if not syms:
+            return defer.fail(ValueError(
+                "没有指定标的，且本服务也没配截面标的（collector.symbols）"
+            ))
+        if self._busy_cross:
+            logger.warning("日频截面采集仍在进行中，忽略本次定向采集")
+            return defer.succeed(None)
+        self._busy_cross = True
+        d = threads.deferToThread(self._run_manual_cross, syms, cats)
+        d.addBoth(self._release_cross)
+        return d
+
+    def _run_manual_cross(self, symbols: List[str],
+                          categories: List[str]) -> Dict[str, Any]:
+        """定向采集的执行体（在工作线程里跑）。
+
+        注意方法名里的 ``_cross``：进度路由靠它把这一轮归到截面单元的
+        进度条上，而不是刷掉 K 线单元那份（见 :meth:`_caller_unit`）。
+        """
+        from app.modules.universe.pool import (
+            sync_category,
+            sync_chip,
+            sync_fund_flow,
+            sync_fundamentals,
+        )
+
+        self.start_progress(
+            len(categories),
+            f"{len(symbols)} 只 · {len(categories)} 项（定向采集）",
+        )
+        report: Dict[str, Any] = {"symbols": list(symbols), "detail": {}}
+        try:
+            for cat in categories:
+                try:
+                    if cat == "fund_flow":
+                        r = sync_fund_flow(symbols)
+                    elif cat == "chip":
+                        r = sync_chip(symbols)
+                    elif cat == "fundamental":
+                        r = sync_fundamentals(symbols)
+                    else:
+                        r = sync_category(cat, symbols)
+                except Exception as exc:
+                    # 一个类别挂了不该让整轮中断：想看基本面，
+                    # 龙虎榜没数据不影响结论。
+                    self.stats_cross["failed"] += 1
+                    self.advance_progress(1, failed=True)
+                    report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
+                    continue
+                failed = r.get("failed") or []
+                self.advance_progress(1, failed=bool(failed))
+                key = self._CROSS_STAT_KEY.get(cat)
+                if key:
+                    self.stats_cross[key] += r.get("ok", 0)
+                self.stats_cross["failed"] += len(failed)
+                report["detail"][cat] = {
+                    "ok": r.get("ok", 0),
+                    "failed": list(failed)[:5],
+                }
+            self.stats_cross["runs"] += 1
+            self.stats_cross["last_run_at"] = datetime.now().isoformat()
+
+            # 与定时路径同理：采完必须让特征缓存失效，
+            # 否则面板上看到的还是上一轮的老数。
+            try:
+                from app.modules.factor.features import get_provider
+
+                get_provider().invalidate()
+            except Exception:
+                pass
+            self.cross_last_report = report
+            return report
+        finally:
+            self.finish_progress()
 
 
 # ============================================================
@@ -904,6 +1028,10 @@ class CollectionService(ServiceComponent):
             self._cross_enabled = bool(cfg["enabled"])
         if cfg.get("with_fundamental") is not None:
             self.cross_with_fundamental = bool(cfg["with_fundamental"])
+        if cfg.get("with_flow") is not None:
+            self.cross_with_flow = bool(cfg["with_flow"])
+        if cfg.get("with_chip") is not None:
+            self.cross_with_chip = bool(cfg["with_chip"])
         if cfg.get("categories") is not None:
             self.cross_categories = [str(c) for c in cfg["categories"]]
 
@@ -922,7 +1050,9 @@ class CollectionService(ServiceComponent):
         state = self._cross_calendar().to_dict()
         logger.info(
             f"扩展行情采集就绪 | 标的 {len(self.cross_symbols)} 个 | "
-            f"资金流/筹码 {self.cross_interval}s | 市场级 {self.cross_daily_interval}s | "
+            f"资金流{'开' if self.cross_with_flow else '关'}"
+            f"/筹码{'开' if self.cross_with_chip else '关'} {self.cross_interval}s | "
+            f"市场级 {self.cross_daily_interval}s | "
             f"基本面 {'开' if self.cross_with_fundamental else '关'} | "
             f"当前 {state['state_name']}"
         )
@@ -1048,7 +1178,12 @@ class CollectionService(ServiceComponent):
         final = slot == "post"
         items: List[str] = []
         if self.cross_symbols:
-            items += ["fund_flow", "chip"]
+            # 三项各自可关：服务分工时（例如"只采基本面"）不该再替别的
+            # 服务拉一遍资金流/筹码——数据源的配额是整台机器共享的。
+            if self.cross_with_flow:
+                items.append("fund_flow")
+            if self.cross_with_chip:
+                items.append("chip")
             if self.cross_with_fundamental and (final or self._cross_final_date is None):
                 items.append("fundamental")
             if final:
@@ -1085,16 +1220,18 @@ class CollectionService(ServiceComponent):
         today = date.today()
 
         if self.cross_symbols:
-            r1 = sync_fund_flow(self.cross_symbols)
-            self.advance_progress(1, failed=bool(r1.get("failed")))
-            r2 = sync_chip(self.cross_symbols)
-            self.advance_progress(1, failed=bool(r2.get("failed")))
-            self.stats_cross["fund_flow_ok"] += r1.get("ok", 0)
-            self.stats_cross["chip_ok"] += r2.get("ok", 0)
-            self.stats_cross["failed"] += (len(r1.get("failed") or [])
-                                     + len(r2.get("failed") or []))
-            report["fund_flow"] = r1
-            report["chip"] = r2
+            if self.cross_with_flow:
+                r1 = sync_fund_flow(self.cross_symbols)
+                self.advance_progress(1, failed=bool(r1.get("failed")))
+                self.stats_cross["fund_flow_ok"] += r1.get("ok", 0)
+                self.stats_cross["failed"] += len(r1.get("failed") or [])
+                report["fund_flow"] = r1
+            if self.cross_with_chip:
+                r2 = sync_chip(self.cross_symbols)
+                self.advance_progress(1, failed=bool(r2.get("failed")))
+                self.stats_cross["chip_ok"] += r2.get("ok", 0)
+                self.stats_cross["failed"] += len(r2.get("failed") or [])
+                report["chip"] = r2
 
             # 基本面（估值+财务）一天一次就够，只在收盘后采 ——
             # 盘中的估值随价格跳动，拉到的是未定稿的数，存进去反而污染序列
@@ -1235,6 +1372,9 @@ class CollectionService(ServiceComponent):
             "daily_interval": self.cross_daily_interval,
             "theme_top": self.cross_theme_top,
             "with_fundamental": self.cross_with_fundamental,
+            "with_flow": self.cross_with_flow,
+            "with_chip": self.cross_with_chip,
+            "categories": list(self.cross_categories),
             "market": info,
             "synced_date": self._cross_synced_date.isoformat() if self._cross_synced_date else None,
             "final_date": self._cross_final_date.isoformat() if self._cross_final_date else None,

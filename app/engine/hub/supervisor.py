@@ -20,6 +20,19 @@ from app.common.jsonio import read_json, write_json_atomic
 from app.common.logging import logger
 
 
+def _seconds_since(iso: Any) -> float:
+    """ISO 时间戳距今多少秒；解析不了返回 0。
+
+    返回 0 的含义是"不知道"，调用方据此按未知处理 —— 不猜、不报警。
+    """
+    if not iso:
+        return 0.0
+    try:
+        return max(0.0, (datetime.now() - datetime.fromisoformat(str(iso))).total_seconds())
+    except Exception:
+        return 0.0
+
+
 class ServiceSupervisor:
     """多进程服务编排器。
 
@@ -150,14 +163,52 @@ class ServiceSupervisor:
         timeout = self.hub.heartbeat_timeout or settings.SERVICE_HEARTBEAT_TIMEOUT
 
         healthy = bool(alive and age is not None and age <= timeout)
+        state_map = state or {}
+        engine_status = str(state_map.get("engine_status") or "")
+        engine_running = bool(state_map.get("engine_running"))
+        bad = [str(x) for x in (state_map.get("components_bad") or [])]
+        # boot_seconds 是新版心跳才有的字段。老进程写的心跳没有它，
+        # 但一直都写了 started_at —— 用它兜底，判定立刻对老服务生效，
+        # 不必等所有服务逐个重启一遍才看得到"降级"。
+        boot = float(state_map.get("boot_seconds") or 0.0)
+        if boot <= 0.0:
+            boot = _seconds_since(state_map.get("started_at"))
+        engine_error = ""
+        eng = state_map.get("engine")
+        if isinstance(eng, dict) and eng.get("error"):
+            engine_error = str(eng["error"])[:120]
+
+        reasons: List[str] = []
         if not spec:
             health = "unknown"
         elif not alive:
             health = "stopped"
         elif not healthy:
             health = "stale"
+        elif not state_map or "engine_status" not in state_map:
+            # 旧版心跳没有引擎层信息。这里不猜：既不谎报健康，
+            # 也不把正在干活的服务标成降级 —— 标"未知"并提示重启即可。
+            health = "unknown"
+            reasons.append(
+                "心跳为旧版（未上报引擎/组件状态），重启该服务后可见三层判定"
+            )
         else:
-            health = "healthy"
+            # ---- 进程活着，往下看引擎与组件 ----
+            # 以前到这里就一律判"健康"。但进程活着只是最弱的一层信号：
+            # 引擎容器可能还没 start()，组件可能全在初始化时炸了
+            # （引擎对组件异常是逐个隔离的，不会让进程退出）。
+            # 结果是面板上一片绿，而实际一笔数据都没采、一个任务都没跑。
+            grace = max(float(self.hub.heartbeat_timeout or 0.0), 30.0)
+            if engine_error:
+                reasons.append(f"引擎快照异常: {engine_error}")
+            elif not engine_running and boot > grace:
+                reasons.append(
+                    f"引擎容器未运行（{engine_status or '状态未知'}，进程已启动 {boot:.0f}s）"
+                )
+            if bad:
+                more = "" if len(bad) <= 3 else f" 等 {len(bad)} 个"
+                reasons.append(f"组件异常: {', '.join(bad[:3])}{more}")
+            health = "degraded" if reasons else "healthy"
 
         return {
             "service_id": service_id,
@@ -166,6 +217,12 @@ class ServiceSupervisor:
             "pid": pid,
             "alive": bool(alive),
             "health": health,
+            # 这三层分开暴露，调用方要哪层自己取：
+            # 进程（alive）→ 引擎（engine_running）→ 组件（components_bad）
+            "engine_status": engine_status or None,
+            "engine_running": engine_running,
+            "components_bad": bad,
+            "degraded_reasons": reasons,
             "heartbeat_age": round(age, 1) if age is not None else None,
             "heartbeat_timeout": timeout,
             "restarts": self._restarts.get(service_id, 0),

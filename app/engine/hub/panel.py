@@ -137,10 +137,11 @@ HUB_HTML = r"""<!DOCTYPE html>
   function post(p,b){ return api(p,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(b||{})}); }
 
-  function healthPill(h){
-    var m={healthy:'ok',stopped:'off',stale:'bad',unknown:'warn'};
-    var t={healthy:'健康',stopped:'已停止',stale:'失联',unknown:'未知'};
-    return '<span class="pill '+(m[h]||'off')+'">'+(t[h]||h||'-')+'</span>';
+  function healthPill(h,title){
+    var m={healthy:'ok',degraded:'warn',stopped:'off',stale:'bad',unknown:'warn'};
+    var t={healthy:'健康',degraded:'降级运行',stopped:'已停止',stale:'失联',unknown:'未知'};
+    return '<span class="pill '+(m[h]||'off')+'"'
+      +(title?(' title="'+esc(title)+'"'):'')+'>'+(t[h]||h||'-')+'</span>';
   }
 
   function render(data){
@@ -151,20 +152,22 @@ HUB_HTML = r"""<!DOCTYPE html>
     $('hb-timeout').textContent = hub.heartbeat_timeout||'-';
     $('updated').textContent = (data.updated_at||'').replace('T',' ').slice(11,19);
 
-    var alive=0, tasks=0, eq=0, pnl=0, trades=0;
+    var alive=0, tasks=0, eq=0, pnl=0, trades=0, degraded=0;
     svcs.forEach(function(s){
       if(s.alive) alive++;
+      if(s.health==='degraded') degraded++;
       var st=s.state||{}, sum=st.summary||{};
       tasks += sum.task_count||0; eq += sum.total_equity||0;
       pnl += sum.total_pnl||0; trades += sum.trade_count||0;
     });
     var cards=[['服务总数', svcs.length, '存活 '+alive],
+               ['降级服务', degraded, degraded?'有服务在空转':'全部正常干活'],
                ['任务总数', tasks, '跨服务聚合'],
                ['总权益', money(eq), '全服务合计'],
                ['总盈亏', sgn(pnl), '含浮动'],
                ['成交笔数', trades, '']];
     $('kpis').innerHTML = cards.map(function(c,i){
-      var c2 = (i===3 && typeof c[1]==='string') ? (c[1].charAt(0)==='+'?'up':(c[1].charAt(0)==='-'?'down':'')) : '';
+      var c2 = (i===4 && typeof c[1]==='string') ? (c[1].charAt(0)==='+'?'up':(c[1].charAt(0)==='-'?'down':'')) : '';
       return '<div class="kpi"><div class="k">'+esc(c[0])+'</div><div class="v '+c2+'">'+
         (typeof c[1]==='number'?money(c[1],0):esc(c[1]))+'</div><div class="k">'+esc(c[2])+'</div></div>';
     }).join('');
@@ -175,13 +178,19 @@ HUB_HTML = r"""<!DOCTYPE html>
       return '<div class="svc">'+
         '<div class="top"><div><div class="nm">'+esc(s.service_id)+'</div>'+
           '<div class="role">'+esc(s.role||'')+(sp.mode?(' · '+esc(sp.mode)):'')+'</div></div>'+
-          healthPill(s.health)+'</div>'+
+          healthPill(s.health, (s.degraded_reasons||[]).join('；'))+'</div>'+
         '<div class="rowline">'+
           '<span>PID <b>'+(s.pid||'-')+'</b></span>'+
           '<span>心跳 <b>'+age+'</b></span>'+
           '<span>重启 <b>'+(s.restarts||0)+'</b></span>'+
           '<span>发布 <b>'+esc((sp.publish||[]).join(',')||'—')+'</b></span>'+
           '<span>订阅 <b>'+esc((sp.subscribe||[]).join(',')||'—')+'</b></span>'+
+        '</div>'+
+        '<div class="rowline">'+
+          '<span>引擎 <b>'+esc(st.engine_status||'-')+'</b></span>'+
+          '<span>组件 <b>'+((s.components_bad&&s.components_bad.length)
+              ? ('<span class="up">'+s.components_bad.length+' 个异常</span>')
+              : '正常')+'</b></span>'+
         '</div>'+
         '<div class="rowline">'+
           '<span>任务 <b>'+(sum.task_count||0)+'</b></span>'+

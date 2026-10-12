@@ -228,6 +228,36 @@ def ctl_collector_now(symbol, port) -> None:
         click.secho(f"❌ 失败: {data.get('error')}", fg="red")
         sys.exit(1)
 
+@ctl_collector_group.command(
+    name="categories",
+    help="定向采集：指定标的 × 指定类别（基本面/资金流/龙虎榜…）")
+@click.option("--symbols", required=True, help="逗号分隔的标的，如 600519,000858")
+@click.option("--categories", default="fundamental",
+              help="逗号分隔：fund_flow/chip/fundamental/lhb/margin/forecast/holders/rating/news")
+@_ctl_port
+def ctl_collect_categories(symbols, categories, port) -> None:
+    """采**指定标的的指定类别**，不必等盘后窗口，也不必改 services.json。"""
+    data = _api(port, "/api/cross/collect",
+                {"symbols": symbols, "categories": categories}, timeout=300.0)
+    if not data.get("ok"):
+        click.secho(f"❌ 失败: {data.get('error')}", fg="red")
+        sys.exit(1)
+    syms = data.get("symbols") or []
+    click.secho(
+        f"✅ 定向采集完成 | 标的 {len(syms)} 只 | 类别 "
+        f"{', '.join((data.get('detail') or {}).keys()) or '-'}",
+        fg="green",
+    )
+    for cat, r in (data.get("detail") or {}).items():
+        failed = r.get("failed") or []
+        line = f"   · {cat:<12} 成功 {r.get('ok', 0)}"
+        if r.get("error"):
+            click.secho(f"{line} | 错误: {r['error']}", fg="red")
+        elif failed:
+            click.secho(f"{line} | 失败 {len(failed)}: {failed[:3]}", fg="yellow")
+        else:
+            click.echo(line)
+
 @ctl_collector_group.command(name="reload", help="重新加载 config/collector.json")
 @_ctl_port
 def ctl_collector_reload(port) -> None:

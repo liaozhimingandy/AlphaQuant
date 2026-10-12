@@ -150,5 +150,22 @@ class NewsService(ServiceComponent):
         """轮询在跑就认为忙，避免引擎在后台服务场景误判空闲而退出。"""
         return self._loop is not None and bool(self._loop.running)
 
+    def health_check(self):
+        """没有新闻源就是**不健康**。
+
+        没有源时 :meth:`on_start` 会跳过轮询，服务照常进入 RUNNING：
+        于是面板上是绿的、hub 上也是绿的，而这条链路上一条新闻都没有。
+        "在跑但什么都没干"必须被标出来 —— 它比报错更难发现。
+        """
+        if not self.enabled:
+            return True, "disabled"
+        if not self.news_center.sources:
+            return (
+                False,
+                "未配置新闻源：不会采集到任何内容。"
+                "在 services.json 的 news_config.sources 或环境变量 NEWS_SOURCES 里配 RSS 地址",
+            )
+        return super().health_check()
+
 
 __all__ = ["NewsService"]

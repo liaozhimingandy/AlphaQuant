@@ -76,7 +76,7 @@ main.py:20  cli()
 
 ### 1.3 进入主循环
 
-`service_runner.py:218` 调 `engine.start()` → `base.py:265` `reactor.run()` 阻塞。
+`service_runner.py:218` 调 `engine.start()` → `engine.py::start` 里的 `reactor.run()` 阻塞。
 此后所有事情都发生在 reactor 的回调里。
 
 ---
@@ -202,7 +202,7 @@ _execute_task                                   scheduler.py:250-302
 这类约束——**只写在注释里**，改代码的人一不小心就打乱，而乱序的后果
 不是报错，是"挂载静默失败 / 体检把没采到的数据误判成缺口"。
 
-**重构后**由引擎自己算（`base.py:456-465`），排序键是三元组：
+**重构后**由引擎自己算（`engine.py::ordered_component_names`），排序键是三元组：
 
 ```
 (KIND_LAYER, 0 或 1, 服务位次或注册序号)
@@ -226,7 +226,7 @@ scheduler → collection_service → market_service → news_service
 → strategy → worker → monitor
 ```
 
-停止时严格 `reversed(...)`（`base.py:612`），所以是
+停止时严格 `reversed(...)`（`engine.py::_graceful_shutdown`），所以是
 `monitor → worker → strategy → trading_service → ... → scheduler`。
 
 > **一处"已就绪但未使用"**：六个服务的 `depends_on` **全是空元组**
@@ -238,14 +238,14 @@ scheduler → collection_service → market_service → news_service
 ## 4. 依赖注入：为什么在初始化之前
 
 ```
-base.py:217-219   bind_services(...)      ← 先注入
-base.py:229       component.initialize()  ← 后初始化
+engine.py::initialize   bind_services(...)      ← 先注入
+engine.py::initialize  component.initialize()  ← 后初始化
 ```
 
-原因写在 `base.py:214-216`：策略的 `on_initialize()` 里**就要用**注入进来的服务
+原因写在 `engine.py::initialize` 的注释里：策略的 `on_initialize()` 里**就要用**注入进来的服务
 （比如把任务挂到网关上）。顺序反了就会拿到 `None`。
 
-**服务缺失 vs 策略缺失，处理是相反的**（`base.py:151-160`）：
+**服务缺失 vs 策略缺失，处理是相反的**（`engine.py` 的组件注册与 `get_component`）：
 
 | 声明 | 缺失时 |
 |---|---|
@@ -264,8 +264,8 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 
 ### reactor 主线程（绝不能阻塞）
 
-- `base.py:265` `reactor.run()`；`base.py:589-631` 关停协程
-- `base.py:285-307` 空闲看门狗
+- `engine.py::start` 的 `reactor.run()`；`engine.py::_graceful_shutdown` 关停协程
+- `engine.py::_start_idle_watchdog` 空闲看门狗
 - `market.py:230-254` 行情节拍与 `_emit`
 - `event.py:76-83` `EventBus.publish` —— **同步**调用所有订阅者
 - **整条交易链路**：`runtime.on_bar` → `task.on_bar` → 策略计算 →
@@ -316,8 +316,8 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 - 实现：`EventBus`（`event.py:62-91`），`_receivers: Dict[str, List[Callable]]`
 - `publish()` **同步**遍历回调，**逐接收者 try/except 隔离**（`:82-83`）——
   一个订阅者抛错不影响其他订阅者，也不影响发布方
-- 组件封装：`component/base.py:265-272` `subscribe_event`
-- **自动退订**：`component/base.py:274-285` `_clear_subscriptions`，
+- 组件封装：`engine/component.py::subscribe_event`
+- **自动退订**：`engine/component.py` 的 `_clear_subscriptions`，
   在 `stop()` 里调用（`:198`），杜绝僵尸回调
 
 ### 主要事件：谁发 → 谁收
@@ -333,7 +333,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | `ORDER_CANCELLED` | `strategy.py:226` | `trading.py:730` → 落库 |
 | `SIGNAL_REJECTED` | `strategy.py:230` | `trading.py:731` → 落库 |
 | `DATA_COLLECTED` | `collection.py:723` | `trading.py:732` → 落库 |
-| `COMPONENT_ERROR` | `base.py:232/587` | `trading.py:733` → 落库 |
+| `COMPONENT_ERROR` | `engine.py::initialize` / `_start_all_components` | `trading.py:733` → 落库 |
 | `TIMER_3MIN` | `scheduler.py:104` | 暂无订阅者 |
 
 除了进程内总线，还有一条**进程间总线**（`app/runtime/bus/filebus.py` +
@@ -344,7 +344,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 
 ## 7. 关停：优雅退出做了什么
 
-`base.py:589-631` `_graceful_shutdown`：
+`engine.py::_graceful_shutdown`：
 
 1. **等空闲**（`:597-609`）：`while not _is_idle() and 未超时: yield async_sleep(0.1)`；
    预算 `SHUTDOWN_TASK_WAIT`（默认 30s），超时**告警后强制继续**——宁可丢一点尾巴，
@@ -354,7 +354,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 3. **落状态**（`:623`）：刷最终快照 + 保存运行期任务。
 4. 置 `STOPPED` → `reactor.stop()`。
 
-**空闲判定**（`base.py:326-340`）：先看所有组件 `is_busy()`，任一忙即非空闲；
+**空闲判定**（`engine.py::_is_idle`）：先看所有组件 `is_busy()`，任一忙即非空闲；
 否则问 `scheduler.is_idle`（队列空且无在跑任务）。
 
 > **一个已知别扭**：`MarketService.is_busy()`（`market.py:328`）在 poll 模式下
@@ -376,3 +376,115 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 
 模式在装配时从 `RunMode` 读（`builder.py`），并下沉到 `runtime.run_mode`
 （`builder.py:349`），任务据此决定撮合方式。
+
+---
+
+## 9. 多服务编排（hub）：三层进程、三层健康
+
+`python main.py hub start` 起的是**三层互相独立的东西**，搞清楚它们的边界，
+"面板上一片绿但什么都没干"这种事就不会再困惑：
+
+| 层 | 进程 | 代码 | 职责 |
+|---|---|---|---|
+| ①hub | hub 进程 ×1 | `app/engine/hub/hub.py` | 读 `config/services.json`、拉起并看护 N 个子进程、聚合面板（默认 8899） |
+| ②worker | 每个服务 ×1 进程 | `app/engine/hub/worker.py` | 装配**自己的**引擎容器、写心跳、轮询远程指令 |
+| ③engine | 进程内的对象 | `app/engine/engine.py` | 组件生命周期（initialize → start → stop） |
+
+### 9.1 为什么"engine 容器没启动"，hub 上的服务还是健康的
+
+三层各自独立，能同时成立的组合比直觉多：
+
+1. **hub 不看引擎**。它只 spawn 子进程，然后读 `output/services/<id>/state.json`
+   这个文件。文件新、PID 在 → 它就认为服务在。
+2. **worker 在 `engine.start()` 之前就开始写心跳**（`worker.py:297`）。
+   这是有意的：supervisor 要尽快看到新起的服务，不能等装配完（装配可能几十秒）。
+3. **引擎对组件异常是逐个隔离的**（`engine.py:228` / `:583`）。
+   组件初始化或启动抛异常，只记日志发事件，进程照常活着。
+
+于是"进程活着 + 心跳新鲜"完全可能与"引擎还没起来"或"组件全挂了"同时存在。
+**以前 hub 只判第一层**，这三种状态在面板上都显示"健康"——看着一片绿，
+实际一笔数据没采、一个任务没跑。
+
+### 9.2 三层健康判定（现在分开判）
+
+`hub/supervisor.py::service_status` 的返回值：
+
+| health | 判定 | 含义 |
+|---|---|---|
+| `healthy` | 进程活 + 心跳新 + 引擎 `running` + 无异常组件 | 三层都过了 |
+| `degraded` | 进程活 + 心跳新，但引擎非 running（超过启动宽限）或存在 unhealthy/ERROR 组件 | **在跑，但没在干活** |
+| `stale` | 心跳超过 `heartbeat_timeout`（默认 15s） | 卡死/被挂起 |
+| `stopped` | 进程不在 | 没起或已退出 |
+
+- **启动宽限**：`max(heartbeat_timeout, 30s)`。装配 + 初始化组件可能要几十秒，
+  这段时间内引擎没到 `running` 属于正常启动过程，不报警。
+- `degraded` **不会触发自动重启**：重启治不了"组件装配失败"，只会变成重启风暴。
+  修根因（看 `degraded_reasons`）才是正解。
+- 面板上每个服务卡片显示 `引擎 <状态>` 与 `组件 N 个异常`，鼠标悬停健康徽标看原因。
+- CLI 同样分三层：`python main.py hub status` 的健康列现在会显示 `degraded`。
+
+### 9.3 采集分工：别让三个服务烧掉三倍配额
+
+每个 hub 服务都装配了同一套采集服务（K 线 + 日频截面 + 完整性校验）。
+不分工的话，三个服务会把同一批标的各采一遍——数据源配额是整台机器共享的。
+用服务的 `collector` 段声明本服务负责什么：
+
+```json
+"collector": {
+  "enabled": true,          // K 线单元；省略 = 跟随全局
+  "symbols": ["600519"],    // 本服务负责的标的
+  "with_fundamental": true, // 基本面
+  "with_flow": false,       // 资金流交给别的服务
+  "with_chip": false,       // 筹码交给别的服务
+  "categories": []          // 龙虎榜/两融/… 都不采
+}
+```
+
+> **`[]` 不等于"没配"**：`symbols: []` 表示"本服务只采市场级数据（涨停池/题材/宏观）"，
+> `categories: []` 表示"这些类别一个都不采"。
+> 代码里一律用 `is not None` 判断，不会把空数组静默填成默认集合——
+> 真值判断（`or`）在这里会把"我不要"读成"给我全部"，是分工功能最容易踩的坑。
+
+`config/services.json` 末尾有一个默认关闭的 `fundamental` 服务，就是分工示例。
+
+### 9.4 想采"指定标的的基本面"，走哪条路
+
+三条，按"临时 → 长期"排：
+
+| 场景 | 做法 |
+|---|---|
+| 临时采一次 | `python main.py ctl collector categories --symbols 600519,000858 --categories fundamental --port 8788` |
+| 面板 / 程序调用 | `POST /api/cross/collect` `{"symbols":["600519"],"categories":["fundamental"]}` |
+| 交给 hub 上的某个服务 | `python main.py hub cmd market cross_collect` + 命令文件（见下） |
+| 长期分工 | `config/services.json` 里加一个带 `collector` 段的服务（§9.3） |
+
+hub 命令文件（`output/services/<id>/commands/*.json`）写法：
+
+```json
+{"action": "cross_collect", "symbols": ["600519","000858"], "categories": ["fundamental"]}
+```
+
+支持的类别（`CollectionService.MANUAL_CATEGORIES`）：
+`fund_flow` 资金流 · `chip` 筹码 · `fundamental` 基本面 ·
+`lhb` 龙虎榜 · `margin` 两融 · `forecast` 业绩预告 · `holders` 股东户数 ·
+`rating` 评级 · `news` 舆情。
+**拼错会当场报错**（返回"未知采集类别"），不会给你一个"成功 0 条"的假成功。
+
+链路：`ControlCenter.cross_collect` → `CollectionService.collect_categories`
+→ `deferToThread(_run_manual_cross)` → `modules/universe/pool/sync_fundamentals`
+→ 写 `stock_fundamental` 表 → 失效特征缓存（否则面板上还是旧值）。
+
+### 9.5 新闻（news）服务怎么开
+
+`config/services.json` 里已有一个 `news` 服务，默认关闭。三步开起来：
+
+1. 填源：`news_config.sources[0].urls`（或环境变量 `NEWS_SOURCES`，逗号分隔）；
+2. `"enabled": true`；
+3. `python main.py hub start`，或不停 hub 单独起：`python main.py hub cmd news start`。
+
+开起来后它把新闻事件发布到总线（`publish: ["news"]`），
+`beta` 这类服务 `subscribe: ["news"]` 就能拿到。
+
+> **源为空时它现在会被标成 `degraded`**（`NewsService.health_check`）。
+> 以前是"健康"——服务在跑、轮询在转，但一条新闻都拿不到，
+> 这种"在跑但什么都没干"比报错更难发现，所以按 §9.2 的原则一并标出来。

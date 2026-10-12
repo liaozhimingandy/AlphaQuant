@@ -72,6 +72,11 @@ class ServiceWorker:
             "data_source": self.spec.data_source,
             "tasks": self.spec.tasks,
         }
+        # 资讯服务的自包含配置：写进任务文件后，装配器会把它当成 tasks.json
+        # 里的 "news" 段读取。这样新闻源跟着服务走，不必依赖环境变量，
+        # 同机跑两个新闻服务也能各用各的源。
+        if self.spec.news_config:
+            payload["news"] = dict(self.spec.news_config)
         if self.spec.task_config:
             base = read_json(self.spec.task_config)
             if isinstance(base, dict):
@@ -92,6 +97,12 @@ class ServiceWorker:
         # market_mode = none/bus/off 表示"本服务不连行情源"，
         # 行情完全由总线订阅组件供给（多服务协作的典型角色划分）
         local_market = self.spec.market_mode.lower() not in ("none", "bus", "off")
+        # 采集分工：本服务负责采什么。不配就什么都不干预，跟随全局设置。
+        # 配了才显式分工 —— 三个服务都全套采一遍，数据源配额会被白白烧掉三倍。
+        col = self.spec.collector or {}
+        # ``symbols: []`` 是有意义的声明（本服务不采个股，只采市场级），
+        # 不能用 ``or None`` 把它抹掉 —— 那会被 fallback 成全部标的。
+        col_symbols = col.get("symbols")
         self.engine = build_engine(
             task_config=task_config,
             mode=self.spec.mode,
@@ -104,6 +115,15 @@ class ServiceWorker:
             with_news=self.spec.news,
             with_market=local_market,
             with_monitor=self.spec.monitor,
+            with_collector=col.get("enabled"),
+            collector_symbols=col_symbols,
+            ext_symbols=col_symbols,
+            ext_interval=col.get("interval"),
+            with_ext_data=col.get("ext_enabled"),
+            cross_with_fundamental=col.get("with_fundamental"),
+            cross_with_flow=col.get("with_flow"),
+            cross_with_chip=col.get("with_chip"),
+            cross_categories=col.get("categories"),
             monitor_host=self.spec.host,
             monitor_port=self.spec.port,
             monitor_interval=self.spec.snapshot_interval,
@@ -151,20 +171,49 @@ class ServiceWorker:
     # ============================================================
     # 心跳
     # ============================================================
+    def _boot_seconds(self) -> float:
+        """进程启动至今的秒数。
+
+        hub 用它给引擎启动留宽限期：worker 是在 ``engine.start()`` **之前**
+        就开始写心跳的（要让 supervisor 尽快看到本服务），所以刚 fork 出来的
+        那几秒里"进程活着但引擎还在初始化"是正常状态，不能判成故障。
+        """
+        try:
+            return max(
+                0.0,
+                (datetime.now() - datetime.fromisoformat(self.started_at)).total_seconds(),
+            )
+        except Exception:
+            return 0.0
+
     def _state_payload(self) -> Dict[str, Any]:
         engine_part: Dict[str, Any] = {}
         tasks: List[Dict[str, Any]] = []
         components: List[Dict[str, Any]] = []
         bus: Dict[str, Any] = {}
 
+        engine_status = ""
+        bad_components: List[str] = []
         if self.engine is not None:
             try:
                 snap = self.engine.snapshot()
                 engine_part = snap.get("engine") or {}
+                comp_map = snap.get("components") or {}
                 components = [
                     {"name": k, **{kk: vv for kk, vv in v.items() if kk != "snapshot"}}
-                    for k, v in (snap.get("components") or {}).items()
+                    for k, v in comp_map.items()
                 ]
+                engine_status = str(engine_part.get("status") or "")
+                # 组件级异常单独摘出来：hub 判定"服务是否真的在干活"要用它。
+                # 引擎层吞掉了组件初始化/启动异常（一个组件挂了不影响其它），
+                # 于是"进程在、引擎在、但采集全挂"这种状态以前在 hub 上是看不见的。
+                for cname, cinfo in comp_map.items():
+                    if not cinfo.get("enabled", True):
+                        continue
+                    unhealthy = cinfo.get("healthy") is False
+                    errored = str(cinfo.get("state") or "").upper() == "ERROR"
+                    if unhealthy or errored:
+                        bad_components.append(str(cname))
             except Exception as exc:
                 engine_part = {"error": str(exc)}
             try:
@@ -207,6 +256,13 @@ class ServiceWorker:
                 else ""
             ),
             "engine": engine_part,
+            # 引擎容器自身的状态。进程活着 ≠ 引擎在跑 ≠ 组件在干活，
+            # 这三层 hub 现在分开看（见 supervisor.service_status 的 degraded 判定）。
+            "engine_status": engine_status or "unknown",
+            "engine_running": engine_status.lower() == "running",
+            "components_bad": bad_components,
+            "components_total": len(components),
+            "boot_seconds": self._boot_seconds(),
             "components": components,
             "tasks": tasks,
             "summary": {

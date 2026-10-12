@@ -241,6 +241,10 @@ AlphaQuant/
 | 加一条 CLI 命令 | `app/cli/` 对应命令组 |
 | 任务怎么从配置到实例 | `app/engine/builder.py` + `app/runtime/tasking/spec.py` |
 | 多进程 / 多引擎协作 | `app/engine/hub/` |
+| 服务健康判定（进程 / 引擎 / 组件三层） | `app/engine/hub/supervisor.py`（`degraded` 档）+ `hub/worker.py` 心跳，见 [RUNTIME.md §9](RUNTIME.md) |
+| 采集分工（哪个服务采哪些标的、哪些类别） | `config/services.json` 的 `collector` 段 → `app/engine/hub/worker.py` → `builder.py` |
+| 采指定标的的基本面（临时一次） | `app/control/control_plane.py::cross_collect` → `app/modules/collection/service.py::collect_categories` |
+| 新闻源配置 / 资讯服务 | `app/modules/news/service.py` + `config/services.json` 的 `news_config` |
 | 领域模型（Bar / Order…） | `app/domain/types.py` |
 
 ---

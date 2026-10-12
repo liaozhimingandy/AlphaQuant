@@ -121,6 +121,10 @@ def hub_status(services_config, tasks) -> None:
             f"{st.get('health'):<10}{(str(age) + 's') if age is not None else '-':>8}"
             f"{summary.get('task_count', 0):>6}{summary.get('total_equity', 0):>14,.2f}"
         )
+        # 非健康时把原因打出来：只显示一个 unknown/degraded 而不知道为什么，
+        # 等于让人自己去翻 state.json。
+        for reason in st.get("degraded_reasons") or []:
+            click.secho(f"    ↳ {reason}", fg="yellow")
         for t in state.get("tasks") or []:
             all_tasks.append((spec.id, t))
 

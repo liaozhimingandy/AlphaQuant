@@ -478,6 +478,15 @@ class MonitorResource(Resource):
                 return self._json(request, c.control.apply_command(payload))
             return self._json(request, {"ok": False, "error": f"未知操作: {op}"}, 400)
 
+        # POST /api/cross/collect —— 定向采集：指定标的 × 指定类别
+        #   body: {"symbols": ["600519"], "categories": ["fundamental"]}
+        # 与 /api/collector/now 的区别：后者补 K 线，这里补日频截面
+        # （基本面/资金流/筹码/龙虎榜…），且标的与类别由调用方指定。
+        if seg[1] == "cross" and len(seg) >= 3 and seg[2] == "collect":
+            return self._async(request, c.control.cross_collect_async(
+                body.get("symbols"), body.get("categories"),
+            ))
+
         # POST /api/dataguard/check —— 立刻体检（可选自动补全）
         if seg[1] == "dataguard" and len(seg) >= 3 and seg[2] == "check":
             return self._async(request, c.control.data_guard_check_async(

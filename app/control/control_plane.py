@@ -461,6 +461,108 @@ class ControlCenter:
         return d
 
     # ============================================================
+    # 定向采集：指定标的 × 指定类别
+    # ============================================================
+    def cross_collect(self, symbols: Any = None, categories: Any = None,
+                      wait: bool = False) -> Dict[str, Any]:
+        """采**指定标的的指定类别**（基本面 / 资金流 / 龙虎榜…），立刻执行。
+
+        与 :meth:`collector_now` 的分工：后者补 K 线，这里补日频截面。
+        "把 600519 和 000858 的基本面现在采一遍"走这条路径 ——
+        既不用改 services.json 重启服务，也不用等盘后定稿窗口。
+
+        :param symbols: 标的列表或逗号分隔字符串；空 = 跟随本服务配置的截面标的
+        :param categories: 类别列表；空 = 只采 ``fundamental``（基本面）
+        :param wait: True=同步等待结果（CLI），False=丢后台（面板/hub 指令）
+        """
+        comp = self._collector()
+        if comp is None:
+            return {"ok": False, "error": "本引擎未装配采集服务"}
+        fn = getattr(comp, "collect_categories", None)
+        if not callable(fn):
+            return {"ok": False, "error": "当前采集服务不支持定向采集"}
+
+        syms = _as_symbols(symbols)
+        cats = _as_symbols(categories)
+        audit_detail = {"symbols": syms or "*", "categories": cats or ["fundamental"]}
+
+        def _capture_err(f: Any) -> Dict[str, Any]:
+            msg = str(f.getErrorMessage() if hasattr(f, "getErrorMessage") else f)
+            logger.error(f"定向采集失败: {msg}")
+            return {"error": msg}
+
+        if wait:
+            box: Dict[str, Any] = {}
+            failure: Dict[str, Any] = {}
+            d = fn(syms, cats)
+            d.addCallback(lambda r: box.update(r))
+            d.addErrback(lambda f: failure.update(_capture_err(f)))
+            # CLI 是同步上下文，只能等。但必须挂 errback：
+            # 否则采挂了只能干等到超时，真实错误反而被吞掉。
+            deadline = time.time() + 300.0
+            while not box and not failure and time.time() < deadline:
+                time.sleep(0.05)
+            if failure:
+                return {"ok": False, **failure}
+            if not box:
+                return {"ok": False, "error": "定向采集超时（300s）"}
+            self._audit("cross_collect", audit_detail)
+            return {"ok": True, **box}
+
+        def _done(result: Any) -> Any:
+            self._audit("cross_collect", audit_detail)
+            return result
+
+        d = fn(syms, cats)
+        d.addCallback(_done)
+        d.addErrback(_capture_err)
+        return {
+            "ok": True, "accepted": True,
+            "symbols": syms or "跟随服务配置",
+            "categories": cats or ["fundamental"],
+            "note": "已在后台采集，结果见 /api/collector 的 cross.last_report",
+        }
+
+    def cross_collect_async(self, symbols: Any = None, categories: Any = None):
+        """异步版定向采集，返回 Deferred —— 面板/CLI 路由用它等真实结果。
+
+        必须走这一条而不是 :meth:`cross_collect` 的同步等待：
+        ``/api/command`` 是在 reactor 线程上执行的，在那儿 time.sleep
+        会把行情、策略、撮合、面板一起堵住。
+        """
+        from twisted.internet import defer
+
+        comp = self._collector()
+        if comp is None:
+            return defer.succeed({"ok": False, "error": "本引擎未装配采集服务"})
+        fn = getattr(comp, "collect_categories", None)
+        if not callable(fn):
+            return defer.succeed({"ok": False, "error": "当前采集服务不支持定向采集"})
+
+        syms = _as_symbols(symbols)
+        cats = _as_symbols(categories)
+
+        def _ok(result: Any) -> Dict[str, Any]:
+            self._audit(
+                "cross_collect",
+                {"symbols": syms or "*", "categories": cats or ["fundamental"]},
+            )
+            detail = (result or {}).get("detail") or {}
+            # 只要有一项真的失败就报失败：面板要能一眼看出"没采全"，
+            # 而不是给出一片绿的"成功 0 条"。
+            bad = [
+                k for k, v in detail.items()
+                if v.get("error") or v.get("failed")
+            ]
+            return {"ok": not bad, "failed_items": bad, **(result or {})}
+
+        d = fn(syms, cats)
+        d.addCallback(_ok)
+        d.addErrback(lambda f: {"ok": False, "error": str(
+            f.getErrorMessage() if hasattr(f, "getErrorMessage") else f)})
+        return d
+
+    # ============================================================
     # 数据校验服务
     # ============================================================
     #: 数据校验能力所在的**服务名**。它现在是采集服务的一个单元，
@@ -631,6 +733,9 @@ class ControlCenter:
             {"action": "shutdown",     "graceful": true}
             {"action": "snapshot"}
             {"action": "status"}
+            {"action": "collector_now", "symbol": "600519"}
+            {"action": "cross_collect", "symbols": ["600519"],
+             "categories": ["fundamental"]}   # 定向采基本面，缺省即 fundamental
         """
         action = str(command.get("action") or "").strip()
         try:
@@ -698,6 +803,15 @@ class ControlCenter:
                 # 注意：这个 action 走 /api/command 时是在 worker 线程里执行的，
                 # 同步等待没问题；面板另有一条专用的异步路由。
                 return self.collector_now(str(command.get("symbol") or ""))
+            if action == "cross_collect":
+                # 定向采集：{"action":"cross_collect","symbols":["600519"],
+                #            "categories":["fundamental"]}
+                # 走 hub 命令文件时保持异步（默认），CLI 可传 wait=true。
+                return self.cross_collect(
+                    command.get("symbols"),
+                    command.get("categories"),
+                    wait=bool(command.get("wait", False)),
+                )
             return {"ok": False, "error": f"未知指令: {action!r}"}
         except Exception as exc:
             logger.error(f"控制指令执行失败 {action}: {exc}", exc_info=True)
@@ -708,6 +822,24 @@ def _norm_symbol(symbol: str) -> str:
     from app.domain.symbol import normalize_symbol
 
     return normalize_symbol(symbol)
+
+
+def _as_symbols(v: Any) -> List[str]:
+    """把 ``"600519,000858"`` 或 ``["600519"]`` 统一成标的列表。
+
+    逗号分隔的字符串是 CLI 与 hub 指令文件里最常见的写法；
+    不接受它，就得让每个调用方各自 split —— 迟早有人忘，
+    然后把整串当成一只股票去查，得到"采集成功 0 条"。
+    """
+    if v is None:
+        return []
+    if isinstance(v, str):
+        raw: List[Any] = v.split(",")
+    elif isinstance(v, (list, tuple, set)):
+        raw = list(v)
+    else:
+        raw = [v]
+    return [str(x).strip() for x in raw if str(x).strip()]
 
 
 def runtime_watch(task: Any) -> set:

@@ -160,6 +160,10 @@ def build_engine(
     with_ext_data: Optional[bool] = None,
     ext_symbols: Optional[List[str]] = None,
     ext_interval: Optional[float] = None,
+    cross_with_fundamental: Optional[bool] = None,
+    cross_with_flow: Optional[bool] = None,
+    cross_with_chip: Optional[bool] = None,
+    cross_categories: Optional[List[str]] = None,
     with_data_guard: Optional[bool] = None,
     data_guard_symbols: Optional[List[str]] = None,
     snapshot_enabled: Optional[bool] = None,
@@ -274,19 +278,34 @@ def build_engine(
 
     collection_service = CollectionService(
         symbols=syms,
+        # 标的三级 fallback 一律用 ``is not None``：显式传 ``[]`` 是"这只服务
+        # 不采个股"（分工场景），不该被静默填成全部标的。
         # K 线单元
-        kline_symbols=list(collector_symbols or settings.collector_symbol_list() or syms),
+        kline_symbols=list(
+            collector_symbols if collector_symbols is not None
+            else (settings.collector_symbol_list() or syms)
+        ),
         kline_interval=collector_interval or settings.COLLECTOR_INTERVAL,
         kline_period=collector_period or settings.COLLECTOR_PERIOD,
         kline_min_interval=settings.COLLECTOR_MIN_INTERVAL,
         kline_config_path=collector_config,
         kline_enabled=collector_enabled,
         # 日频截面单元
-        cross_symbols=list(ext_symbols or settings.collector_symbol_list() or syms),
+        cross_symbols=list(
+            ext_symbols if ext_symbols is not None
+            else (settings.collector_symbol_list() or syms)
+        ),
         cross_interval=ext_interval,
         cross_enabled=want_ext,
+        cross_with_fundamental=cross_with_fundamental,
+        cross_with_flow=cross_with_flow,
+        cross_with_chip=cross_with_chip,
+        cross_categories=cross_categories,
         # 完整性单元
-        guard_symbols=list(data_guard_symbols or settings.collector_symbol_list() or syms),
+        guard_symbols=list(
+            data_guard_symbols if data_guard_symbols is not None
+            else (settings.collector_symbol_list() or syms)
+        ),
         guard_enabled=guard_enabled,
         # 服务级
         disabled_reason=kline_reason,
