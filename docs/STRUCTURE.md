@@ -8,7 +8,8 @@
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) —— 运行时数据流（一根 K 线怎么变成一笔成交）
 - [ENGINE_ARCHITECTURE.md](ENGINE_ARCHITECTURE.md) —— 引擎的四类组件与能力注入
-- [RUNTIME.md](RUNTIME.md) —— 启动流程、线程模型、事件总线
+- [RUNTIME.md](RUNTIME.md) —— 启动流程、线程模型
+- **[EVENT_TASK.md](EVENT_TASK.md) —— 事件 / 任务 / 执行池的完整契约（改 runtime 前必读）**
 - [EXTENDING.md](EXTENDING.md) —— 扩展点与已知坑
 
 ---
@@ -31,8 +32,9 @@
                             │ 装配
         ┌───────────────────▼──────────────────────────┐
         │  Runtime          app/runtime                 │
-        │  怎么跑：Scheduler → Executor → Task           │
-        │  不含任何业务语义，换调度器不污染业务           │
+        │  怎么跑：EventBus → Scheduler → Worker Pools   │
+        │  只管"什么时候、用哪个线程、跑什么活"           │
+        │  业务实现留在 Modules，这里只有调用它的处理器   │
         └───────────────────┬──────────────────────────┘
                             │ 执行
         ┌───────────────────▼──────────────────────────┐
@@ -69,7 +71,7 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 | `app/domain/` | `app/common` 及以下 | 任何上层（data / providers / engine） |
 | `app/providers/` | `app/common`、`app/domain`、`app/data.schema` | `app/modules/`、`app/engine/` |
 | `app/data/` | `app/common`、`app/domain` | `app/providers/`、`app/engine/` |
-| `app/runtime/` | 上面全部 + `app/engine.{component,capability,context}` | `app/engine.engine`（引擎本体） |
+| `app/runtime/` | 上面全部 + `app/engine.{component,capability,context}` | `app/engine.engine`（引擎本体）；`app/modules/` ⚠️见下方说明 |
 | `app/modules/` | 上面全部 + `app/engine.{component,capability,context}` | `app/engine.engine`（引擎本体） |
 | `app/engine/` | 全部（它是装配方） | —— |
 | `app/control/` | 全部 | —— |
@@ -78,6 +80,29 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 > 组件的依赖应当在构造时由 `ServiceRegistry` 注入。反向 `get_component()`
 > 会让"谁依赖谁"从显式声明退化成运行期字符串查找，编译期查不出来，
 > 改名时静默失效。现有代码里还有 6 处历史遗留（见文末待清理项）。
+
+> **⚠️ `app/runtime/` import `app/modules/` —— 现有 3 个文件越界，性质各不相同**
+>
+> 执行层最终总得有人去调业务，问题是这个"有人"放哪儿。用 AST 统计现状：
+>
+> | 文件 | 模块级 import | 函数内 import | 判定 |
+> |---|---|---|---|
+> | `runtime/workers/handlers.py` | 0 | 3 | ✅ 本轮新增，**刻意**延迟导入 |
+> | `runtime/tasking/task.py`（`QuantTask`） | 4 | 2 | ❌ 历史遗留 |
+> | `runtime/tasking/spec.py` | 2 | 0 | ❌ 历史遗留 |
+>
+> **`handlers.py` 为什么刻意全部延迟导入**：它是执行层与业务层之间唯一的
+> 适配器，写 `from app.modules.x import y` 在模块顶部会立刻造成导入环——
+> 执行层要调业务，业务要发事件回执行层，Python 在 import 期就炸。
+> 放进函数体则只在真正调用那一刻才解析，环自然断开。
+> 它是**纯转发**（取服务 → 调一个方法 → 发后续事件），不写业务规则；
+> 业务规则改动永远落在 `app/modules/`，不会出现在执行层。
+> 所以**新增处理器只改这一个文件**就够，不要往别处散。
+>
+> **`tasking/` 那两个是不同的问题**：`QuantTask` 本身就是
+> 「标的 + 策略 + 风控 + 账本」的**业务运行实例**，天然要直接 import
+> 策略与风控基类，放在 `runtime/` 是历史归位不彻底。
+> 属于待清理项（见文末 §七），**新增代码不要照抄这个模式**。
 
 ---
 
@@ -89,9 +114,13 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 | | `app/cli/` | 命令行入口（11 个命令组） | |
 | **容器** | `app/engine/` | 生命周期、装配、依赖解析 | `engine.py` `builder.py` `registry.py` `capability.py` |
 | | `app/engine/hub/` | 多进程协作：一个 hub 拉起 N 个引擎进程 | `supervisor.py` `worker.py` |
-| **运行时** | `app/runtime/` | 调度节拍、并发槽位、事件分发 | `scheduler.py` `executor.py` `event_bus.py` |
+| **运行时** | `app/runtime/scheduler.py` | 调度中枢：订阅事件 → 建任务 → 投队列 → 领活 | `SchedulerComponent` |
+| | `app/runtime/events/` | **事件契约层**：类型常量、`EngineEvent` 信封、总线 | `types.py` `schema.py` `bus.py` |
+| | `app/runtime/scheduling/` | **调度层**：规则表（21 条）+ 能力路由 | `rules.py` `router.py` `defaults.py` |
+| | `app/runtime/tasking/` | **任务层**：`EngineTask` 状态机、队列、死信 | `models.py` `store.py` |
+| | `app/runtime/workers/` | **执行层**：分池线程池（8 个）+ 处理器注册表 | `pools.py` `registry.py` `handlers.py` |
+| | `app/runtime/executor.py` | 旧作业执行器（`WorkerComponent`） | |
 | | `app/runtime/bus/` | 跨进程 append-only 事件总线 | `filebus.py` → `FileBus` |
-| | `app/runtime/tasking/` | 任务容器与规格 | `runtime.py` `spec.py` `task.py` |
 | **业务** | `app/modules/market/` | 实时行情 → 标准 Bar | `service.py` → `MarketService` |
 | | `app/modules/collection/` | 采集 / 清洗 / 落库 / 完整性核验 | `service.py` `spec.py` `integrity.py` |
 | | `app/modules/universe/` | 全市场 → 股票池 → 候选股 + 打分 | `pool/pool.py` `score.py` |
@@ -117,6 +146,7 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 这次重构把 `app/engine` 从「42 个文件 13441 行什么都有」
 收窄成「16 个文件 4532 行的纯容器」，并让业务包按五层边界归位。
 
+<!-- check_doc_paths:allow-stale-paths -->
 | 旧路径 | 新路径 | 理由 |
 |---|---|---|
 | `app/engine/base.py` | `app/engine/engine.py` | `base` 表达不出它是引擎本体 |
@@ -175,11 +205,29 @@ AlphaQuant/
 │   │   └── hub/                多进程协作（future: multi-Engine）
 │   │
 │   ├── runtime/       ── 运行时层（不含业务）──
-│   │   ├── scheduler.py        SchedulerComponent
-│   │   ├── executor.py         WorkerComponent
-│   │   ├── event_bus.py        EventBus / StandardEvents
+│   │   │                      改这里之前先读 EVENT_TASK.md
+│   │   ├── scheduler.py        调度器组件（订阅事件 → 建任务 → 投队列）
+│   │   ├── executor.py         WorkerComponent（旧作业执行器）
+│   │   ├── event_bus.py        薄转发兼容层（真身在 events/）
 │   │   ├── task.py             ITask / TaskStatus
-│   │   ├── tasking/            TaskRuntime / TaskSpec / QuantTask
+│   │   ├── events/             ★事件契约层
+│   │   │   ├── types.py            EventType / TaskType / Queue / Pool（唯一真源）
+│   │   │   ├── schema.py           EngineEvent 信封（create / child / to_dict）
+│   │   │   └── bus.py              EventBus（去重 / 通配 / 异常隔离）
+│   │   ├── scheduling/         ★调度层
+│   │   │   ├── rules.py            Rule / RuleRegistry（事件 → 任务的规则）
+│   │   │   ├── router.py           CapabilityRouter（任务 → 队列 → 池）
+│   │   │   └── defaults.py         21 条默认规则（全系统自动流转的唯一清单）
+│   │   ├── tasking/            ★任务层 + 作业层
+│   │   │   ├── models.py           EngineTask / TaskState / Priority
+│   │   │   ├── store.py            按队列的优先级堆 + 幂等键 + 死信
+│   │   │   ├── task.py             QuantTask（标的+策略+风控+账本 运行实例）
+│   │   │   ├── runtime.py          TaskRuntime
+│   │   │   └── spec.py             TaskSpec
+│   │   ├── workers/            ★执行层
+│   │   │   ├── pools.py            WorkerPool / PoolManager（分池线程池）
+│   │   │   ├── registry.py         HandlerRegistry（任务类型 → 处理器）
+│   │   │   └── handlers.py         15 个默认处理器（适配器，业务导入在函数体内）
 │   │   └── bus/                FileBus 跨进程事件总线
 │   │
 │   ├── modules/       ── 业务模块层 ──
@@ -235,6 +283,13 @@ AlphaQuant/
 | 数据缺口核验 | `app/modules/collection/integrity.py` |
 | 股票池怎么筛 | `app/modules/universe/pool/pool.py` + `score.py` |
 | 加一个定时任务 | `app/engine/builder.py` → `SchedulerComponent.start_timer` |
+| **加一种事件** | `app/runtime/events/types.py` 加常量 → 需要自动流转再在 `scheduling/defaults.py` 加规则 |
+| **加一种任务类型** | `types.py` 加 `TaskType` → `router.py` 声明哪个池能领 → `workers/handlers.py` 注册处理器 |
+| **改调度规则（什么事件触发什么活）** | `app/runtime/scheduling/defaults.py`（21 条规则的唯一清单） |
+| **改线程池容量 / 加一个池** | `types.py` 的 `DEFAULT_CAPACITY` + `DEFAULT_CAPABILITIES` |
+| **某类活跑太慢 / 挤住别人** | `scheduling/router.py` 改队列→池映射，或 `set_task_pool` 定向 |
+| **任务卡住 / 进死信了** | `ctl runtime status` / `ctl runtime dead`，或 `GET /api/runtime` |
+| 事件与任务的整体设计 | [EVENT_TASK.md](EVENT_TASK.md)（含规则全表与可靠性现状矩阵） |
 | 组件启停顺序 | `app/engine/registry.py`（`ServiceRegistry`） |
 | 组件能提供 / 需要什么能力 | `app/engine/capability.py`（`Cap` 常量） |
 | 面板上加一个视图 | `app/monitoring/api/` + `app/monitoring/static/` |
@@ -268,6 +323,11 @@ AlphaQuant/
    分布在 `control_plane.py`、`modules/trading/service.py`、`hub/worker.py` 等。
 4. **`app/runtime/task.py`（325 行）几乎无人使用**，与 `runtime/tasking/task.py::QuantTask`
    是两套并行的 Task 语义，需要二选一。
+   **同一问题的另一面**：`tasking/task.py` 与 `tasking/spec.py` 在模块级 import 了
+   6 处 `app.modules.*`（策略基类 / 风控链 / 因子上下文），让 runtime 层不再纯净——
+   它们是业务装配，只是放在了运行时目录。本轮新建的 `events/` `scheduling/`
+   `tasking/{models,store}.py` `workers/{pools,registry}.py` 全部零业务导入，
+   后续把 `QuantTask` 迁到 `app/modules/` 即可补齐这条边界。
 5. **9 个假配置项**被文档描述但无人读取（尤其 `LIVE_MAX_DAILY_TRADES`，
    让人误以为有日下单闸门），见 [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)。
 6. **`CashReserveRisk` 读的 `planned_size` 从未被写入**，恒等于 100 股。

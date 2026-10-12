@@ -4,6 +4,7 @@
 > 了 `文件:行号`，可以直接跳过去看实现。
 >
 > 想看"为什么这么设计"请读 `ARCHITECTURE.md` 与 `ENGINE_ARCHITECTURE.md`；
+> 想看"事件 / 任务 / 执行池的完整契约"请读 `EVENT_TASK.md`；
 > 想看"怎么加东西"请读 `EXTENDING.md`。
 
 ---
@@ -16,6 +17,9 @@
    事后复盘全靠它串起来。
 3. **策略不知道数据从哪来**：它只订阅 `BAR_RECEIVED` 事件；行情是回放还是实时
    轮询，由 `MarketService` 的 `mode` 决定，策略代码一行都不用改。
+4. **引擎发事件，调度器转任务，执行池干活**：三者职责不重叠——
+   事件是"发生了什么"（可忽略、可重投），任务是"要做什么"（必须有终态、必须幂等），
+   中间只有调度器一个转换点。完整契约见 [EVENT_TASK.md](EVENT_TASK.md)。
 
 ---
 
@@ -165,34 +169,64 @@ DataSourceFactory.get_stock_data(...)        # :50-56  取数（可能联网）
 日线有 **coverage 窗口**优化（`collect_incremental` `:65-111`）：先查库内最后日期，
 只补 `最后日期 - lookback_days` 之后的；库里完全没数据才退回全量 3 年。
 
-### 2.3 定时任务链路（`SchedulerComponent`）
+### 2.3 调度链路：事件 → 任务 → 执行池（`SchedulerComponent`）
+
+调度器是**唯一**把"发生了什么"翻译成"要做什么"的地方。两半各跑各的节拍：
+
+**上半段（同步，跑在事件总线的投递里）**——收到事件就建任务：
 
 ```
-start_timer(interval, event_name, timer_id)      scheduler.py:315-339
-  └─ tid = timer_id or f"{event_name}@{interval}"
-     └─ 同 id 重复注册**直接忽略**（:331-332，防节拍翻倍）
-        └─ LoopingCall(_publish_timer_event).start(max(0.01, interval))
-
-_publish_timer_event                            scheduler.py:352-359
-  └─ event_bus.publish(event_name, context=data)
-
-submit_task(...)                                scheduler.py:181-214
-  └─ Task(priority, create_time, name, handler, ...) → _task_queue.put()
-     （queue.PriorityQueue：优先级 → 创建时间 → 任务名，保证同优先级 FIFO）
-
-_schedule_loop                                  scheduler.py:219-245
-  ├─ BACKTEST：严格串行（_active_tasks == 0 才取下一个）
-  │            → 同样的输入必然得到同样的结果顺序
-  └─ 其它模式：while _active_tasks < max_concurrent 并发取
-  └─ reactor.callLater(0.01, _schedule_loop)  自递归，避免 CPU 空转
-
-_execute_task                                   scheduler.py:250-302
-  └─ deferToThread(_run_task) + addErrback(_on_task_crashed)
+EventBus.publish(event)                         events/bus.py:199
+  └─ SchedulerComponent 的订阅回调                scheduler.py:302 _make_listener
+       └─ handle_event                           scheduler.py:326-361
+            ├─ 回声事件（task.*）直接返回          :335   ← 防 任务→事件→任务 自激
+            ├─ rules.match(event_type)            :339   按规则表找
+            ├─ rule.should_run(event, self)       :346   条件不满足就不跑
+            ├─ rule.build_task(event, self)       :348   造 EngineTask（含幂等键）
+            └─ store.enqueue(task)                :349   按优先级入对应队列
+                                                        被幂等键拦下就跳过（:359）
 ```
 
-> **注意一处名实不符**：`:104-108` 注册的是 `TIMER_3MIN` 事件，但传的
-> `interval=5`（秒）。当前**没有任何订阅者**，`on_start` 里只是保留了默认节拍。
-> 接真实消费者时记得把间隔改成 180，别让它继续每 5 秒空转一次。
+> `handle_event` **不做任何耗时的事**，所以敢放在总线的同步投递路径上。
+> 这是"事件同步广播"能成立的前提——订阅者必须很快返回。
+
+**下半段（异步，由 `callLater` 自递归驱动）**——有空槽就领活：
+
+```
+_dispatch_loop                                  scheduler.py:366-377
+  └─ _dispatch_once                             scheduler.py:379-399
+       └─ for 每个池: while pool.has_slot():      :382-389
+            └─ store.pop(queue)                  :390
+                 └─ _start_task                  :401-447
+                      ├─ 无处理器     → 死信       :404-413
+                      ├─ 无池能领     → 死信       :415-422
+                      ├─ 池与队列不符 → 重新入队   :423-427
+                      ├─ 抢不到槽位   → 重新入队   :434-439（正常竞态，不计失败）
+                      └─ pools.dispatch(...)      :433
+                           └─ WorkerPool.try_submit  workers/pools.py:105
+  └─ _sweep_timeouts                            scheduler.py:494  超时巡检
+```
+
+**定时任务**是这条链路的一个特例——定时器不发命令，只发**事件**：
+
+```
+start_timer(interval, event_name, timer_id)     scheduler.py:661
+  └─ 同 id 重复注册直接忽略（防节拍翻倍）
+     └─ LoopingCall(_publish_timer_event).start(max(0.01, interval))
+          └─ event_bus.publish(event_name, ...)   → 走上面同一条链路
+```
+
+> 定时器只负责**发事件**，发完就完事；事件变成什么任务由规则表决定。
+> 所以改"某个定时该干什么"请改 `scheduling/defaults.py` 的规则，不要改定时器。
+>
+> 现在规则表里已经有 `system.maintenance.due → 日志清理 + 快照归档` 两条规则，
+> 但**还没有任何定时器发这个事件**（存量节拍只有 `TIMER_3MIN` 一条）。
+> 接上时只需 `start_timer(interval=3600, event_name=EventType.SYSTEM_MAINTENANCE_DUE)`，
+> 规则那边一行都不用动——这正是"事件与任务分开"换来的好处。
+
+> **注意一处名实不符**：`on_start` 注册的 `TIMER_3MIN` 事件传的 `interval=5`（秒），
+> 当前**没有任何规则订阅它**，只是保留了默认节拍。接真实消费者时记得把
+> 间隔改成 180，别让它继续每 5 秒空转一次。
 
 ---
 
@@ -273,14 +307,35 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 
 > 最后这条值得留意：策略 `on_bar` 是在 reactor 线程里**同步**跑的。
 > 如果某个策略里写了很重的循环（比如全市场遍历），会直接卡住整个引擎。
-> 重活应该丢给 `WorkerComponent`（有 `capacity` 限流）。
+> 重活应该做成任务类型，交给对应的 Worker Pool（见下）。
+
+### Worker Pools（8 个独立线程池）—— 按职能隔离
+
+`app/runtime/workers/pools.py`。**每个池一个 `ThreadPoolExecutor`**，
+槽位满了就 `try_submit()` 返回 `None`（这是正常调度状态，不是异常，
+任务放回队列下次再领）。
+
+| 池 | 默认容量 | 负责 | 为什么必须独立 |
+|---|---|---|---|
+| `market` | 3 | 行情采集、K 线处理、缺口补采 | 盘中延迟最敏感，不能被别人挤 |
+| `research` | 2 | 新闻、舆情、因子计算 | 一次因子计算可能扫全市场 |
+| `strategy` | 1 | 策略运行 | 同一策略实例不该并发跑 |
+| `trading` | 1 | 报单执行 | **必须串行**：并发下单会超额度 |
+| `backtest` | 1 | 历史回测、参数实验 | 打满也只能吃掉自己这一个线程 |
+| `maintenance` | 1 | 日志清理、归档、定期校验 | 慢是它的本分，别影响别人 |
+| `system` | 2 | 快照持久化、状态恢复 | |
+| `default` | 2 | 兜底（含旧式 `submit_task` 作业） | |
+
+> **这张表存在的理由**：所有活共用一个线程池时，一次批量回测会把线程占满，
+> 行情采集排在后面排队——表现为"盘中 K 线延迟"，但根因在几百行外的回测代码里，
+> 光看行情日志永远查不出来。分池之后这个故障模式被物理消除了。
 
 ### `deferToThread`（线程池）—— 所有阻塞 IO 都在这里
 
 | 位置 | 阻塞内容 |
 |---|---|
 | `market.py:270` | DB / 数据源读行情 |
-| `scheduler.py:300` | 任务体 |
+| `workers/pools.py:105` | 任务体（`WorkerPool.try_submit`，受槽位限制） |
 | `worker.py:124,154` | 作业体（受 `capacity` 限制） |
 | `collection.py:624` | K 线采集 |
 | `collection.py:828` | 手动补采 |
@@ -306,35 +361,63 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | 账户查询 | `trading.py:337` | `max(5, 30)` |
 | 权益采样 | `trading.py:758` | `max(1, ...)` |
 | 停止标志轮询 | `service_runner.py:90` | 0.5s |
-| 定时器事件源 | `scheduler.py:334` | 各自定义 |
+| 定时器事件源 | `scheduler.py:661` `start_timer` | 各自定义（默认 `TIMER_3MIN`@5s） |
+| 调度分发循环 | `scheduler.py:366` `_dispatch_loop` | `tick_interval`（callLater 自递归） |
 
 ---
 
 ## 6. 事件总线
 
-- 定义：`app/runtime/event_bus.py:19-59` `StandardEvents`（纯字符串常量）
-- 实现：`EventBus`（`event.py:62-91`），`_receivers: Dict[str, List[Callable]]`
-- `publish()` **同步**遍历回调，**逐接收者 try/except 隔离**（`:82-83`）——
-  一个订阅者抛错不影响其他订阅者，也不影响发布方
-- 组件封装：`engine/component.py::subscribe_event`
-- **自动退订**：`engine/component.py` 的 `_clear_subscriptions`，
-  在 `stop()` 里调用（`:198`），杜绝僵尸回调
+总线在 2026-10 这轮**从空壳变成了中枢**：此前有定义但服务之间仍是直接调用。
+契约与实现现在分三个文件：
+
+| 文件 | 职责 |
+|---|---|
+| `app/runtime/events/types.py` | **唯一真源**：`EventType` / `TaskType` / `Queue` / `Pool` 全部常量 + 旧名映射 |
+| `app/runtime/events/schema.py` | `EngineEvent` 信封（`event_id` / `correlation_id` / `causation_id` / `occurred_at`） |
+| `app/runtime/events/bus.py` | `EventBus`：同步投递、去重、通配订阅、异常隔离 |
+
+`app/runtime/event_bus.py` 现在是**薄转发层**——存量代码
+`from app.runtime.event_bus import StandardEvents` 零改动继续可用。
+
+几个容易踩的行为，都在这里定：
+
+- `publish()` **同步**遍历回调，**逐接收者 try/except 隔离**
+  （`bus.py:272` `_invoke`）——一个订阅者抛错不影响其他订阅者，也不影响发布方。
+  代价是**订阅者必须很快返回**，耗时的事请发任务。
+- **事件 ID 去重**（`bus.py:329`）：同一个 `event_id` 只投一次，有界 LRU。
+- **通配订阅**：`subscribe_pattern("market")` 收全部 `market.*`。
+- **新旧名同时投递**（`bus.py:302` `_compute_keys`）：发新名时，
+  订阅了旧名的老代码也会收到。旧 → 新映射是**单射**，
+  `types.py` 在导入期就断言这一点（曾经因为两个旧名映射到同一新名，
+  让控制面板收到 `action=""` 的幽灵指令）。
+- **自动退订**：`engine/component.py` 的 `_clear_subscriptions` 在 `stop()` 里调用，
+  杜绝僵尸回调。
 
 ### 主要事件：谁发 → 谁收
 
+**存量业务事件**（发布方是业务服务，订阅方多为策略与交易落库）：
+
 | 事件 | 发布方 | 订阅方 |
 |---|---|---|
-| `BAR_RECEIVED` | `market.py:319`（`bus/components.py:272` 转发） | **`strategy.py:101`** → `_on_bar` |
-| `NEWS_ANALYZED` | `news.py`、`bus/components.py:280` | **`strategy.py:102`** → `_on_news` |
-| `TASK_ADDED` | `control.py`（运行期新增） | **`strategy.py:105`** → 挂网关 |
-| `TASK_SUBMIT` | 各组件 | **`scheduler.py:102`** → `submit_task` |
-| `ORDER_CREATED` | `strategy.py:216` | `trading.py:728` → 落库 |
-| `ORDER_FILLED` | `strategy.py:220`、`trading.py:535` | `trading.py:729` → 落库 |
-| `ORDER_CANCELLED` | `strategy.py:226` | `trading.py:730` → 落库 |
-| `SIGNAL_REJECTED` | `strategy.py:230` | `trading.py:731` → 落库 |
-| `DATA_COLLECTED` | `collection.py:723` | `trading.py:732` → 落库 |
-| `COMPONENT_ERROR` | `engine.py::initialize` / `_start_all_components` | `trading.py:733` → 落库 |
-| `TIMER_3MIN` | `scheduler.py:104` | 暂无订阅者 |
+| `BAR_RECEIVED` | `MarketService`（`bus/components.py` 转发） | `StrategyComponent` → `on_bar` |
+| `NEWS_ANALYZED` | `NewsService` | `StrategyComponent` → `on_news` |
+| `TASK_ADDED` | `ControlCenter`（运行期新增） | `StrategyComponent` → 挂网关 |
+| `TASK_SUBMIT` | 各组件 | `SchedulerComponent._on_task_submit` |
+| `ORDER_CREATED` / `FILLED` / `CANCELLED` | `QuantTask` / `TradingService` | `TradingService` → 落库 |
+| `SIGNAL_REJECTED` | `QuantTask` | `TradingService` → 落库 |
+| `DATA_COLLECTED` | `CollectionService` | `TradingService` → 落库 |
+| `COMPONENT_ERROR` | `engine.py` 初始化 / 启动流程 | `TradingService` → 落库 |
+| `TIMER_3MIN` | `SchedulerComponent.on_start` | 暂无订阅者 |
+
+**新增的引擎事件**（事件驱动改造引入，驱动任务调度）：
+`engine.started` / `engine.ready` / `engine.stopping` / `engine.stopped` /
+`market.kline.updated` / `market.bar.received` / `factor.snapshot.updated` /
+`strategy.signal.generated` / `risk.check.*` / `task.*` / `system.*`。
+
+> **完整的事件清单、任务清单、21 条调度规则、8 个池的容量与路由表，
+> 以及可靠性现状矩阵，见 [EVENT_TASK.md](EVENT_TASK.md)。**
+> 那份文档是这块设计的唯一真源，本文只讲它怎么跑起来。
 
 除了进程内总线，还有一条**进程间总线**（`app/runtime/bus/filebus.py` +
 `bus/components.py`）用于多服务协作，靠 `origin.startswith("bus:")`
@@ -362,6 +445,21 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 > 空等满 30s，日志还会留一条"任务等待超时"——其实没有任务在跑，只是常驻组件
 > 被当成了"干活中"。语义上应该区分"常驻"和"有活"，改法见 `EXTENDING.md` 的收尾清单。
 
+**调度器怎么停**（`scheduler.py:238-285`）——顺序有讲究：
+
+1. 收到 `engine.stopping` 事件 → `_accept_new = False`（`:634`）。
+   **这一步在组件逆序停止之前就发生**，否则会出现"一边在建新任务一边在停"的窗口。
+2. 停所有 `LoopingCall` 定时器；取消尚未触发的重试 `callLater`
+   （`:260-262`）——不然停止后还会往队列里投任务。
+3. 取消分发循环 `callLater`。
+4. 等 `store.is_idle()`，带 deadline（`_shutdown_wait()`），超时告警后放弃。
+   这里**必须异步让出**（`yield async_sleep(0.1)`），用 `time.sleep` 会冻住
+   reactor，而任务正在等回调 → 永远等不到空闲 → **停止即挂死**（历史踩过）。
+5. 最后 `pools.shutdown(wait=False)`。
+
+> 注意第 4 步等的是 `store.is_idle()`（队列空 + 无在跑任务），
+> 不是"所有池都空转"。常驻的行情轮询不阻塞这一步。
+
 ---
 
 ## 8. 三种运行模式的关键差别
@@ -371,11 +469,28 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | 行情来源 | 历史回放（内存队列） | 实时轮询 DB | 实时轮询 DB |
 | 撮合 | 模拟立即成交 | 模拟立即成交 | 真实券商网关 |
 | 订单终态 | 同步返回 FILLED | 同步返回 FILLED | SUBMITTED → 等回报 |
-| 调度并发 | **严格串行**（结果可复现） | `max_concurrent` | `max_concurrent` |
+| `因子快照 → 跑策略` 这条规则 | **关闭**（`_mode_not("BACKTEST")`） | 开 | 开 |
 | 空闲自动停 | 是（`BACKTEST_AUTO_STOP`） | 否 | 否 |
 
 模式在装配时从 `RunMode` 读（`builder.py`），并下沉到 `runtime.run_mode`
 （`builder.py:349`），任务据此决定撮合方式。
+
+> **行为变更（事件化改造带来的）**：旧调度器在 `BACKTEST` 模式下强制
+> **全局串行**（`_active_tasks == 0` 才取下一个），以此保证结果顺序可复现。
+> 新调度器的并发上界由**池容量**决定，不再看 `run_mode`。
+> 实际后果有限——回测任务走 `backtest` 池（容量 1，天然串行），
+> 且 21 条规则里唯一带 `_mode_not("BACKTEST")` 的恰好是
+> `因子快照 → 跑策略`（`defaults.py:376`），即回测期间**不会再自动触发策略**。
+> 其余规则（K 线更新 → 因子计算等）在回测模式下照常生效——
+> 它们只写库不算钱，不影响回测结果，但也说明这个闸门是**逐条**判的，
+> 不是"BACKTEST 模式整体关链"。
+>
+> 结论：**如果以后给回测加多任务并行，可复现性要自己保证**，别指望调度器。
+
+**调度器为什么不按模式分叉**：模式是"业务怎么跑"（撮合方式、风控口径），
+并发是"资源怎么分"（哪个池有几个槽）。这两件事混在一起，
+就会出现"为了复现结果，把行情采集也一起串行了"这种牵连。
+分开之后 `backtest` 池容量调成 4 就并行，其他池不受任何影响。
 
 ---
 

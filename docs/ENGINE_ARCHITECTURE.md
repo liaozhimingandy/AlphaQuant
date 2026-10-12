@@ -268,6 +268,7 @@ app/modules/        业务能力层
 
 重构前后同一个类的路径对照：
 
+<!-- check_doc_paths:allow-stale-paths -->
 | 类 | 旧路径 | 新路径 |
 |---|---|---|
 | `MarketService` | `app.engine.component.service.market` | `app.modules.market.service` |
@@ -342,7 +343,7 @@ app/modules/        业务能力层
 是手写模板里的语义决策，不适合机器推导。
 
 > 源组件合并后已删除，脚本无法再跑（会明确报"源组件已不在"而不是崩溃）。
-> 需要复核映射关系时用 `git show <合并前的提交>:app/engine/component/collector.py` 取回。
+> 需要复核映射关系时用 `git show <合并前的提交>:app/engine/component/collector.py` 取回。<!-- check_doc_paths:allow-stale-paths -->
 > 服务文件现在由人工维护，**不要再 `--apply` 覆盖回去**。
 
 ### 7.4 合并带出来的一个真问题：进度条
@@ -544,6 +545,7 @@ pf.aggregate()["drawdown"]                            # 全账户回撤
 
 ### 11.2 已删除的文件
 
+<!-- check_doc_paths:allow-stale-paths -->
 ```
 app/engine/component/collector.py
 app/engine/component/extdata.py
@@ -716,27 +718,31 @@ components/collection/component.py + service.py + collectors/ + planners/
 ...
 ```
 
-本项目是**按角色分目录**：
+本项目是**按层分目录**（2026-10 目录重构后，见 [STRUCTURE.md](STRUCTURE.md)）：
 
 ```
-app/engine/component/
-├── service/          ← 全部服务
-│   ├── market.py     MarketService
-│   ├── collection.py CollectionService
-│   ├── trading.py    TradingService
-│   ├── risk.py       RiskService
-│   ├── portfolio.py  PortfolioService
-│   └── news.py       NewsService
-├── strategy.py       StrategyComponent
-├── worker.py         WorkerComponent
-└── scheduler.py      SchedulerComponent
+app/
+├── engine/      容器层：装配 / 注册 / 生命周期，不含业务
+├── runtime/     运行时层：事件总线 / 调度器 / 执行池，不含业务
+│   ├── events/      EngineEvent 契约与 EventBus
+│   ├── scheduling/  规则表 + 能力路由
+│   ├── tasking/     EngineTask 状态机与队列
+│   └── workers/     分池线程池 + 处理器注册表
+├── modules/     业务模块层：market / collection / universe / factor /
+│               strategy / risk / portfolio / trading / news / backtest
+├── providers/   外部系统：行情源适配器 / 券商网关
+└── data/        持久化
 ```
 
 **为什么没有按建议重排**：两者语义等价（一个 `component/service/market.py`
-与一对 `market/{component,service}.py` 表达的是同一件事），但重排要动
-20+ 文件的 import，并把刚跑通的 800+ 条测试全部重验一遍，收益不抵风险。
-按角色分目录还有一个额外好处：**"什么算服务"这个问题由目录本身回答**，
-新加东西时不用纠结该放哪个域。
+与一对 `market/{component,service}.py` 表达的是同一件事）。按**层**分目录
+比按域分目录多一层保障：**"这段代码有没有越界"这个问题由目录本身回答**——
+`runtime/` 里出现 `import app.modules.*` 就是分层被破坏，一眼看得出；
+按域分目录则要用工具去查。
+
+**目录重构之后**：`app/engine` 从「42 个文件 13441 行什么都有」
+收窄成「16 个文件 4532 行的纯容器」，业务归到 `app/modules/`。
+旧 → 新逐条对照见 [STRUCTURE.md §四](STRUCTURE.md)。
 
 ### 14.6 实施顺序（建议的四阶段，我们在哪）
 
@@ -755,8 +761,13 @@ app/engine/component/
    > 非交易时段不再轮询、不再用旧 bar 驱动策略。
    > 但 `SchedulerComponent` 自身的定时器节拍**仍未接日历**（见 §14.3、
    > `RUNTIME.md` §2.3 末尾的 `TIMER_3MIN` 说明）。
-2. **回测组件化** —— 让 `BacktestComponent` 可装配、可观测、走 `WorkerComponent`
-   的槽位限流（现在连点"跑回测"会打满线程池）。
+2. **回测组件化** —— 让 `BacktestComponent` 可装配、可观测、走执行池的槽位限流
+   （原先连点"跑回测"会打满线程池，把行情采集一起挤死）。
+   > **部分缓解**：本轮事件化后新增 `Backtest Worker Pool`（容量 1，
+   > 与 Market / Research 池**物理隔离**），回测跑满也吃不掉行情的线程。
+   > 但 `backtest.run` / `backtest.sweep` 的处理器**刻意没有注册**——
+   > 宁可让任务进死信把"还没接上"暴露出来，也不挂一个假成功的空壳。
+   > 等回测组件化时补上，接通成本是注册一个处理器，不需要改架构。
 3. **订单超时未成交的处理** —— 挂单久了要撤单或告警。
    > **已修**：`LiveBroker.sweep_stale_orders()` 接管订单生命周期终点，
    > 由 `TradingService._poll_once` 定期驱动（不新增定时器）。
@@ -783,3 +794,38 @@ app/engine/component/
 8. **默认风控链缺 A 股硬约束** —— T+1 / 涨跌停 / 可卖量一条都没配。
    `build_risk_chain(enforce_astock=True)` 会自动补齐（用户显式配过的
    以用户参数为准，不重复挂），实盘/模拟盘启用，回测不动。
+
+### 14.9 事件驱动改造（本轮）
+
+建议里"Engine 统一指挥 → EventBus → Scheduler → Worker"这一条，此前
+**只做到了一半**：`EventBus` 有定义，但服务之间仍是直接调用，总线是个空壳。
+本轮把它补成真正的中枢，完整设计与规则全表见
+[EVENT_TASK.md](EVENT_TASK.md)。这里只记**为什么必须这么切**：
+
+| 概念 | 语义 | 不切的后果 |
+|---|---|---|
+| **事件** | 已经发生的事实。不可执行、可忽略、可重复投递 | 事件里塞执行逻辑 → 一个订阅者抛异常，发布者跟着炸 |
+| **任务** | 待完成的工作。可执行、必须有终态、必须幂等 | 任务当事件发 → 没人领就是静默丢失，日志里什么都没有 |
+
+调度器是两者之间**唯一**的转换点：订阅事件 → 按规则表匹配 → 生成
+`EngineTask` → 按能力路由投到某个队列 → 由对应执行池领走。
+
+**为什么执行池要按职能分开**：所有池共享一个线程池时，一次批量回测
+（几十个参数组合 × 几千根 K 线）会把线程全部占满，而行情采集排在后面
+排队——表现为"盘中 K 线延迟"，但根因在几百行外的回测代码里。
+分池之后回测跑满只能吃掉 `Backtest` 池（容量 1），Market 池不受影响。
+现有 8 个池：`system / market / research / strategy / trading /
+backtest / maintenance / default`。
+
+**两个必须守住的防环机制**（都是踩过的坑）：
+
+1. **回声防护** —— 调度器发 `task.*` 事件，如果规则表里也有"收到
+   `task.started` 就建任务"，就会 `任务 → 事件 → 任务` 无限自激。
+   `TASK_ECHO_EVENTS` 里的事件一律不建任务。
+2. **幂等键** —— 事件重复投递是常态（重试、重放、多订阅者）。
+   没有 `dedup_key` 时，一次事件重投会级联放大成 N 个重复任务：
+   重复采集烧配额，重复下单是实盘事故。
+
+**`trade.execute` 强制 `max_retries=0`**：这是唯一一个不允许自动重试的
+任务类型。网络抖动重试一次采集只是浪费配额，重试一次下单可能买两遍。
+`EngineTask.__post_init__` 里硬性覆盖，调用方传什么都无效。

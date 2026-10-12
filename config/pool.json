@@ -21,7 +21,7 @@
     "000001",
     "600519"
   ],
-  "exclude_st": false,
+  "exclude_st": true,
   "exclude_cyb": false,
   "exclude_kcb": false,
   "exclude_bj": false

@@ -1,92 +1,60 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------------------------
-# @Author      : Administrator
-# @Email       : liaozhimingandy@qq.com
-# @Date        : 2026/5/28 16:55
-# @FileName    : event.py
-# @Description : 本文件功能描述
+# @FileName    : event_bus.py
+# @Description : 【兼容层】事件总线的旧路径，新代码请从 app.runtime.events 导入
 # @Project     : AlphaQuant
-# @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
-from collections import defaultdict
-from typing import Dict, List, Callable
+"""
+为什么这个文件还在
+==================
 
-from app.common.logging import logger
+事件契约升级后搬到了 :mod:`app.runtime.events`（types / schema / bus 三件套）。
+但 ``from app.runtime.event_bus import StandardEvents`` 散落在二十多个文件里，
+一次全改会让本次重构的 diff 与风险都失控。
 
+所以这里保留**薄转发**：名字与行为都从新包原样导出，
+存量代码零改动继续工作，新代码统一走 :mod:`app.runtime.events`。
 
-# 预定义标准事件
-class StandardEvents:
-    """全系统标准事件，所有组件统一使用"""
-    # 引擎生命周期
-    ENGINE_STARTED = "engine_started"
-    ENGINE_STOPPED = "engine_stopped"
-    # 行情事件
-    BAR_RECEIVED = "bar_received"
-    TICK_RECEIVED = "tick_received"
-    DATA_COLLECTED = "data_collected"  # 采集服务落库了一批行情（symbol/period/rows）
-    # 新闻/事件通道
-    NEWS_RECEIVED = "news_received"      # 采集到新新闻（未分析）
-    NEWS_ANALYZED = "news_analyzed"      # 已完成分析（含情感/置信度）
-    # 策略事件
-    SIGNAL_GENERATED = "signal_generated"
-    SIGNAL_REJECTED = "signal_rejected"  # 被风控否决，必须留痕
-    # 任务事件
-    TASK_STARTED = "task_started"
-    TASK_STOPPED = "task_stopped"
-    TASK_PAUSED = "task_paused"
-    TASK_RESUMED = "task_resumed"
-    TASK_ADDED = "task_added"          # 运行时新增任务（面板/CLI 下发）
-    TASK_REMOVED = "task_removed"
-    # 组件事件
-    COMPONENT_ENABLED = "component_enabled"
-    COMPONENT_DISABLED = "component_disabled"
-    # 监控事件
-    SNAPSHOT_SAVED = "snapshot_saved"
-    CONTROL_COMMAND = "control_command"  # 控制指令留痕（谁在什么时候改了什么）
-    # 交易事件
-    ORDER_CREATED = "order_created"
-    ORDER_FILLED = "order_filled"
-    ORDER_CANCELLED = "order_cancelled"
-    POSITION_UPDATED = "position_updated"
-    ACCOUNT_UPDATED = "account_updated"
-    # 异常事件
-    COMPONENT_ERROR = "component_error"
-    ENGINE_ERROR = "engine_error"
-    # 任务提交
-    TASK_SUBMIT = "task_submit"
+新旧名共存的机制（关键）:
+    旧名 ``bar_received`` 与新名 ``market.bar.received`` 由
+    ``LEGACY_EVENT_ALIASES`` 映射。按旧名发布时，总线**同时**投递给
+    新旧两批订阅者，所以迁移可以逐个文件进行，不必一次性切换。
+"""
+from app.runtime.events import (
+    CANONICAL_TO_LEGACY,
+    EVENT_CATEGORIES,
+    EVENT_CATEGORY_OF,
+    LEGACY_EVENT_ALIASES,
+    SCHEMA_VERSION,
+    TASK_ECHO_EVENTS,
+    TASK_QUEUE,
+    NON_RETRIABLE_TASK_TYPES,
+    EngineEvent,
+    EventBus,
+    EventType,
+    Pool,
+    Queue,
+    StandardEvents,
+    TaskType,
+    canonical_event_type,
+)
 
-    TIMER_3MIN = "timer_3min"
-
-
-class EventBus:
-    """
-    全局事件总线
-    发布-订阅模式,解耦所有组件
-    """
-
-    def __init__(self) -> None:
-        self._receivers: Dict[str, List[Callable]] = defaultdict(list)
-
-
-    def subscribe(self, event_name: str, receiver: Callable) -> None:
-        """订阅事件"""
-        self._receivers[event_name].append(receiver)
-
-    def publish(self, event_name: str, **kwargs) -> None:
-        """发布事件"""
-        for receiver in self._receivers[event_name]:
-            try:
-                logger.debug(f"正在回调...{receiver.__name__}")
-                receiver(**kwargs)
-            except Exception as e:
-                logger.error(f"事件 {event_name} 回调异常: {str(e)}", exc_info=True)
-
-    def unsubscribe(self, event_name: str, receiver: Callable) -> None:
-        """取消订阅"""
-        if receiver in self._receivers[event_name]:
-            self._receivers[event_name].remove(receiver)
-
-    def get_receiver(self):
-        return self._receivers
-
+__all__ = [
+    "EventBus",
+    "EngineEvent",
+    "SCHEMA_VERSION",
+    "StandardEvents",
+    "EventType",
+    "TaskType",
+    "Queue",
+    "Pool",
+    "EVENT_CATEGORIES",
+    "EVENT_CATEGORY_OF",
+    "LEGACY_EVENT_ALIASES",
+    "CANONICAL_TO_LEGACY",
+    "canonical_event_type",
+    "TASK_QUEUE",
+    "NON_RETRIABLE_TASK_TYPES",
+    "TASK_ECHO_EVENTS",
+]

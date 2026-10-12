@@ -217,8 +217,19 @@ def build_engine(
 
     # ============================================================
     # 调度层
+    #
+    # 调度器是**唯一**的事件消费者：它订阅事件 → 匹配规则 → 生成任务 →
+    # 按能力路由交给 Market / Research / Strategy / Trading / Backtest /
+    # Maintenance 六个执行池。服务之间不再互相直接调用，
+    # 数据到下单的每一步都是一个可追踪、可重试、有幂等键的任务。
+    #
+    # 注入引擎引用是规则条件的需要："这个服务启用没有"只有引擎答得出来。
+    # 这与采集/策略服务一样，是**只读**的反向引用 ——
+    # 调度器不会通过引擎去调别的组件。
     # ============================================================
-    engine.register_component(SchedulerComponent())
+    scheduler = SchedulerComponent()
+    scheduler.set_engine(engine)
+    engine.register_component(scheduler)
 
     # ============================================================
     # 服务层

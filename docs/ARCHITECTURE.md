@@ -1025,7 +1025,7 @@ Factor                        app/modules/factor/flow.py
    │  chip_profit_ratio / chip_concentration / chip_peak_gap
    │  theme_rank / theme_pct / limitup_effect / composite_score
    ▼
-ScoreEngine                   app/modules/universe/engine.py
+ScoreEngine                   app/modules/universe/score.py
    │  资金 / 题材 / 筹码 / 技术 / 涨停 加权 → 总分 + 等级 + 扣分理由
    ▼
 StockPool                     app/modules/universe/pool/pool.py

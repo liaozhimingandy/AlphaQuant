@@ -54,6 +54,14 @@ python main.py stop                            # 优雅退出
 python main.py hub services                    # 看 config/services.json 定义
 python main.py hub run                         # 前台跑 hub（聚合面板 :8899）
 python main.py hub status --tasks              # hub + 各服务状态 + 所有任务
+
+# 8. 事件 / 任务 / 执行池的运行时观测（详见 docs/EVENT_TASK.md）
+python main.py ctl runtime status              # 池占用、队列积压、死信、统计
+python main.py ctl runtime pools               # 8 个池的容量与在跑任务
+python main.py ctl runtime rules               # 21 条调度规则及其开关状态
+python main.py ctl runtime dead                # 死信：没处理器 / 无池可领的任务
+python main.py ctl runtime dispatch --task-type factor.calculate --params '{"symbols":["000001"]}'
+python main.py ctl runtime rule off kline_updated_factor   # 临时关掉一条规则
 ```
 
 可用能力清单：`python main.py strategies` / `factors` / `rules`
@@ -1021,6 +1029,7 @@ python main.py ctl component disable news_service
 |---|---|
 | **怎么用**（命令、面板、配置） | 本文 README |
 | **运行原理**：按下回车之后发生了什么，三条链路怎么走 | [`docs/RUNTIME.md`](docs/RUNTIME.md) |
+| **事件 / 任务 / 执行池**：标准事件清单、21 条调度规则、8 个线程池怎么分 | [`docs/EVENT_TASK.md`](docs/EVENT_TASK.md) |
 | **为什么这么设计**：28 条决策及其理由 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | **引擎四类组件**：服务化重构的来龙去脉 | [`docs/ENGINE_ARCHITECTURE.md`](docs/ENGINE_ARCHITECTURE.md) |
 | **采集层**：Provider / Capability / Router / Canonical | [`docs/DATA_FABRIC.md`](docs/DATA_FABRIC.md) |
@@ -1090,10 +1099,14 @@ app/
 │   └── hub/                多进程编排（一个 hub 拉起 N 个引擎进程）
 │
 ├── runtime/                ── 运行时层：怎么跑，不含业务 ──
-│   ├── scheduler.py        SchedulerComponent（节拍）
-│   ├── executor.py         WorkerComponent（并发槽位）
-│   ├── event_bus.py        EventBus / StandardEvents
-│   ├── tasking/            TaskRuntime / TaskSpec / QuantTask
+│   ├── scheduler.py        调度中枢：订阅事件 → 建任务 → 投队列 → 领活
+│   ├── executor.py         WorkerComponent（旧作业执行器）
+│   ├── event_bus.py        薄转发兼容层（真身在 events/）
+│   ├── events/             事件契约层：types(常量唯一真源) / schema(EngineEvent) / bus
+│   ├── scheduling/         调度层：rules(规则) / router(能力路由) / defaults(21 条规则)
+│   ├── tasking/            任务层：models(EngineTask 八态) / store(队列+幂等+死信)
+│   │                       + runtime/spec/QuantTask（作业实例）
+│   ├── workers/            执行层：pools(8 个分池线程池) / registry / handlers(15 个)
 │   └── bus/                FileBus 跨进程事件总线
 │
 ├── modules/                ── 业务模块层：跑什么 ──
@@ -1135,6 +1148,7 @@ docs/                       文档
   STRUCTURE.md              目录结构与五层边界（**改东西去哪找**）
   ARCHITECTURE.md           运行时数据流（推荐深入阅读入口）
   RUNTIME.md                启动流程、三条链路、线程模型
+  EVENT_TASK.md             事件 / 任务 / 执行池契约（改 runtime 前必读）
   ENGINE_ARCHITECTURE.md    引擎四类组件与能力注入
   DATA_FABRIC.md            数据源层设计
   DATA_SOURCES.md           如何新增数据源

@@ -563,6 +563,112 @@ class ControlCenter:
         return d
 
     # ============================================================
+    # 任务系统：事件 → 任务 → 执行池
+    #
+    # 这一组回答的是事件驱动架构里最难回答的问题：
+    #   "现在系统在做什么？哪一步卡住了？"
+    # 服务互相直接调用时这个问题无解（调用栈一闪而过，不留痕迹）；
+    # 有了任务队列与状态机之后，它是"读一张表"就能回答的。
+    # ============================================================
+    def _event_scheduler(self) -> Any:
+        """取事件驱动版调度器。
+
+        用 ``hasattr(sch, "store")`` 而不是 isinstance 判断：
+        调度器可能被替换/包装，而"有没有任务存储"才是这里真正依赖的能力。
+        """
+        sch = self.engine.get_component("scheduler")
+        if sch is None or not hasattr(sch, "store"):
+            return None
+        return sch
+
+    def runtime_system(self) -> Dict[str, Any]:
+        """任务系统全景：队列积压 / 执行池占用 / 规则 / 处理器 / 死信。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        return {
+            "ok": True,
+            "stats": dict(sch.stats),
+            "queues": sch.store.queues(),
+            "pending": sch.store.pending_count(),
+            "running": sch.store.running_count(),
+            "pools": sch.pools.snapshot(),
+            "router": sch.router.snapshot(),
+            "rules": sch.rules.snapshot(),
+            "handlers": sch.handlers.snapshot(),
+            "dead_letters": sch.store.dead_letters(30),
+        }
+
+    def dispatch_task(
+        self,
+        task_type: str = "",
+        params: Any = None,
+        priority: Any = None,
+        dedup_key: str = "",
+        max_retries: int = 0,
+    ) -> Dict[str, Any]:
+        """手动投递一个**带类型**的引擎任务（走完整路由与执行池）。
+
+        与 :meth:`add_task` 的区别：``add_task`` 加的是量化任务
+        （"标的 + 策略 + 风控 + 账本"的运行实例），这里投的是引擎任务
+        （采集 / 因子 / 策略 / 风控 / 运维这类一次性工作）。
+
+        未知任务类型当场报错，不给"投递成功但没人执行"的假成功。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        task_type = str(task_type or "").strip()
+        if not task_type:
+            return {"ok": False, "error": "缺少 task_type"}
+        if not sch.handlers.has(task_type):
+            return {
+                "ok": False,
+                "error": f"任务类型 {task_type} 没有注册处理器",
+                "known": sch.handlers.task_types(),
+            }
+        pool = sch.router.pool_for(task_type)
+        if pool is None:
+            return {"ok": False, "error": f"没有执行池能处理 {task_type}"}
+
+        prio = priority
+        code = getattr(priority, "code", None)
+        if code is not None:
+            prio = int(code) * 2 + 1
+        ok, reason = sch.submit_engine_task(
+            task_type=task_type,
+            params=dict(params or {}),
+            priority=int(prio) if prio is not None else 5,
+            dedup_key=str(dedup_key or ""),
+            max_retries=int(max_retries or 0),
+        )
+        self._audit(
+            "dispatch_task",
+            {"task_type": task_type, "pool": pool, "params": dict(params or {})},
+        )
+        return {"ok": ok, "reason": reason, "pool": pool, "task_type": task_type}
+
+    def set_rule_enabled(self, name: str, enabled: bool = True) -> Dict[str, Any]:
+        """启停一条调度规则。
+
+        用途：临时掐断某条自动链路（比如"因子更新就跑策略"在
+        补采历史数据时会造成大量无意义的策略运行），
+        不必改代码、不必重启引擎。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        name = str(name or "").strip()
+        if not sch.rules.set_enabled(name, bool(enabled)):
+            return {
+                "ok": False,
+                "error": f"没有这条规则: {name}",
+                "known": [r.name for r in sch.rules.all_rules()],
+            }
+        self._audit("set_rule", {"rule": name, "enabled": bool(enabled)})
+        return {"ok": True, "rule": name, "enabled": bool(enabled)}
+
+    # ============================================================
     # 数据校验服务
     # ============================================================
     #: 数据校验能力所在的**服务名**。它现在是采集服务的一个单元，

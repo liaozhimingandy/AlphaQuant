@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.providers.broker.simulated import SimulatedBroker
 from app.modules.factor.context import FactorContext
@@ -403,13 +403,68 @@ class QuantTask:
         self._emit_order(order)
         return None
 
-    def _process_signal(
-        self, signal: Signal, ctx: FactorContext, dt: Optional[datetime]
+    def execute_approved(
+        self,
+        signal: Signal,
+        dt: Optional[datetime] = None,
+        approved_size: Optional[int] = None,
     ) -> Optional[Order]:
+        """风控已放行 → 直接走下单闭环（不再重跑策略）。
+
+        存在的理由
+        ----------
+        事件驱动链路是 ``strategy.signal.generated → risk.evaluate →
+        trade.execute``。风控任务在**另一个线程、另一个时刻**完成裁决，
+        下单任务拿到裁决结果后必须能独立完成报单 —— 否则整条链路
+        只能退化成"策略内部同步调用"，事件化就只剩壳子。
+
+        为什么不 bypass 风控
+        --------------------
+        这里**照样走一遍** :meth:`_plan_order`（全局闸门 + 任务链 +
+        仓位 + 已有在途单检查）。理由是 TOCTOU：从"风控说可以"到
+        "真正报单"之间，账户可能已经变了（别的任务刚成交、手动熔断、
+        额度被占）。只看之前的裁决就下单，正是并发下超限的经典来源。
+
+        与 :meth:`_process_signal` 共用同一套实现，所以
+        **不存在一条绕过风控的下单路径** —— 这是刻意的设计约束。
+
+        :param approved_size: 风控裁决给出的数量上限（与本地计算取更小者）
+        """
+        if self.status != TaskState.RUNNING:
+            raise RuntimeError(
+                f"任务 {self.task_id} 当前状态 {self.status}，不接受下单"
+            )
         signal.task_id = self.task_id
         signal.symbol = self.symbol
         signal.ts = dt
 
+        ctx = self._build_ctx(dt)
+        plan = self._plan_order(signal, ctx, dt)
+        if plan is None:
+            return None
+        scale, size = plan
+        if approved_size is not None:
+            try:
+                size = min(int(size), int(approved_size))
+            except (TypeError, ValueError):
+                pass
+        if size <= 0:
+            logger.debug(f"[{self.task_id}] 风控放行数量为 0，不下单")
+            return None
+        return self._place_order(signal, size, scale, dt)
+
+    def _plan_order(
+        self, signal: Signal, ctx: FactorContext, dt: Optional[datetime]
+    ) -> Optional[Tuple[float, int]]:
+        """风控裁决 + 仓位计算。
+
+        :return: ``(scale, size)``；不该下单返回 ``None``。
+
+        返回 None 有三类原因，日志级别各不相同：
+          * 被风控否决 → 业务结果，:meth:`_reject` 已留痕；
+          * 价格无效 / 已有在途单 → 正常跳过，debug 级；
+          * 算出数量为 0 → 正常跳过，debug 级。
+        """
         # 1) 全局风控闸门（引擎级：一键熔断 + 全局规则）
         #    放在任务级链**之前**：熔断是"现在不要有任何新仓"，
         #    先跑任务级规则纯属浪费，而且会污染任务自己的否决统计。
@@ -425,9 +480,10 @@ class QuantTask:
                 logger.error(f"[{self.task_id}] 全局风控闸门异常，按放行: {exc}")
                 gv = None
             if gv is not None and not getattr(gv, "allowed", True):
-                return self._reject(
+                self._reject(
                     signal, getattr(gv, "rule", "global"), getattr(gv, "reason", "")
                 )
+                return None
             if gv is not None:
                 try:
                     gate_scale = float(getattr(gv, "scale", 1.0) or 1.0)
@@ -439,7 +495,8 @@ class QuantTask:
             signal, self.state, ctx=ctx, account=self.portfolio.account
         )
         if not verdict.allowed:
-            return self._reject(signal, verdict.rule, verdict.reason)
+            self._reject(signal, verdict.rule, verdict.reason)
+            return None
         # 两边都可能要求缩放仓位，取更保守的那个
         scale = min(float(verdict.scale or 1.0), gate_scale)
 
@@ -468,9 +525,22 @@ class QuantTask:
         if size <= 0:
             logger.debug(f"[{self.task_id}] 计算出的下单数量为 0，跳过")
             return None
+        return (scale, size)
+
+    def _place_order(
+        self,
+        signal: Signal,
+        size: int,
+        scale: float = 1.0,
+        dt: Optional[datetime] = None,
+    ) -> Optional[Order]:
+        """额度预留 + 报单 + 记账。前置裁决已完成（见 :meth:`_plan_order`）。"""
+        price = self.state.last_price
+        if price <= 0:
+            return None
 
         # 3.8) 跨任务额度预留。
-        #      上面两步风控看的都是**本任务的账本**，它们不知道别的任务
+        #      风控看的都是**本任务的账本**，它们不知道别的任务
         #      刚刚也放行了一单。实盘所有任务共享一个券商账户 —— 各自放行
         #      8 万，两笔都发下去就是 16 万。这里在报单前把预计占用从全账户
         #      额度里扣住，订单落到终态再释放，第二个任务再过风控时看到的
@@ -492,10 +562,11 @@ class QuantTask:
             if rid is None:
                 # 额度不够是**正常的业务结果**，不是异常。走标准否决流程，
                 # 让面板上"今天拦了几笔、因为什么拦"有据可查。
-                return self._reject(
+                self._reject(
                     signal, "quota_exhausted",
                     f"全账户下单额度不足（需 {est:.2f}）"
                 )
+                return None
 
         # 4) 撮合。返回时**未必已成交**（实盘只是报单成功）
         order = self.broker.create_order(
@@ -542,6 +613,20 @@ class QuantTask:
             )
         self._sync_state(dt)
         return order
+
+    def _process_signal(
+        self, signal: Signal, ctx: FactorContext, dt: Optional[datetime]
+    ) -> Optional[Order]:
+        """策略产出信号 → 裁决 → 下单。拆成两步是为了让事件链路能复用。"""
+        signal.task_id = self.task_id
+        signal.symbol = self.symbol
+        signal.ts = dt
+
+        plan = self._plan_order(signal, ctx, dt)
+        if plan is None:
+            return None
+        scale, size = plan
+        return self._place_order(signal, size, scale, dt)
 
     def _on_filled_sync(self, order: Order) -> None:
         """同步成交（回测/模拟）后的簿记。

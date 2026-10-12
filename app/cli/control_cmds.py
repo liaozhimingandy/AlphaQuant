@@ -599,6 +599,154 @@ def ctl_db_backtests(limit, port) -> None:
             f"{float(r.get('sharpe') or 0):>8.2f}{r.get('trade_count') or 0:>6}"
         )
 
+# ============================== 任务系统（事件 → 任务 → 执行池） ==============================
+@ctl_group.group(name="runtime", help="任务系统：执行池 / 队列 / 调度规则 / 死信")
+def ctl_runtime_group() -> None:
+    """事件驱动架构的运维入口。
+
+    "引擎现在在忙什么"这个问题，靠这一组命令回答：
+    ``status`` 看积压与占用，``rules`` 看系统里有哪些自动流转，
+    ``dead`` 看哪些活彻底失败了。
+    """
+
+
+@ctl_runtime_group.command(name="status", help="任务系统概览：队列积压与执行池占用")
+@_ctl_port
+def ctl_runtime_status(port) -> None:
+    data = _api(port, "/api/runtime")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    stats = data.get("stats") or {}
+    click.secho(
+        f"待执行 {data.get('pending', 0)} | 执行中 {data.get('running', 0)} | "
+        f"累计建任务 {stats.get('tasks_created', 0)} | 已分发 "
+        f"{stats.get('dispatched', 0)} | 去重跳过 {stats.get('tasks_deduped', 0)} | "
+        f"超时 {stats.get('timeout', 0)}",
+        fg="cyan", bold=True,
+    )
+    click.secho(f"{'队列':<14}{'积压':>6}", fg="cyan")
+    for name, size in sorted((data.get("queues") or {}).items()):
+        mark = "  ← 有积压" if size else ""
+        click.echo(f"{name:<14}{size:>6}{mark}")
+    click.echo("")
+    click.secho(f"{'执行池':<14}{'占用/上限':>12}{'完成':>8}{'失败':>8}{'拒绝':>8}", fg="cyan")
+    for p in (data.get("pools") or {}).get("pools") or []:
+        st = p.get("stats") or {}
+        click.echo(
+            f"{p.get('pool',''):<14}"
+            f"{str(p.get('inflight')) + '/' + str(p.get('capacity')):>12}"
+            f"{st.get('succeeded', 0):>8}{st.get('failed', 0):>8}{st.get('rejected', 0):>8}"
+        )
+    letters = data.get("dead_letters") or []
+    if letters:
+        click.echo("")
+        click.secho(f"⚠️ 死信 {len(letters)} 条（用 ctl runtime dead 查看）", fg="red")
+
+
+@ctl_runtime_group.command(name="pools", help="执行池明细与能力声明")
+@_ctl_port
+def ctl_runtime_pools(port) -> None:
+    data = _api(port, "/api/runtime")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    for p in (data.get("pools") or {}).get("pools") or []:
+        click.secho(
+            f"{p.get('pool','')}（{p.get('label','')}）队列={p.get('queue','')} "
+            f"并发={p.get('capacity')} 在跑={p.get('inflight')}",
+            fg="cyan",
+        )
+        for t in p.get("task_types") or []:
+            click.echo(f"    · {t}")
+
+
+@ctl_runtime_group.command(name="rules", help="调度规则表：什么事件会生成什么任务")
+@_ctl_port
+def ctl_runtime_rules(port) -> None:
+    data = _api(port, "/api/runtime")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    rules = (data.get("rules") or {}).get("rules") or []
+    click.secho(f"{'事件':<34}{'任务':<26}{'队列':<12}{'重试':>5}  状态", fg="cyan")
+    for r in rules:
+        state = "启用" if r.get("enabled") else "停用"
+        click.echo(
+            f"{r.get('event_type',''):<34}{r.get('task_type',''):<26}"
+            f"{r.get('queue',''):<12}{r.get('max_retries',0):>5}  {state}"
+        )
+
+
+@ctl_runtime_group.command(name="dead", help="死信列表：彻底失败的任务")
+@_ctl_port
+def ctl_runtime_dead(port) -> None:
+    data = _api(port, "/api/runtime")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    letters = data.get("dead_letters") or []
+    if not letters:
+        click.secho("✅ 没有死信", fg="green")
+        return
+    for t in letters:
+        click.secho(
+            f"{t.get('task_type','')}#{str(t.get('task_id',''))[:8]} | "
+            f"重试 {t.get('attempts')}/{t.get('max_retries')}",
+            fg="red",
+        )
+        click.echo(f"    {t.get('error')}")
+
+
+@ctl_runtime_group.command(name="dispatch", help="投递一个引擎任务")
+@click.option("--task-type", required=True, help="任务类型，如 factor.calculate")
+@click.option("--params", default="{}", help="任务参数 JSON")
+@click.option("--priority", default=None, type=int, help="优先级（1 最高）")
+@click.option("--dedup-key", default="", help="幂等键（同键在途时不重复投递）")
+@click.option("--retries", default=0, type=int, help="最大重试次数")
+@_ctl_port
+def ctl_runtime_dispatch(task_type, params, priority, dedup_key, retries, port) -> None:
+    import json as _json
+
+    try:
+        parsed = _json.loads(params) if params else {}
+    except Exception as exc:
+        click.secho(f"❌ --params 不是合法 JSON: {exc}", fg="red")
+        return
+    if not isinstance(parsed, dict):
+        click.secho("❌ --params 必须是 JSON 对象", fg="red")
+        return
+    data = _api(port, "/api/runtime/dispatch", {
+        "task_type": task_type,
+        "params": parsed,
+        "priority": priority,
+        "dedup_key": dedup_key,
+        "max_retries": retries,
+    })
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        if data.get("known"):
+            click.echo(f"可选任务类型: {', '.join(data['known'])}")
+        return
+    click.secho(f"✅ 已投递 {task_type} → 执行池 {data.get('pool')}", fg="green")
+
+
+@ctl_runtime_group.command(name="rule", help="启停一条调度规则")
+@click.argument("action", type=click.Choice(["on", "off"]))
+@click.argument("name")
+@_ctl_port
+def ctl_runtime_rule(action, name, port) -> None:
+    data = _api(port, "/api/runtime/rule", {
+        "name": name, "enabled": action == "on",
+    })
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        if data.get("known"):
+            click.echo(f"可选规则: {', '.join(data['known'])}")
+        return
+    click.secho(f"✅ 规则 {name} 已{'启用' if action == 'on' else '停用'}", fg="green")
+
+
 # ============================== 远程控制 ==============================
 def _api(port: Optional[int], path: str, body: Optional[dict] = None, timeout: float = 8.0):
     """调用监控面板 API（零依赖，用标准库 urllib）。

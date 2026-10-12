@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Generator
+from typing import Dict, Any, Optional, List, Generator, Tuple
 import signal
 
 from twisted.internet import reactor, defer
@@ -33,7 +33,7 @@ from app.engine.registry import (
 )
 from app.control.control_plane import ControlCenter
 
-from app.runtime.event_bus import EventBus, StandardEvents
+from app.runtime.event_bus import EventBus, EventType, StandardEvents
 from app.engine.context import EngineContext, EngineStatus, RunMode
 from app.runtime.utils import async_sleep
 from app.common.jsonio import json_safe
@@ -249,8 +249,18 @@ class BaseQuantEngine(IQuantEngine):
         self._start_all_components()
 
         # 3. 发布引擎启动事件
-        self.event_bus.publish(StandardEvents.ENGINE_STARTED, context=self.context)
+        #
+        #    注意 ``engine.started`` 与 ``engine.ready`` 的区别：
+        #      - ``started`` 只表示"组件都起过一遍了"，不保证可用
+        #        （组件启动异常是被逐个隔离的，见 :meth:`_start_all_components`）；
+        #      - ``ready`` 才表示"依赖检查通过，可以开始常规调度"。
+        #    调度器的常规任务建在 ``ready`` 上，而不是 ``started`` 上，
+        #    于是"行情服务没起来"不会导致一批注定失败的任务被建出来。
+        self.event_bus.publish(
+            EventType.ENGINE_STARTED, context=self.context, source="engine"
+        )
         self._status = EngineStatus.RUNNING
+        self._announce_ready()
 
         # 3.1 回测模式：装一个"空闲自动停止"看门狗。
         #      否则 reactor.run() 会永久阻塞，回测永远不会返回——这是旧实现最大的可用性问题。
@@ -266,9 +276,68 @@ class BaseQuantEngine(IQuantEngine):
         self._status = EngineStatus.STOPPED
         self.context.engine_status = self._status
         self.context.end_time = datetime.now()
-        self.event_bus.publish(StandardEvents.ENGINE_STOPPED, context=self.context)
+        self.event_bus.publish(
+            EventType.ENGINE_STOPPED, context=self.context, source="engine"
+        )
         logger.info("=== 量化引擎已正常停止 ===")
         return self.context
+
+    def _readiness(self) -> Tuple[bool, List[str]]:
+        """依赖检查：启用的组件是否都真的 RUNNING，服务依赖是否齐全。
+
+        只看"进程活着"是不够的：组件启动失败是被逐个隔离的
+        （见 :meth:`_start_all_components`），引擎照样跑下去。
+        所以必须**主动问一遍**才能回答"现在能不能开始干活"。
+        """
+        problems: List[str] = []
+        for name, comp in self._components.items():
+            if not comp.enabled:
+                continue
+            if comp.state != "RUNNING":
+                problems.append(f"{name}={comp.state}")
+        try:
+            missing = list(
+                (self.services.snapshot() or {}).get("missing_dependencies") or []
+            )
+        except Exception:
+            missing = []
+        problems.extend(str(m) for m in missing)
+        return (not problems), problems
+
+    def _announce_ready(self) -> None:
+        """发布 ``engine.ready``（调度器据此启动常规任务）。
+
+        **降级仍然发布 ready**，这是个刻意的取舍：
+
+        完全不发布 ready 的后果是"行情服务没连上 → 引擎永远不 ready →
+        连 K 线都不采"，故障会被放大成全面停摆。而发布 ready 并带上
+        ``degraded=true``，则每条规则仍可用自己的条件（服务是否启用）
+        来决定要不要建任务 —— 判断权留在离业务最近的地方。
+
+        真正的"不可用"信号另外发 :data:`EventType.SYSTEM_DEPENDENCY_UNAVAILABLE`，
+        运维看得到，但不至于把整台引擎废掉。
+        """
+        ready, problems = self._readiness()
+        if not ready:
+            logger.warning(
+                f"引擎依赖检查未通过（降级运行）: {', '.join(problems)}"
+            )
+            self.event_bus.publish(
+                EventType.SYSTEM_DEPENDENCY_UNAVAILABLE,
+                source="engine",
+                problems=list(problems),
+            )
+        self.event_bus.publish(
+            EventType.ENGINE_READY,
+            source="engine",
+            context=self.context,
+            degraded=not ready,
+            problems=list(problems),
+        )
+        logger.info(
+            "引擎已就绪 | 降级=%s"
+            % ("是" if not ready else "否")
+        )
 
     def _start_idle_watchdog(self) -> None:
         """回测模式空闲看门狗：调度器持续空闲 N 秒后自动停止引擎。
@@ -346,6 +415,11 @@ class BaseQuantEngine(IQuantEngine):
         self._status = EngineStatus.STOPPING
         self.context.engine_status = self._status
         logger.warning("收到引擎停止请求，正在执行优雅退出...")
+        # 让调度器**立刻**停止建新任务：停引擎期间还在往队列里塞新活，
+        # 只会让"等待剩余任务收尾"永远等不完。
+        self.event_bus.publish(
+            EventType.ENGINE_STOPPING, source="engine", context=self.context
+        )
 
         if not reactor.running:
             # Reactor 尚未启动（例如启动阶段就失败），同步退出避免 callLater 丢失

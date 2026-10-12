@@ -20,9 +20,13 @@ from typing import Any, Optional
 
 import backtrader as bt
 
-from app.feature.context import FactorContext
+# 目录重构后：app.feature → app.modules.factor，app.strategy → app.modules.strategy。
+# 用户策略文件不在 app/ 包内，改名不会被重构脚本扫到，
+# 于是"引擎启动日志里一条 ERROR、面板上少了这个策略"这种静默失败
+# 会一直留到有人翻日志才发现。
+from app.modules.factor.context import FactorContext
 from app.domain.types import Side, Signal, SignalSource
-from app.strategy.base import IBaseStrategy
+from app.modules.strategy.base import IBaseStrategy
 
 
 # ===========================================================================

@@ -116,6 +116,10 @@ class MonitorResource(Resource):
             })
         if head == "audit":
             return self._json(request, {"audit": list(c.audit)})
+        if head == "runtime":
+            # 任务系统全景：队列积压 / 执行池占用 / 规则 / 死信。
+            # 事件驱动架构里"现在系统在做什么"只靠这一屏回答。
+            return self._json(request, c.control.runtime_system())
         if head == "collector":
             return self._json(request, c.control.collector_status())
         if head == "dataguard":
@@ -486,6 +490,24 @@ class MonitorResource(Resource):
             return self._async(request, c.control.cross_collect_async(
                 body.get("symbols"), body.get("categories"),
             ))
+
+        # POST /api/runtime/dispatch —— 手动投递一个引擎任务
+        #   body: {"task_type": "factor.calculate", "params": {"symbols": ["600519"]}}
+        # 与 /api/tasks（新增量化任务）的区别：这里投的是一次性工作，
+        # 会走"队列 → 能力路由 → 执行池 → 处理器"的完整链路。
+        if seg[1] == "runtime" and len(seg) >= 3 and seg[2] == "dispatch":
+            return self._json(request, c.control.dispatch_task(
+                str(body.get("task_type") or ""),
+                body.get("params"),
+                priority=body.get("priority"),
+                dedup_key=str(body.get("dedup_key") or ""),
+                max_retries=int(body.get("max_retries") or 0),
+            ))
+
+        # POST /api/runtime/rule —— 启停一条调度规则（临时掐断某条自动链路）
+        if seg[1] == "runtime" and len(seg) >= 3 and seg[2] == "rule":
+            return self._json(request, c.control.set_rule_enabled(
+                str(body.get("name") or ""), bool(body.get("enabled", True))))
 
         # POST /api/dataguard/check —— 立刻体检（可选自动补全）
         if seg[1] == "dataguard" and len(seg) >= 3 and seg[2] == "check":

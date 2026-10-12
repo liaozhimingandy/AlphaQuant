@@ -113,6 +113,31 @@ class NewsService(ServiceComponent):
         finally:
             self._polling = False
 
+    def poll_now(self) -> defer.Deferred:
+        """立刻采一轮（不等定时器），供任务执行器驱动。
+
+        与 :meth:`_tick` 的关键区别：**异常向上传播**。
+        定时轮询吞掉异常是对的（一次网络抖动不该让定时器停摆），
+        但任务驱动的场景下吞异常会让任务显示"成功"而实际一条都没采到 ——
+        那正是面板上最难查的一类假成功。
+        """
+        if not self.news_center.sources:
+            raise RuntimeError("资讯服务未配置任何新闻源，无法采集")
+        if self._polling:
+            return defer.fail(RuntimeError("上一轮新闻采集尚未结束，请稍后重试"))
+        d = threads.deferToThread(self.news_center.poll)
+        d.addCallback(self._publish_many)
+        return d
+
+    def _publish_many(self, events: Any) -> Dict[str, Any]:
+        self._polling = True
+        try:
+            for evt in events or []:
+                self._publish(evt)
+        finally:
+            self._polling = False
+        return {"events": len(events or [])}
+
     def _publish(self, evt: NewsEvent) -> None:
         symbols = evt.symbols
         ana = evt.analysis
