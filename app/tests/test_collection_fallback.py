@@ -260,6 +260,178 @@ class TestParseErrorNotNetwork(unittest.TestCase):
         self.assertEqual(len(marked), 1, "网络失败仍要标记域名")
 
 
+class TestFlowRankKindAlias(unittest.TestCase):
+    """资金榜视角参数：少写"排行"二字就会 100% 抛 ValueError。
+
+    akshare 的 ``stock_fund_flow_individual`` 只认 ``3日排行``/``5日排行``/
+    ``10日排行``，内部是等值判断 + else 落到即时分支。传 ``"3日"`` 会
+    用**即时**的 URL 拉回 10 列、再按多周期的 7 个列名赋值，于是必然
+    ``ValueError: Length mismatch``。曾表现为"资金榜只剩即时一个视角"，
+    资金流兜底序列被压到 1 行，资金链维度整体失效。
+    """
+
+    def test_alias_normalized(self):
+        from app.datasource.service.facade import _flow_rank_kind
+
+        self.assertEqual(_flow_rank_kind("即时"), "即时")
+        self.assertEqual(_flow_rank_kind("3日"), "3日排行")
+        self.assertEqual(_flow_rank_kind("5日"), "5日排行")
+        self.assertEqual(_flow_rank_kind("10日"), "10日排行")
+        # 已经是规范名的不能再加后缀
+        self.assertEqual(_flow_rank_kind("3日排行"), "3日排行")
+
+    def test_unknown_falls_back_to_realtime(self):
+        from app.datasource.service.facade import _flow_rank_kind
+
+        self.assertEqual(_flow_rank_kind("垃圾输入"), "即时")
+        self.assertEqual(_flow_rank_kind(None), "即时")
+
+    def test_multi_period_columns_parsed(self):
+        """多周期视角是 7 列、列名不同且**没有成交额**，必须也能解析。"""
+        import pandas as pd
+
+        from app.datasource.service import facade as MX
+
+        df = pd.DataFrame({
+            "序号": [1],
+            "股票代码": ["000001"],
+            "股票简称": ["平安银行"],
+            "最新价": [11.0],
+            "阶段涨跌幅": ["3.20%"],
+            "连续换手率": ["5.10%"],
+            "资金流入净额(元)": ["1.20亿"],
+        })
+        with mock.patch.object(MX, "_call", lambda *a, **k: df):
+            out = MX._flow_rank_akshare(rank_kind="3日")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out.iloc[0]["symbol"], "000001")
+        # 1.20亿 = 1.2e8
+        self.assertAlmostEqual(out.iloc[0]["main_net"], 1.2e8, delta=1e6)
+        # 多周期没有成交额列，净占比算不出来 —— 留 None，不能造假
+        self.assertIsNone(out.iloc[0]["main_net_pct"])
+
+    def test_multi_period_kind_reaches_akshare(self):
+        """真正传给 akshare 的必须是带"排行"的规范名。"""
+        import pandas as pd
+
+        from app.datasource.service import facade as MX
+
+        df = pd.DataFrame({"股票代码": ["000001"], "名称": ["平安银行"],
+                           "涨跌幅": [1.0], "净额": [1.0], "成交额": [10.0]})
+        seen: dict = {}
+
+        def fake_call(name, *a, **kw):
+            seen.update(kw)
+            return df
+
+        with mock.patch.object(MX, "_call", fake_call):
+            MX._flow_rank_akshare(rank_kind="5日")
+        self.assertEqual(seen.get("symbol"), "5日排行")
+
+
+class TestBatchBreaker(unittest.TestCase):
+    """逐票接口必须有批量熔断：源挂了就别让 60 只票各重试 3 次。"""
+
+    def setUp(self):
+        from app.datasource.service import facade as MX
+
+        self.MX = MX
+        MX._BATCH_BREAKER.clear()
+
+    def tearDown(self):
+        self.MX._BATCH_BREAKER.clear()
+
+    def test_opens_after_consecutive_failures(self):
+        MX = self.MX
+        err = ConnectionError("Connection aborted")
+
+        def boom():
+            raise err
+
+        for _ in range(MX._BATCH_BREAKER_THRESHOLD):
+            with self.assertRaises(Exception):
+                MX._breaker_guard("unit-x", boom)
+        self.assertIsNotNone(MX._breaker_open("unit-x"),
+                             "连续失败后应熔断，否则整批票会各自重试")
+
+    def test_tripped_call_does_not_invoke_source(self):
+        """熔断期间绝不能再发请求 —— 这正是限流的放大器。"""
+        MX = self.MX
+        err = ConnectionError("Connection aborted")
+        def boom():
+            raise err
+
+        for _ in range(MX._BATCH_BREAKER_THRESHOLD):
+            with self.assertRaises(Exception):
+                MX._breaker_guard("unit-y", boom)
+
+        calls = {"n": 0}
+
+        def counted():
+            calls["n"] += 1
+            raise err
+
+        with self.assertRaises(Exception) as ctx:
+            MX._breaker_guard("unit-y", counted)
+        self.assertEqual(calls["n"], 0, "熔断中还发请求，等于白重试")
+        self.assertIn("熔断", str(ctx.exception))
+
+    def test_success_resets(self):
+        import pandas as pd
+
+        MX = self.MX
+        err = ConnectionError("Connection aborted")
+        def boom():
+            raise err
+
+        for _ in range(MX._BATCH_BREAKER_THRESHOLD - 1):
+            with self.assertRaises(Exception):
+                MX._breaker_guard("unit-z", boom)
+        self.assertIsNone(MX._breaker_open("unit-z"))
+        MX._breaker_guard("unit-z", lambda: pd.DataFrame({"a": [1]}))
+        self.assertEqual(MX._BATCH_BREAKER.get("unit-z", {}).get("fails", 0), 0)
+
+    def test_data_error_does_not_trip(self):
+        """'这只票没数据'是数据问题，不该让整批票跟着跳过。"""
+        MX = self.MX
+
+        def no_data():
+            raise MX.MarketXError("stock_cyq_em 返回空数据")
+
+        for _ in range(MX._BATCH_BREAKER_THRESHOLD + 2):
+            with self.assertRaises(MX.MarketXError):
+                MX._breaker_guard("unit-w", no_data)
+        self.assertIsNone(MX._breaker_open("unit-w"),
+                          "非瞬时错误不该触发熔断")
+
+
+class TestSnapshotSeriesSynthesis(unittest.TestCase):
+    """快照合成序列：多周期是**累计值**，不能直接当单日净额。"""
+
+    def test_cumulative_is_averaged_to_daily(self):
+        """10 日累计 10 亿应摊成日均 1 亿，而不是某天流入 10 亿。"""
+        import pandas as pd
+
+        from app.datasource.service import facade as MX
+
+        frames = {}
+        for kind, val in (("即时", 1e8), ("3日", 3e8), ("5日", 5e8), ("10日", 10e8)):
+            frames[kind] = pd.DataFrame({
+                "symbol": ["000001"], "name": ["x"], "pct_change": [1.0],
+                "main_net": [val], "main_net_pct": [0.1],
+            })
+        with mock.patch.object(MX, "_ff_snapshot",
+                               lambda k: frames.get(k, pd.DataFrame())), \
+             mock.patch.object(MX, "_ff_anchor_day", lambda: date(2026, 10, 12)):
+            out = MX._fund_flow_from_snapshot("000001", days=None)
+
+        self.assertEqual(len(out), 4, "四个视角都要进序列")
+        # 摊成日均后四个点应在同一量级（原值 1/3/5/10 亿 → 日均都约 1 亿）
+        vals = list(out["main_net"])
+        for v in vals:
+            self.assertAlmostEqual(v, 1e8, delta=1e7)
+
+
 class TestCalendarStateNaming(unittest.TestCase):
     """交易日清晨不能显示成"非交易日"。"""
 

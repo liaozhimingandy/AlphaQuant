@@ -103,6 +103,7 @@ def sync_chip(symbols: Sequence[str], force: bool = False,
     """同步筹码分布。去重逻辑见 ``sync_fund_flow``。"""
     ok = 0
     skipped = 0
+    tripped = 0
     failed: List[Tuple[str, str]] = []
     syms = [normalize_symbol(s) for s in dict.fromkeys(symbols) if s]
     target = _target_day(day)
@@ -115,11 +116,22 @@ def sync_chip(symbols: Sequence[str], force: bool = False,
             R.save_chip(MX.fetch_chip(sym))
             ok += 1
         except MX.MarketXError as exc:
+            if "熔断" in str(exc):
+                # 源已断开：这不是这只票的问题，记"跳过"而不是"失败"，
+                # 否则一次源故障会被报成 60 只票各自失败，把真问题淹掉
+                tripped += 1
+                continue
             failed.append((sym, str(exc)))
         except Exception as exc:
+            if "熔断" in str(exc):
+                tripped += 1
+                continue
             failed.append((sym, f"{type(exc).__name__}: {exc}"))
     if skipped:
         logger.info(f"筹码同步跳过 {skipped} 只（库内已有 {target} 的数据）")
+    if tripped:
+        logger.info(f"筹码同步另有 {tripped} 只因源熔断跳过（不重复重试）")
+    skipped += tripped
     if failed:
         log_throttled("WARNING", f"筹码同步有 {len(failed)} 只失败（已跳过）",
                       key="sync-chip-failed")

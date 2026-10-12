@@ -71,6 +71,74 @@ def _throttle(key: str = "marketx") -> None:
     _LAST_CALL[key] = time.monotonic()
 
 
+# ===========================================================================
+# 批量熔断：别让"一个源挂了"变成"整批票各重试一遍"
+# ===========================================================================
+# 场景：筹码这类接口是**逐票调用**的，一輪要打 60+ 次。
+# 源若真的不通（被限流/域名不可达），每只票都会各自重试 3 次并指数退避 ——
+# 一輪下来是 200 次徒劳请求，既拖慢同步，又把自己往"封得更死"里推。
+# 所以：连续 N 次同因失败就**断开**该接口，本批剩余票直接跳过，
+# 冷却期结束再试一次（源恢复了能自动回来）。
+_BATCH_BREAKER: Dict[str, Dict[str, Any]] = {}
+_BATCH_BREAKER_THRESHOLD = 3       # 连续失败几次就断开
+_BATCH_BREAKER_COOLDOWN = 300.0    # 断开后冷却 5 分钟
+
+
+def _breaker_open(key: str) -> Optional[str]:
+    """熔断中返回原因文本；未熔断（或冷却已过）返回 None。"""
+    st = _BATCH_BREAKER.get(key)
+    if not st:
+        return None
+    until = float(st.get("until") or 0.0)
+    if until <= 0:
+        # 已经在累计失败、但还没到断开阈值 —— 此时**不能**把计数清掉，
+        # 否则每次进来都从头数，永远到不了阈值（熔断形同虚设）。
+        return None
+    if time.monotonic() >= until:
+        _BATCH_BREAKER.pop(key, None)   # 冷却结束，放它再试一次
+        return None
+    return str(st.get("why") or "连续失败")
+
+
+def _breaker_record(key: str, ok: bool, why: str = "") -> None:
+    """记录一次调用结果。成功即清零；失败累计到阈值就断开。"""
+    if ok:
+        _BATCH_BREAKER.pop(key, None)
+        return
+    st = _BATCH_BREAKER.setdefault(key, {"fails": 0, "until": 0.0, "why": ""})
+    st["fails"] = int(st.get("fails") or 0) + 1
+    st["why"] = why or "连续失败"
+    if int(st["fails"]) >= _BATCH_BREAKER_THRESHOLD and not st.get("until"):
+        st["until"] = time.monotonic() + _BATCH_BREAKER_COOLDOWN
+        log_throttled(
+            "WARNING",
+            f"[{key}] 连续失败 {st['fails']} 次，"
+            f"{_BATCH_BREAKER_COOLDOWN / 60:.0f} 分钟内跳过该接口"
+            f"（源疑似不可用，整批重试只会加剧限流）：{str(why)[:80]}",
+            key=f"breaker-{key}",
+        )
+
+
+def _breaker_guard(key: str, call: Callable[[], pd.DataFrame],
+                   what: str = "") -> pd.DataFrame:
+    """``call()`` 的熔断包装：熔断中直接抛，否则调用并按瞬时错误记账。
+
+    只对**瞬时错误**（连接被重置/超时）累计熔断计数 ——
+    "这只票没数据"是数据问题，不该让整批票跟着跳过。
+    """
+    why = _breaker_open(key)
+    if why:
+        raise SourceError(f"{what or key} 熔断中（{why}）")
+    try:
+        df = call()
+    except Exception as exc:                      # 网络类异常可能不是 MarketXError
+        if is_transient(exc):
+            _breaker_record(key, False, f"{type(exc).__name__}: {str(exc)[:60]}")
+        raise
+    _breaker_record(key, True)
+    return df
+
+
 def _require_akshare() -> None:
     if ak is None:
         raise MarketXError("未安装 akshare，无法获取资金流/筹码/涨停池数据")
@@ -258,7 +326,13 @@ def _parse_fund_flow(df: pd.DataFrame, code: str) -> pd.DataFrame:
 
 # 资金流多源兜底的状态
 _FF_PRIMARY_DEAD_UNTIL = 0.0                     # 主源(东财 push2his)熔断到期时刻
-_FF_SNAPSHOT_CACHE: Dict[str, pd.DataFrame] = {}  # "kind:日期" -> 全市场快照
+# "kind:日期" -> (全市场快照, 到期时刻)
+# 成功快照缓存久一点（全市场翻 100+ 页很贵）；
+# **失败**只负缓存 5 分钟 —— 否则一次瞬时故障会让当天再也拿不到数据，
+# 源恢复了也回不来。
+_FF_SNAPSHOT_CACHE: Dict[str, Tuple[pd.DataFrame, float]] = {}
+_FF_SNAPSHOT_TTL_OK = 1800.0
+_FF_SNAPSHOT_TTL_FAIL = 300.0
 
 
 def _ff_snapshot(kind: str) -> pd.DataFrame:
@@ -270,9 +344,9 @@ def _ff_snapshot(kind: str) -> pd.DataFrame:
     最关键的 `main_net_pct`。
     """
     key = f"{kind}:{date.today().isoformat()}"
-    cached = _FF_SNAPSHOT_CACHE.get(key)
-    if cached is not None:
-        return cached  # 可能是空表 —— 即上一次失败的"负缓存"
+    hit = _FF_SNAPSHOT_CACHE.get(key)
+    if hit is not None and time.monotonic() < hit[1]:
+        return hit[0]      # 可能是空表 —— 即上一次失败的"负缓存"
     try:
         # retries=0：这里本身就在"资金流源"的重试循环里，
         # 再让注册表重试一遍会把请求数翻倍（每个视角 100+ 页，很贵）。
@@ -280,9 +354,10 @@ def _ff_snapshot(kind: str) -> pd.DataFrame:
     except Exception as exc:
         # 负缓存：这个接口一次要翻 100 多页（几秒），
         # 不缓存失败结果的话，整批 68 只票会各自重试一遍，直接拖垮同步。
-        logger.debug(f"资金流快照({kind})失败，本轮不再重试: {exc}")
+        logger.debug(f"资金流快照({kind})失败，5 分钟内不再重试: {exc}")
         df = pd.DataFrame()
-    _FF_SNAPSHOT_CACHE[key] = df
+    ttl = _FF_SNAPSHOT_TTL_OK if not df.empty else _FF_SNAPSHOT_TTL_FAIL
+    _FF_SNAPSHOT_CACHE[key] = (df, time.monotonic() + ttl)
     return df
 
 
@@ -338,6 +413,10 @@ def _fund_flow_from_snapshot(code: str, days: Optional[int]) -> pd.DataFrame:
     所以这里**合成**一条 4 点短序列：用四个视角的净额近似成趋势，
     让 资金链 维度的 net_days/accel/pulse 不至于完全失效；
     核心的 `main_net_pct`（即时）则精确取自快照。
+
+    这是一条**降级路径**，主源（逐日真实明细）可用时不会走到这里，
+    所以序列里的值是近似的：多周期视角是区间累计值，已摊成区间日均
+    （见 ``windows``），且只有"即时"那天有涨跌幅与净占比。
     """
     code = normalize_symbol(code)
     kinds = ["即时", "3日", "5日", "10日"]
@@ -375,6 +454,11 @@ def _fund_flow_from_snapshot(code: str, days: Optional[int]) -> pd.DataFrame:
 
     today = _ff_anchor_day()  # 锚到最近交易日，别在周末造出非交易日数据行
     offsets = {"即时": 0, "3日": 2, "5日": 4, "10日": 9}
+    # 各视角的**统计窗口天数**。3日/5日/10日 给的是区间**累计**净额，
+    # 不是单日净额 —— 不摊开的话，"10 天累计 5 亿"会被当成某一天流入 5 亿，
+    # 与"即时"的单日值差一到两个数量级，下游算 accel/pulse 时彻底失真。
+    # 摊成"区间日均"后四个点落在同一量级上，趋势可用（仍是近似，但可比）。
+    windows = {"即时": 1, "3日": 3, "5日": 5, "10日": 10}
     # 往前推也要按交易日推，见 _ff_span_days 的说明
     span = _ff_span_days(today, max(offsets.values()))
     rows: List[Dict[str, Any]] = []
@@ -392,6 +476,10 @@ def _fund_flow_from_snapshot(code: str, days: Optional[int]) -> pd.DataFrame:
         if sub.empty:
             continue
         val = _num(sub.iloc[0].get(col_main))
+        win = windows.get(k, 1)
+        # 累计净额 → 区间日均（见 windows 的说明）
+        if val is not None and win > 1:
+            val = val / win
         rows.append({
             "symbol": code,
             "date": span[len(span) - 1 - off] if len(span) > off
@@ -558,19 +646,51 @@ REGISTRY.register("akshare", supports=["fund_flow"], fetch=_fund_flow_akshare,
 REGISTRY.register("tushare", supports=["fund_flow"], fetch=_fund_flow_tushare)
 
 
+#: 视角别名 -> akshare ``stock_fund_flow_individual`` 认的规范名。
+#:
+#: 这个接口**只认** ``即时`` / ``3日排行`` / ``5日排行`` / ``10日排行`` 四个值，
+#: 内部是 ``if symbol == "3日排行": ... else: 即时`` 的等值判断 —— 传 ``"3日"``
+#: 会静默落到 else 分支：用**即时**的 URL 拉回 10 列数据，
+#: 却按多周期的 7 个列名去赋值，于是必然抛
+#: ``ValueError: Length mismatch: Expected axis has 10 elements, new values have 7``。
+#: 表现为"资金榜 3/5/10 日视角天天挂、只剩即时"，且错误被记成 parse_error，
+#: 看起来像东财改版，实际是参数名差一个"排行"二字。
+_FLOW_RANK_KIND_ALIASES: Dict[str, str] = {
+    "即时": "即时", "今日": "即时", "实时": "即时", "当日": "即时",
+    "3日排行": "3日排行", "3日": "3日排行", "3": "3日排行",
+    "5日排行": "5日排行", "5日": "5日排行", "5": "5日排行",
+    "10日排行": "10日排行", "10日": "10日排行", "10": "10日排行",
+}
+
+
+def _flow_rank_kind(kind: Any) -> str:
+    """把各种写法的视角归一成 akshare 认的规范名，认不出就退回"即时"。"""
+    text = str(kind or "即时").strip()
+    return _FLOW_RANK_KIND_ALIASES.get(text, "即时")
+
+
 def _flow_rank_akshare(rank_kind: str = "即时",
                        top: Optional[int] = None) -> pd.DataFrame:
-    """资金榜源：东财全市场资金流排名（`stock_fund_flow_individual`）。
+    """资金榜源：全市场资金流排名（`stock_fund_flow_individual`）。
 
     参数叫 ``rank_kind`` 而不是 ``kind``：注册表 ``fetch(kind, ...)`` 的
     第一个位置参数已经叫 kind，适配器再叫 kind 会撞名。
+
+    注意两个视角的**返回列不一样**，列候选必须两套都认：
+      * ``即时``：10 列，含 ``成交额``，能自算净占比；
+      * ``3/5/10日排行``：7 列，只有 ``资金流入净额(元)``，**没有成交额**，
+        净占比算不出来，留 None（上层合成序列时该项缺失是可以接受的，
+        总比整个视角拿不到强）。
     """
-    df = _call("stock_fund_flow_individual", symbol=rank_kind, limit_key="fundflow",
-               retry=_registry_retry())
+    df = _call("stock_fund_flow_individual",
+               symbol=_flow_rank_kind(rank_kind),
+               limit_key="fundflow", retry=_registry_retry())
     col_code = _pick(df, ["代码", "股票代码", "code"])
     col_name = _pick(df, ["名称", "股票简称"])
-    col_pct = _pick(df, ["涨跌幅"])
-    col_main = _pick(df, ["主力净流入-净额", "主力净额", "净额"])
+    # 即时视角叫"涨跌幅"，多周期视角叫"阶段涨跌幅"
+    col_pct = _pick(df, ["涨跌幅", "阶段涨跌幅"])
+    col_main = _pick(df, ["主力净流入-净额", "主力净额", "净额",
+                          "资金流入净额(元)", "资金流入净额"])
     col_main_pct = _pick(df, ["主力净流入-净占比", "净占比"])
     col_amount = _pick(df, ["成交额", "成交金额"])
     if col_code is None:
@@ -636,7 +756,13 @@ def fetch_chip(symbol: str, adjust: str = "") -> pd.DataFrame:
     这里用区间中点 + 集中度修正，够用于"现价离密集区多远"的判断。
     """
     code = normalize_symbol(symbol)
-    df = _call("stock_cyq_em", symbol=code, adjust=adjust, limit_key="chip")
+    # 走熔断包装：源不通时，整批剩余票直接跳过，而不是各自重试 3 次
+    df = _breaker_guard(
+        "chip",
+        lambda: _call("stock_cyq_em", symbol=code, adjust=adjust,
+                      limit_key="chip"),
+        what="筹码分布",
+    )
 
     col_date = _pick(df, ["日期", "date"])
     col_profit = _pick(df, ["获利比例", "获利盘"])
