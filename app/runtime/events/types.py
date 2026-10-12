@@ -141,6 +141,14 @@ class EventType:
     #: 拆成两个事件是为了让"节拍"和"该干活了"在事件流里能分开看。
     SYSTEM_MAINTENANCE_TICK = "system.maintenance.tick"
     SYSTEM_MAINTENANCE_DUE = "system.maintenance.due"
+    #: 启动恢复完成：报告"上次没干完的活捞回来多少"。
+    #: 单独发一个事件而不是只打日志，是为了让"恢复"这件事能被审计 ——
+    #: 静默恢复和静默丢弃在日志里长得差不多，在事件流里完全不同。
+    SYSTEM_TASKS_RECOVERED = "system.tasks.recovered"
+    #: 人工处置了一条死信（重投 / 丢弃）
+    SYSTEM_DEAD_RESOLVED = "system.dead.resolved"
+    #: 启动预检结论（环境与配置体检）
+    SYSTEM_PREFLIGHT = "system.preflight"
 
 
 #: 事件分类目录。面板按它分组展示，文档按它组织。
@@ -188,7 +196,8 @@ EVENT_CATEGORIES: Dict[str, Tuple[str, ...]] = {
         EventType.SYSTEM_DATABASE_DEGRADED,
         EventType.SYSTEM_EVENT_PUBLISH_FAILED, EventType.SYSTEM_MARKET_SESSION_CHANGED,
         EventType.SYSTEM_DATA_STALENESS_DETECTED, EventType.SYSTEM_MAINTENANCE_DUE,
-        EventType.SYSTEM_MAINTENANCE_TICK,
+        EventType.SYSTEM_MAINTENANCE_TICK, EventType.SYSTEM_TASKS_RECOVERED,
+        EventType.SYSTEM_DEAD_RESOLVED, EventType.SYSTEM_PREFLIGHT,
         EventType.COMPONENT_ENABLED, EventType.COMPONENT_DISABLED,
         EventType.SNAPSHOT_SAVED, EventType.CONTROL_COMMAND,
     ),

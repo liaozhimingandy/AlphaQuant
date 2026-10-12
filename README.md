@@ -59,8 +59,14 @@ python main.py hub status --tasks              # hub + 各服务状态 + 所有�
 python main.py ctl runtime status              # 池占用、队列积压、死信、统计
 python main.py ctl runtime pools               # 8 个池的容量与在跑任务
 python main.py ctl runtime rules               # 22 条调度规则及其开关状态
-python main.py ctl runtime dead                # 死信：没处理器 / 无池可领的任务
+python main.py ctl runtime dead                # 错误队列：彻底失败的任务
+python main.py ctl runtime dead-retry <id>     # 人工点"继续"（尝试次数清零后重投）
+python main.py ctl runtime dead-retry --all    # 批量重投（下单类会跳过）
+python main.py ctl runtime dead-discard <id>   # 认了，不重跑，从清单划掉
 python main.py ctl runtime dead-clear          # 处理完这批死信后清掉
+python main.py ctl runtime journal             # 流水账落盘状态 + 死信处置历史
+python main.py ctl preflight                   # 启动预检结论（配置/目录/数据库/数据）
+python main.py ctl preflight --rerun           # 改完配置当场再体检一遍
 python main.py ctl runtime maint               # 维护计划（清理/归档/校验）与下次执行时间
 python main.py ctl runtime maint-run validate  # 立刻跑一次（不看周期与开关）
 python main.py ctl runtime dispatch --task-type factor.calculate --params '{"symbols":["000001"]}'
@@ -122,7 +128,12 @@ python main.py ctl log level INFO --no-persist # 只本次生效，不写进配�
 - **执行池**：8 个池各一张卡片（占用条 + 完成/失败/超时/满槽拒收计数）。
   池之间是**独立线程池**，回测跑满也吃不掉行情的线程
 - **队列积压**：每个队列的积压量，连同它对应的池与容量一起显示
-- **在跑任务 / 调度规则**（可逐条开关）/ **能力路由表** / **死信**（可清空）
+- **在跑任务 / 调度规则**（可逐条开关）/ **能力路由表**
+- **错误队列**：死信逐条「继续 / 丢弃」。下单类任务的"继续"按钮置灰并说明原因
+  （点了会重复下单）；带"重投 N 次""中断过"标记
+- **任务持久化**：流水账路径、未完成数、本次启动恢复了多少、上次刷盘时间、
+  落盘是否出错，外加死信处置历史（内存里清空后仍可追溯）
+- **启动预检**：逐项结果与处置建议，可当场重跑
 - **手动投递任务**：任务类型下拉直接取已注册处理器；没注册的类型会被明确拒绝
 - **维护计划**：日志清理 / 快照归档 / 运行校验 的开关、周期（每天 HH:MM 或每 N 秒）、
   参数与「立即执行」。清理与归档**默认只报告不删**，要真的删必须显式勾选
@@ -1118,6 +1129,7 @@ app/
 │   ├── component.py        IBaseComponent 契约
 │   ├── capability.py       Cap 能力常量 + 四种组件角色
 │   ├── registry.py         ServiceRegistry 依赖解析
+│   ├── preflight.py        启动预检：配置/目录/数据库/数据/磁盘/网关
 │   └── hub/                多进程编排（一个 hub 拉起 N 个引擎进程）
 │
 ├── runtime/                ── 运行时层：怎么跑，不含业务 ──
@@ -1128,6 +1140,7 @@ app/
 │   ├── events/             事件契约层：types(常量唯一真源) / schema(EngineEvent) / bus
 │   ├── scheduling/         调度层：rules(规则) / router(能力路由) / defaults(22 条规则)
 │   ├── tasking/            任务层：models(EngineTask 八态) / store(队列+幂等+死信)
+│   │                       journal(SQLite 流水账：崩溃恢复 + 错误队列)
 │   │                       + runtime/spec/QuantTask（作业实例）
 │   ├── workers/            执行层：pools(8 个分池线程池) / registry / handlers(15 个)
 │   └── bus/                FileBus 跨进程事件总线

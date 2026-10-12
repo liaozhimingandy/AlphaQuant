@@ -24,6 +24,8 @@ dist/
 output/
 logs/
 /data/
+# 面板『运行时 → 日志等级』勾选"重启后仍生效"时写入；是运行时产物不是源码配置
+config/logging.json
 *.pid
 *.stop
 

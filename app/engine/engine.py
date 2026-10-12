@@ -10,6 +10,7 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 from abc import ABC, abstractmethod
+import os
 import threading
 import time
 from datetime import datetime
@@ -155,6 +156,9 @@ class BaseQuantEngine(IQuantEngine):
         self._status = EngineStatus.INITIALIZING
         self._stop_requested = False
         self._graceful_stop = True
+        #: 启动预检报告。停在"没预检过"这个状态是有意义的：
+        #: 面板要能区分"预检通过"与"这台引擎没跑过预检"。
+        self.preflight: Any = None
 
         # 全局上下文与核心组件
         self.context = EngineContext(run_mode=self.run_mode, config=config)
@@ -242,6 +246,15 @@ class BaseQuantEngine(IQuantEngine):
         self.context.engine_status = self._status
         self._stop_requested = False
 
+        # 0. 启动预检：环境与配置先体检一遍。
+        #    放在最前面，是因为它要拦的是"启动即空转"这类问题 ——
+        #    等组件都起来再发现股票池是空的，就已经白跑一轮了。
+        if not self._run_preflight():
+            self._status = EngineStatus.STOPPED
+            self.context.engine_status = self._status
+            self.context.end_time = datetime.now()
+            return self.context
+
         # 1. 初始化所有组件
         self.initialize()
 
@@ -281,6 +294,57 @@ class BaseQuantEngine(IQuantEngine):
         )
         logger.info("=== 量化引擎已正常停止 ===")
         return self.context
+
+    def _preflight_strict(self) -> bool:
+        """预检发现"不能飞"的问题时，是否拒绝启动。
+
+        默认**拒绝**。理由：这类问题（数据库不可写、实盘没配网关）继续跑
+        只会得到错误结果，而错误结果比不启动更难发现。
+        关掉它的正当理由是"我知道这台机器就是缺这项，我仍要跑别的部分"。
+        """
+        raw = self.config.get("PREFLIGHT_STRICT")
+        if raw is None:
+            raw = os.getenv("AQ_PREFLIGHT_STRICT", "1")
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _run_preflight(self) -> bool:
+        """跑一遍启动预检，决定是否继续启动。"""
+        from app.engine.preflight import log_report, run_preflight
+
+        scheduler = self.get_component("scheduler")
+        journal = getattr(getattr(scheduler, "store", None), "journal", None)
+        try:
+            report = run_preflight(mode=self.run_mode.value, journal=journal)
+        except Exception as exc:
+            # 预检自己炸了不能拦住引擎：那是体检工具的错，不是引擎的错。
+            logger.error(f"启动预检异常，跳过: {exc}", exc_info=True)
+            return True
+
+        self.preflight = report
+        log_report(report)
+        try:
+            self.event_bus.publish(
+                EventType.SYSTEM_PREFLIGHT,
+                source="engine",
+                ok=report.ok,
+                degraded=report.degraded,
+                counts={
+                    "error": len(report.errors),
+                    "warn": len(report.warnings),
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"发布预检事件失败（已忽略）: {exc}")
+
+        if not report.ok:
+            if self._preflight_strict():
+                logger.error(
+                    "启动预检未通过，引擎拒绝启动。"
+                    "如需强制启动（后果自负）请设 PREFLIGHT_STRICT=0"
+                )
+                return False
+            logger.warning("启动预检未通过，但已配置为非严格模式，继续启动")
+        return True
 
     def _readiness(self) -> Tuple[bool, List[str]]:
         """依赖检查：启用的组件是否都真的 RUNNING，服务依赖是否齐全。
@@ -640,6 +704,10 @@ class BaseQuantEngine(IQuantEngine):
             # 服务全景：能力、依赖、缺失情况。面板按这个画依赖图，
             # 也可以直接拿 missing_dependencies 当"装配自检报告"看。
             "services": self.services.snapshot(),
+            # 启动预检：None 表示这台引擎还没跑过预检（区别于"跑过且通过"）
+            "preflight": (
+                self.preflight.to_dict() if self.preflight is not None else None
+            ),
         }
 
     # ------------------------------
@@ -749,6 +817,17 @@ class BaseQuantEngine(IQuantEngine):
             self.control.save_runtime_tasks()
         except Exception as exc:
             logger.debug(f"运行时任务固化失败（可忽略）: {exc}")
+
+        # 任务流水账收尾：调度器 on_stop 已经写过一次（那时它还在），
+        # 这里再兜一次是为了覆盖"调度组件压根没起来"或"停止顺序异常"
+        # 的情形 —— 落盘这件事宁可多做一次，也不能漏一次。
+        scheduler = self.get_component("scheduler")
+        store = getattr(scheduler, "store", None)
+        if store is not None:
+            try:
+                store.flush()
+            except Exception as exc:
+                logger.error(f"任务流水账最终刷盘失败: {exc}")
 
         logger.info("引擎状态已持久化")
 

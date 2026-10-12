@@ -112,12 +112,13 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 |---|---|---|---|
 | **控制面** | `app/control/` | 任务增删启停、组件启停、采集遥控 | `control_plane.py` → `ControlCenter` |
 | | `app/cli/` | 命令行入口（11 个命令组） | |
-| **容器** | `app/engine/` | 生命周期、装配、依赖解析 | `engine.py` `builder.py` `registry.py` `capability.py` |
+| **容器** | `app/engine/` | 生命周期、装配、依赖解析、**启动预检** | `engine.py` `builder.py` `registry.py` `capability.py` `preflight.py` |
 | | `app/engine/hub/` | 多进程协作：一个 hub 拉起 N 个引擎进程 | `supervisor.py` `worker.py` |
-| **运行时** | `app/runtime/scheduler.py` | 调度中枢：订阅事件 → 建任务 → 投队列 → 领活 | `SchedulerComponent` |
+| **运行时** | `app/runtime/scheduler.py` | 调度中枢：订阅事件 → 建任务 → 投队列 → 领活 → 启动恢复 | `SchedulerComponent` |
+| | `app/runtime/maintenance.py` | 维护任务的时间源（周期 / 时刻 → `maintenance.due`） | `MaintenancePlanner` |
 | | `app/runtime/events/` | **事件契约层**：类型常量、`EngineEvent` 信封、总线 | `types.py` `schema.py` `bus.py` |
 | | `app/runtime/scheduling/` | **调度层**：规则表（21 条）+ 能力路由 | `rules.py` `router.py` `defaults.py` |
-| | `app/runtime/tasking/` | **任务层**：`EngineTask` 状态机、队列、死信 | `models.py` `store.py` |
+| | `app/runtime/tasking/` | **任务层**：`EngineTask` 状态机、队列、死信、**流水账（崩溃恢复）** | `models.py` `store.py` `journal.py` |
 | | `app/runtime/workers/` | **执行层**：分池线程池（8 个）+ 处理器注册表 | `pools.py` `registry.py` `handlers.py` |
 | | `app/runtime/executor.py` | 旧作业执行器（`WorkerComponent`） | |
 | | `app/runtime/bus/` | 跨进程 append-only 事件总线 | `filebus.py` → `FileBus` |
@@ -206,7 +207,8 @@ AlphaQuant/
 │   │
 │   ├── runtime/       ── 运行时层（不含业务）──
 │   │   │                      改这里之前先读 EVENT_TASK.md
-│   │   ├── scheduler.py        调度器组件（订阅事件 → 建任务 → 投队列）
+│   │   ├── scheduler.py        调度器组件（订阅事件 → 建任务 → 投队列 → 启动恢复）
+│   │   ├── maintenance.py      维护计划（周期/时刻 → maintenance.due 事件）
 │   │   ├── executor.py         WorkerComponent（旧作业执行器）
 │   │   ├── event_bus.py        薄转发兼容层（真身在 events/）
 │   │   ├── task.py             ITask / TaskStatus
@@ -220,7 +222,8 @@ AlphaQuant/
 │   │   │   └── defaults.py         21 条默认规则（全系统自动流转的唯一清单）
 │   │   ├── tasking/            ★任务层 + 作业层
 │   │   │   ├── models.py           EngineTask / TaskState / Priority
-│   │   │   ├── store.py            按队列的优先级堆 + 幂等键 + 死信
+│   │   │   ├── store.py            按队列的优先级堆 + 幂等键 + 死信 + 人工干预
+│   │   │   ├── journal.py          流水账：SQLite 落盘（崩溃恢复 / 错误队列）
 │   │   │   ├── task.py             QuantTask（标的+策略+风控+账本 运行实例）
 │   │   │   ├── runtime.py          TaskRuntime
 │   │   │   └── spec.py             TaskSpec

@@ -144,6 +144,20 @@ class EngineTask:
     worker: str = ""
     last_error_at: Optional[datetime] = None
 
+    # ---------------- 崩溃恢复 ----------------
+    #: 是否被中断过（上次跑着的时候进程没了）。
+    #: 记它是因为"这次执行结果未知"和"这次从没跑过"是两回事：
+    #: 前者可能已经产生副作用（比如下单请求已发出），后者没有。
+    interrupted: bool = False
+    #: 人工从错误队列重投的次数。与 ``attempts`` 分开记 ——
+    #: 自动重试有上限（重试不通就该报警），人工重投没有，
+    #: 但"同一个任务被人重投了 7 次"本身就是该被看见的信号。
+    manual_retries: int = 0
+    #: 一次性任务（参数里带着 callable）：不落盘，也不参与恢复。
+    #: 它本来就活不过重启（函数对象没法序列化），
+    #: 硬记只会得到一条恢复后必然失败的记录。
+    ephemeral: bool = False
+
     def __post_init__(self) -> None:
         if not self.task_type:
             raise ValueError("task_type 不能为空")
@@ -191,6 +205,39 @@ class EngineTask:
     def mark_cancelled(self) -> None:
         self.status = TaskState.CANCELLED
         self.finished_at = datetime.now()
+
+    def mark_interrupted(self) -> None:
+        """标成"跑着跑着进程没了"。
+
+        ``attempts`` **不回滚**：那一次可能真的执行了（下单请求可能
+        已经发出），把它当成没跑过就会重复下单。所以它算一次尝试，
+        只是结果未知。``attempts`` 也不自增 —— 自增发生在
+        :meth:`mark_running`，重跑时会自然 +1。
+        """
+        self.interrupted = True
+        self.status = TaskState.QUEUED
+        self.started_at = None
+        self.finished_at = None
+        self.worker = ""
+
+    def reset_for_manual_retry(self) -> None:
+        """人工重投：把任务退回"可以再跑一次"的状态。
+
+        与自动重试的区别是**清空 ``attempts``**：自动重试的额度是给
+        "暂时性故障"的（网络抖一下），用完了说明这条路走不通；
+        而人工点"继续"意味着人已经看过原因（比如补了数据、改了配置），
+        那是新的一次机会，不该带着上次的欠账上路。
+
+        ``error`` 保留不清：面板上"上次失败原因"是有排障价值的，
+        而任务重跑成功后它会被覆盖成空。
+        """
+        self.status = TaskState.PENDING
+        self.attempts = 0
+        self.manual_retries += 1
+        self.interrupted = False
+        self.started_at = None
+        self.finished_at = None
+        self.worker = ""
 
     # ---------------- 查询 ----------------
     @property
@@ -250,6 +297,9 @@ class EngineTask:
             "status_label": self.status.label,
             "attempts": self.attempts,
             "max_retries": self.max_retries,
+            "manual_retries": self.manual_retries,
+            "interrupted": self.interrupted,
+            "ephemeral": self.ephemeral,
             "dedup_key": self.dedup_key,
             "source_event_id": self.source_event_id,
             "source": self.source,

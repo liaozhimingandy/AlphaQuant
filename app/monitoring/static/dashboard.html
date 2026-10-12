@@ -710,6 +710,7 @@
 <!-- ==================== 运行时：线程池 / 队列 / 规则 / 维护 ==================== -->
 <main id="page-runtime" class="hidden">
   <section id="rt-kpis" class="kpis"></section>
+  <div class="hint" id="rt-recovery" style="margin:0 0 12px"></div>
 
   <section class="panel">
     <h2>执行池 <span class="muted" id="rt-pools-hint"></span></h2>
@@ -779,21 +780,56 @@
   </section>
 
   <section class="panel">
-    <h2>死信 <span class="muted" id="rt-dead-hint"></span></h2>
+    <h2>错误队列（死信） <span class="muted" id="rt-dead-hint"></span></h2>
     <div class="body">
       <div class="table-wrap">
         <table>
           <thead><tr>
             <th>时间</th><th>任务类型</th><th>队列</th><th class="num">尝试</th>
-            <th>错误</th><th>关联事件</th>
+            <th>错误</th><th>操作</th>
           </tr></thead>
           <tbody id="rt-dead-rows"><tr><td colspan="6" class="muted">无死信</td></tr></tbody>
         </table>
       </div>
       <div class="row" style="margin-top:10px">
-        <button id="btn-rt-dead-clear" class="danger">清空死信</button>
-        <span class="hint">死信是<b>待办清单</b>不是账本：处理完就该清掉，
-        否则健康判定会一直报"有死信"。累计发生过多少仍记在统计里。</span>
+        <button id="btn-rt-dead-retry-all">全部重试</button>
+        <button id="btn-rt-dead-clear" class="danger">清空</button>
+        <span class="hint">死信是<b>待办清单</b>不是账本。
+        <b>继续</b> = 人工确认后重投（尝试次数清零，因为那是新的一次机会）；
+        <b>丢弃</b> = 认了，不重跑。下单类任务不给"继续" ——
+        点了会重复下单，必须先核对订单状态。</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>任务持久化 <span class="muted" id="rt-journal-hint"></span></h2>
+    <div class="body">
+      <div id="rt-journal" class="muted">加载中…</div>
+      <div class="table-wrap" style="margin-top:8px">
+        <table>
+          <thead><tr>
+            <th>时间</th><th>任务类型</th><th class="num">尝试</th><th>错误</th><th>处置</th>
+          </tr></thead>
+          <tbody id="rt-journal-hist"><tr><td colspan="5" class="muted">—</td></tr></tbody>
+        </table>
+      </div>
+      <p class="hint">每个未完成的任务都会写进流水账，<b>进程被杀也不会丢</b>；
+      下次启动自动捞回来重跑（中断过的会标出来）。
+      <b>超龄</b>（默认 72 小时）或<b>重试耗尽</b>的不再自动重跑，
+      转进上面的错误队列等人处理。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>启动预检 <span class="muted" id="rt-preflight-hint"></span></h2>
+    <div class="body">
+      <div id="rt-preflight" class="muted">加载中…</div>
+      <div class="row" style="margin-top:8px">
+        <button id="btn-rt-preflight">重新体检</button>
+        <span class="hint">预检拦的不是崩溃，是<b>空转</b>：
+        配置写坏 → 维护计划静默不执行；数据库不可写 → 采集"成功"地把数据全丢掉；
+        股票池空 → 一整天什么都没干而日志里全是正常。</span>
       </div>
     </div>
   </section>
@@ -1376,6 +1412,41 @@
         toast(r && r.ok ? ('已清空 ' + (r.cleared||0) + ' 条') : ('失败: ' + ((r&&r.error)||'')), !(r&&r.ok));
         loadRuntime();
       }).catch(function(e){ toast('清空失败: ' + e.message, true); });
+      return;
+    }
+    if(b.id === 'btn-rt-dead-retry-all'){
+      if(!confirm('确认重投全部可重投的死信？下单类任务会被跳过（重投会重复下单）。')) return;
+      post('/api/runtime/dead/retry', {all: true}).then(function(r){
+        if(r && r.ok){
+          toast('已重投 ' + (r.done||0) + ' 条，跳过 ' + (r.skipped||0) + ' 条');
+        } else toast('重投失败: ' + ((r && r.error) || ''), true);
+        loadRuntime();
+      }).catch(function(e){ toast('重投失败: ' + e.message, true); });
+      return;
+    }
+    if(b.id === 'btn-rt-preflight'){
+      post('/api/preflight/run', {}).then(function(r){
+        toast(r && r.ok
+          ? ('体检完成：' + (r.ok ? '通过' : '未通过'))
+          : ('体检失败: ' + ((r && r.error) || '')), !(r && r.ok));
+        loadPreflight();
+      }).catch(function(e){ toast('体检失败: ' + e.message, true); });
+      return;
+    }
+    var retryId = b.getAttribute('data-dead-retry');
+    if(retryId){
+      post('/api/runtime/dead/retry', {task_id: retryId}).then(function(r){
+        toast(r && r.ok ? '已重新入队' : ('失败: ' + ((r && (r.error || r.reason)) || '')), !(r && r.ok));
+        loadRuntime();
+      }).catch(function(e){ toast('重投失败: ' + e.message, true); });
+      return;
+    }
+    var discardId = b.getAttribute('data-dead-discard');
+    if(discardId){
+      post('/api/runtime/dead/discard', {task_id: discardId}).then(function(r){
+        toast(r && r.ok ? '已标记为已处理' : ('失败: ' + ((r && (r.error || r.reason)) || '')), !(r && r.ok));
+        loadRuntime();
+      }).catch(function(e){ toast('处置失败: ' + e.message, true); });
       return;
     }
     var rule = b.getAttribute('data-rule');
@@ -2629,6 +2700,7 @@
       renderRtRouter(d);
       renderRtDead(d);
       renderRtTaskTypes(d);
+      renderRtRecovery(d);
     }).catch(function(e){
       $('rt-pools').innerHTML = '<div class="muted">加载失败: ' + esc(e.message) + '</div>';
     });
@@ -2636,6 +2708,31 @@
     // 被 5s 一次的轮询重绘掉是最招人烦的那类 bug，所以脏了就不重绘。
     if(!RT_MAINT_DIRTY) loadMaintenance();
     loadLogging();
+    loadJournal();
+    loadPreflight();
+  }
+
+  function renderRtRecovery(d){
+    // 恢复报告只在启动那一刻产生一次，之后一直是同一份：
+    // 重复渲染会让人以为"每分钟都在恢复"。
+    var el = $('rt-recovery');
+    if(!el || el.getAttribute('data-done')) return;
+    var r = d.recovery || {};
+    el.setAttribute('data-done', '1');
+    if(!r || !r.ok){
+      el.innerHTML = '<span class="muted">本次启动未执行任务恢复' +
+        (r && r.reason ? '（' + esc(r.reason) + '）' : '') + '</span>';
+      return;
+    }
+    var parts = [];
+    if(r.queued) parts.push('重新入队 <b>' + r.queued + '</b> 条');
+    if(r.interrupted) parts.push('其中被中断 <b>' + r.interrupted + '</b> 条');
+    if(r.expired) parts.push('超龄转死信 <b>' + r.expired + '</b> 条');
+    if(r.exhausted) parts.push('重试耗尽转死信 <b>' + r.exhausted + '</b> 条');
+    if(r.dead_restored) parts.push('错误队列恢复 <b>' + r.dead_restored + '</b> 条');
+    el.innerHTML = parts.length
+      ? '<span class="pill warn">已恢复</span> ' + parts.join(' · ')
+      : '<span class="muted">流水账中未发现未完成任务</span>';
   }
 
   function renderRtKpis(d){
@@ -2766,19 +2863,114 @@
 
   function renderRtDead(d){
     var rows = d.dead_letters || [];
-    $('rt-dead-hint').textContent = (d.dead_letter_count||0) + ' 条';
+    $('rt-dead-hint').textContent = (d.dead_letter_count||0) + ' 条待处理';
     if(!rows.length){
       $('rt-dead-rows').innerHTML = '<tr><td colspan="6" class="muted">无死信</td></tr>'; return;
     }
     $('rt-dead-rows').innerHTML = rows.map(function(t){
+      // ``actionable=false`` 只有一种来源：不可自动重试的任务（下单）。
+      // 按钮置灰并说明原因，而不是让人点了才报错。
+      var act = t.actionable !== false;
+      var ops = '<button class="mini' + (act ? ' primary' : '') + '"' +
+        (act ? '' : ' disabled title="该任务重投可能导致重复执行"') +
+        ' data-dead-retry="' + esc(t.task_id) + '">继续</button> ' +
+        '<button class="mini" data-dead-discard="' + esc(t.task_id) + '">丢弃</button>';
       return '<tr><td>' + esc((t.finished_at||t.created_at||'').replace('T',' ').slice(0,19) || '-') + '</td>' +
-        '<td>' + esc(t.task_type||'-') + '</td>' +
+        '<td>' + esc(t.task_type||'-') +
+          ((t.manual_retries||0) ? ' <span class="pill warn">重投' + t.manual_retries + '次</span>' : '') +
+          (t.interrupted ? ' <span class="pill off">中断过</span>' : '') + '</td>' +
         '<td>' + esc(t.queue||'-') + '</td>' +
         '<td class="num">' + (t.attempts||0) + '</td>' +
-        '<td class="muted" style="white-space:normal;min-width:240px">' +
-        esc(String(t.error||'').slice(0,160)) + '</td>' +
-        '<td class="muted">' + esc(String(t.correlation_id||'').slice(0,8) || '-') + '</td></tr>';
+        '<td class="muted" style="white-space:normal;min-width:220px">' +
+        esc(String(t.error||'').slice(0,140)) + '</td>' +
+        '<td style="white-space:nowrap">' + ops + '</td></tr>';
     }).join('');
+  }
+
+  // ---------------- 任务持久化 ----------------
+  function loadJournal(){
+    api('/api/journal').then(function(d){
+      if(!d || d.ok === false){
+        $('rt-journal').innerHTML = '<span class="muted">' +
+          esc((d && d.error) || '不可用') + '</span>';
+        return;
+      }
+      if(!d.enabled){
+        $('rt-journal-hint').textContent = '未启用';
+        $('rt-journal').innerHTML = '<span class="pill off">纯内存</span> ' +
+          esc(d.reason || '任务未落盘：进程退出即丢失在途任务');
+        return;
+      }
+      var c = d.counts || {};
+      $('rt-journal-hint').textContent = '未完成 ' + (c.open||0) +
+        ' · 死信 ' + (c.dead||0) + ' · 库内 ' + (c.total||0) + ' 条';
+      var rec = d.recovered || {};
+      var recTxt = rec.ok
+        ? ('本次启动恢复：入队 <b>' + (rec.queued||0) + '</b>' +
+           (rec.interrupted ? '（其中中断 <b>' + rec.interrupted + '</b>）' : '') +
+           (rec.expired ? ' · 超龄转死信 <b>' + rec.expired + '</b>' : '') +
+           (rec.exhausted ? ' · 重试耗尽 <b>' + rec.exhausted + '</b>' : '') +
+           (rec.dead_restored ? ' · 错误队列恢复 <b>' + rec.dead_restored + '</b>' : ''))
+        : '本次启动未执行恢复';
+      $('rt-journal').innerHTML =
+        '<div class="det" style="white-space:normal">路径 <code>' +
+        esc(String(c.path||'-')) + '</code></div>' +
+        '<div class="det">' + recTxt + '</div>' +
+        '<div class="det">已写 ' + (c.writes||0) + ' 次 / 合并 ' + (c.flushes||0) +
+        ' 批 · 待写 ' + (c.pending_writes||0) +
+        ' · 上次刷盘 ' + esc(String(c.last_flush_at||'—')) + '</div>' +
+        (c.last_error ? '<div class="det" style="color:var(--bad)">最近落盘错误: ' +
+          esc(String(c.last_error).slice(0,160)) + '</div>' : '');
+
+      var hist = d.dead_history || [];
+      $('rt-journal-hist').innerHTML = hist.length
+        ? hist.slice(0, 12).map(function(h){
+            return '<tr><td>' + esc(String(h.dead_at||'').replace('T',' ').slice(0,19)) + '</td>' +
+              '<td>' + esc(h.task_type||'-') + '</td>' +
+              '<td class="num">' + (h.attempts||0) + '</td>' +
+              '<td class="muted" style="white-space:normal;min-width:200px">' +
+              esc(String(h.error||'').slice(0,120)) + '</td>' +
+              '<td>' + (h.resolution
+                ? '<span class="pill ' + (h.resolution === 'retry' ? 'run' : 'off') + '">' +
+                  esc(h.resolution === 'retry' ? '已重投' :
+                      (h.resolution === 'discard' ? '已丢弃' : esc(h.resolution))) + '</span>'
+                : '<span class="muted">未处置</span>') + '</td></tr>';
+          }).join('')
+        : '<tr><td colspan="5" class="muted">暂无死信记录</td></tr>';
+    }).catch(function(e){
+      $('rt-journal').innerHTML = '<span class="muted">加载失败: ' + esc(e.message) + '</span>';
+    });
+  }
+
+  // ---------------- 启动预检 ----------------
+  function loadPreflight(){
+    api('/api/preflight').then(function(d){
+      if(!d || d.ok === false){
+        $('rt-preflight').innerHTML = '<span class="muted">' +
+          esc((d && d.error) || '不可用') + '</span>';
+        return;
+      }
+      if(!d.ran){
+        $('rt-preflight-hint').textContent = '未执行';
+        $('rt-preflight').innerHTML = '<span class="muted">' +
+          esc(d.reason || '本次运行尚未执行启动预检') + '</span>';
+        return;
+      }
+      var ct = d.counts || {};
+      $('rt-preflight-hint').textContent = (d.ok ? '通过' : '未通过') +
+        ' · 错误 ' + (ct.error||0) + ' · 警告 ' + (ct.warn||0);
+      $('rt-preflight').innerHTML = (d.checks || []).map(function(c){
+        var cls = c.level === 'error' ? 'off' : (c.level === 'warn' ? 'warn' : 'run');
+        var txt = c.level === 'error' ? '错误' : (c.level === 'warn' ? '警告' : '正常');
+        return '<div class="det" style="white-space:normal;margin:2px 0">' +
+          '<span class="pill ' + cls + '">' + txt + '</span> ' +
+          '<b>' + esc(c.name) + '</b> — ' + esc(c.detail) +
+          (c.hint ? '<br><span class="muted">↳ ' + esc(c.hint) + '</span>' : '') +
+          '</div>';
+      }).join('') || '<span class="muted">无检查项</span>';
+    }).catch(function(e){
+      $('rt-preflight').innerHTML = '<span class="muted">加载失败: ' + esc(e.message) + '</span>';
+    });
   }
 
   function renderRtTaskTypes(d){

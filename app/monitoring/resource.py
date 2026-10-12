@@ -88,6 +88,7 @@ class MonitorResource(Resource):
                 "/api/logs", "/api/snapshots", "/api/audit", "/api/health",
                 "/api/collector", "/api/dataguard", "/api/providers",
                 "/api/runtime", "/api/maintenance", "/api/logging",
+                "/api/journal", "/api/preflight",
             ]})
 
         head = rest[0]
@@ -127,6 +128,14 @@ class MonitorResource(Resource):
         if head == "logging":
             # 当前生效的日志级别（面板据此显示"我现在是什么档位"）
             return self._json(request, c.control.logging_view())
+        if head == "journal":
+            # 任务流水账：落盘状态 + 死信处置历史（内存里清空后仍能追溯）
+            return self._json(request, c.control.journal_view())
+        if head == "preflight":
+            # 启动预检结论；?rerun=1 表示当场再跑一遍
+            if self._q(request, "rerun", ""):
+                return self._json(request, c.control.preflight_run())
+            return self._json(request, c.control.preflight_view())
         if head == "collector":
             return self._json(request, c.control.collector_status())
         if head == "dataguard":
@@ -519,6 +528,24 @@ class MonitorResource(Resource):
         # POST /api/runtime/dead/clear —— 清空死信（运维处理完这批之后用）
         if seg[1] == "runtime" and len(seg) >= 4 and seg[2] == "dead" and seg[3] == "clear":
             return self._json(request, c.control.clear_dead_letters())
+
+        # POST /api/runtime/dead/retry —— 人工重投一条死信（点"继续"）
+        #   body: {"task_id": "..."}  省略 task_id 且带 all=true 时批量重投
+        if seg[1] == "runtime" and len(seg) >= 4 and seg[2] == "dead" and seg[3] == "retry":
+            if body.get("all"):
+                return self._json(request, c.control.dead_retry_all(
+                    str(body.get("task_type") or "")))
+            return self._json(request, c.control.dead_retry(
+                str(body.get("task_id") or "")))
+
+        # POST /api/runtime/dead/discard —— 认掉一条死信（不重跑，划掉）
+        if seg[1] == "runtime" and len(seg) >= 4 and seg[2] == "dead" and seg[3] == "discard":
+            return self._json(request, c.control.dead_discard(
+                str(body.get("task_id") or "")))
+
+        # POST /api/preflight/run —— 当场再跑一遍启动预检
+        if seg[1] == "preflight" and len(seg) >= 3 and seg[2] == "run":
+            return self._json(request, c.control.preflight_run())
 
         # POST /api/maintenance/save —— 保存维护计划（开关/周期/参数）
         if seg[1] == "maintenance" and len(seg) >= 3 and seg[2] == "save":

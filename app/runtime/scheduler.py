@@ -90,11 +90,21 @@ class SchedulerComponent(SchedulerBase):
     #: 100ms 对实盘又太钝 —— 50ms 是实测下来的平衡点。
     tick_interval: float = 0.05
 
+    #: 恢复上来的任务最多等多久还认为"值得再跑一次"（小时）。
+    #: 行情类的活隔夜就没意义了（今天的 K 线才是今天的）；
+    #: 而"三天前没算完的因子"重跑一遍也换不回当时的上下文。
+    recover_max_age_hours: float = 72.0
+    #: 单次最多捞回多少条。防的是"磁盘上攒了十万条没干完的活，
+    #: 启动时一次性灌爆队列"——那会把真正紧急的今日任务挤到后面。
+    recover_limit: int = 500
+
     def __init__(
         self,
         capacities: Optional[Dict[str, int]] = None,
         pools: Optional[List[str]] = None,
         with_default_rules: bool = True,
+        recover: bool = True,
+        journal_path: str = "",
     ) -> None:
         super().__init__()
         #: 引擎引用（builder 用 set_engine 注入），规则条件靠它查服务状态
@@ -103,7 +113,11 @@ class SchedulerComponent(SchedulerBase):
         self.max_concurrent: int = 0
 
         # ---- 事件 → 任务 ----
-        self.store = TaskStore()
+        self.store = TaskStore(journal_path=journal_path)
+        #: 启动是否从流水账捞回未完成的活。关掉它只该有一个理由：
+        #: 明确想让这台引擎"从零开始"（比如换了一份配置重跑）。
+        self.recover_on_start = bool(recover)
+        self.recovery_report: Dict[str, Any] = {}
         self.router = CapabilityRouter()
         self.rules = RuleRegistry()
         if with_default_rules:
@@ -206,6 +220,13 @@ class SchedulerComponent(SchedulerBase):
         )
         self.run_mode = self.context.run_mode
         self.tick_interval = float(cfg.get("SCHEDULER_TICK", self.tick_interval))
+        self.recover_on_start = bool(
+            cfg.get("RECOVER_TASKS", self.recover_on_start)
+        )
+        self.recover_max_age_hours = float(
+            cfg.get("RECOVER_MAX_AGE_HOURS", self.recover_max_age_hours)
+        )
+        self.recover_limit = int(cfg.get("RECOVER_LIMIT", self.recover_limit))
 
         # 池容量可按组件配置覆盖
         caps = cfg.get("pools") or {}
@@ -227,6 +248,9 @@ class SchedulerComponent(SchedulerBase):
             f"调度组件已启动 | 模式: {self.run_mode.value} "
             f"| 执行池: {','.join(self.pools.names())}"
         )
+        # 0) **先恢复，再订阅**：顺序反了会漏掉恢复期间产生的事件
+        #    （比如"恢复到一半来了条风控事件"），而恢复本身不需要订阅者。
+        self._recover_from_journal()
         # 1) 订阅所有规则关心的事件
         self._subscribe_rules()
         # 2) 旧式任务提交通道
@@ -251,6 +275,108 @@ class SchedulerComponent(SchedulerBase):
         self._dispatch_call = reactor.callLater(
             self.tick_interval, self._dispatch_loop
         )
+
+    # ============================================================
+    # 崩溃恢复 / 停机落盘
+    # ============================================================
+    def _recover_from_journal(self) -> Dict[str, Any]:
+        """启动恢复：把上次没干完的活捞回来。
+
+        为什么放在 start 而不是 initialize：初始化阶段组件还没齐，
+        恢复出来的任务一旦被领走就会去调还没准备好的服务。
+        而 start 是"一切就绪"的时刻。
+        """
+        if not self.recover_on_start:
+            self.recovery_report = {"ok": False, "reason": "已配置为启动不恢复"}
+            return self.recovery_report
+
+        try:
+            report = self.store.recover(
+                max_age_hours=self.recover_max_age_hours,
+                limit=self.recover_limit,
+            )
+        except Exception as exc:
+            report = {"ok": False, "reason": str(exc)}
+            logger.error(f"任务恢复失败: {exc}", exc_info=True)
+        self.recovery_report = report
+
+        if not report.get("ok"):
+            logger.info(
+                f"未执行任务恢复 | 原因: {report.get('reason') or '无流水账'}"
+            )
+            return report
+
+        resumed = report.get("queued", 0)
+        if resumed or report.get("dead_restored"):
+            logger.warning(
+                f"已从流水账恢复任务 | 重新入队 {resumed} 条"
+                f"（其中被中断 {report.get('interrupted', 0)} 条）"
+                f"| 超龄转死信 {report.get('expired', 0)} 条"
+                f"| 重试耗尽转死信 {report.get('exhausted', 0)} 条"
+                f"| 错误队列恢复 {report.get('dead_restored', 0)} 条"
+            )
+        else:
+            logger.info("流水账中未发现未完成任务")
+        try:
+            if self.event_bus is not None:
+                self.event_bus.publish(
+                    EventType.SYSTEM_TASKS_RECOVERED,
+                    source="scheduler",
+                    **{k: v for k, v in report.items() if k != "items"},
+                )
+        except Exception as exc:
+            logger.debug(f"发布恢复事件失败（已忽略）: {exc}")
+        return report
+
+    def _persist_on_stop(self) -> None:
+        """停机落盘：把"干了一半"的活标成中断并写进流水账。
+
+        不做这件事的后果：任务在盘上仍是 ``running``，下次启动恢复时
+        看不出它是"被中断"还是"正在别处跑"，而这两者的处置完全不同
+        （前者要重跑，后者不该碰）。
+        """
+        try:
+            for task in self.store.running_tasks():
+                task.mark_interrupted()
+                self.store._persist(task)
+            self.store.flush()
+        except Exception as exc:
+            logger.error(f"停机落盘失败: {exc}", exc_info=True)
+
+    def dead_retry(self, task_id: str) -> "Tuple[bool, str]":
+        """人工重投一条死信。"""
+        ok, reason = self.store.retry_dead(task_id)
+        if ok:
+            logger.info(f"人工重投死信 {task_id[:8]}: {reason}")
+            self._publish_dead_resolved(task_id, "retry")
+        return ok, reason
+
+    def dead_discard(self, task_id: str) -> "Tuple[bool, str]":
+        """认掉一条死信（不重跑）。"""
+        ok, reason = self.store.discard_dead(task_id)
+        if ok:
+            self._publish_dead_resolved(task_id, "discard")
+        return ok, reason
+
+    def dead_retry_all(self, task_type: str = "") -> "Tuple[int, int]":
+        """批量重投。"""
+        done, skipped = self.store.retry_all_dead(task_type)
+        if done:
+            logger.info(f"批量重投死信: 成功 {done} 条，跳过 {skipped} 条")
+            self._publish_dead_resolved("", f"retry_all:{task_type or 'all'}")
+        return done, skipped
+
+    def _publish_dead_resolved(self, task_id: str, resolution: str) -> None:
+        bus = self.event_bus
+        if bus is None:
+            return
+        try:
+            bus.publish(
+                EventType.SYSTEM_DEAD_RESOLVED,
+                source="scheduler", task_id=task_id, resolution=resolution,
+            )
+        except Exception as exc:
+            logger.debug(f"发布死信处置事件失败（已忽略）: {exc}")
 
     @defer.inlineCallbacks
     def on_stop(self, graceful: bool = True) -> Any:
@@ -299,6 +425,10 @@ class SchedulerComponent(SchedulerBase):
                     break
                 yield async_sleep(0.1)
 
+        # 收尾：不管有没有等干净，都把现场写进流水账。
+        # 超时放弃的那批任务此刻仍是 running —— 它们必须被记成"中断"，
+        # 而不是留给下次启动去猜。
+        self._persist_on_stop()
         self.pools.shutdown(wait=False)
         logger.info("调度组件已停止")
 
@@ -795,6 +925,7 @@ class SchedulerComponent(SchedulerBase):
             "rules": self.rules.snapshot(),
             "timers": sorted(self._timers.keys()),
             "maintenance": self.maintenance.snapshot(),
+            "recovery": dict(self.recovery_report or {}),
         })
         return base
 

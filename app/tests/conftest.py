@@ -34,6 +34,16 @@ _tempfile.tempdir = _PROJECT_TMP
 
 
 def pytest_configure(config) -> None:
+    # --- 关掉任务落盘 ---
+    #
+    # 任务流水账默认写 ``output/runtime/tasks.db``。测试里每个用例都在
+    # 造任务、造失败，如果它们真的落盘，跑一次测试就会在真实输出目录里
+    # 留下一堆"没干完的活"，下次启动引擎会把它们全捞回来重跑 ——
+    # 也就是"跑测试"污染了"生产状态"，而且没人会想到去查任务表。
+    #
+    # 需要验证落盘本身的用例会显式传 journal 实例，不受这里影响。
+    _os.environ["AQ_TASK_PERSIST"] = "0"
+
     try:
         from app.providers.market.compat.registry import REGISTRY
 

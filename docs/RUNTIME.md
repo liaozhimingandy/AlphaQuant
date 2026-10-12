@@ -25,6 +25,12 @@
 
 ## 1. 启动链路：`python main.py start` 之后发生了什么
 
+> **启动前先预检**：`engine.start()` 第一件事是 `_run_preflight()`
+> （`app/engine/preflight.py`）：配置能否解析、目录可不可写、数据库可读写、
+> 行情是否为空、磁盘余量、遗留任务、实盘网关。有 error 档问题时默认
+> **拒绝启动**（`PREFLIGHT_STRICT=0` 可强制继续）。
+> 它拦的不是崩溃，是**空转** —— 详见 [EVENT_TASK.md §8.6](EVENT_TASK.md)。
+
 ```
 main.py:20  cli()
   └─ app/cli/base.py:47  @click.group  命令组根
@@ -455,8 +461,12 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
    也不能卡在关停上。
 2. **逆序停组件**（`:612-620`）：每个组件 `maybeDeferred(stop)`，
    并 `addTimeout(5, reactor)`——单个组件最多停 5s。
-3. **落状态**（`:623`）：刷最终快照 + 保存运行期任务。
+3. **落状态**（`:623`）：刷最终快照 + 保存运行期任务 + **强制刷任务流水账**。
 4. 置 `STOPPED` → `reactor.stop()`。
+
+> **为什么第 3 步要额外刷一次流水账**：调度器 `on_stop` 已经写过一次
+> （那时它还在），这里再兜一次是为了覆盖"调度组件压根没起来"或
+> "停止顺序异常"的情形 —— 落盘宁可多做一次，不能漏一次。
 
 **空闲判定**（`engine.py::_is_idle`）：先看所有组件 `is_busy()`，任一忙即非空闲；
 否则问 `scheduler.is_idle`（队列空且无在跑任务）。
@@ -476,10 +486,39 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 4. 等 `store.is_idle()`，带 deadline（`_shutdown_wait()`），超时告警后放弃。
    这里**必须异步让出**（`yield async_sleep(0.1)`），用 `time.sleep` 会冻住
    reactor，而任务正在等回调 → 永远等不到空闲 → **停止即挂死**（历史踩过）。
-5. 最后 `pools.shutdown(wait=False)`。
+5. **`_persist_on_stop()`**：把还在跑的任务标成 `interrupted` 写进流水账，
+   再强制 `flush()`。不做这件事，它们在盘上仍是 `running`，下次启动
+   分不清是"被中断"还是"正在别处跑"—— 而这两者处置完全不同。
+6. 最后 `pools.shutdown(wait=False)`。
 
 > 注意第 4 步等的是 `store.is_idle()`（队列空 + 无在跑任务），
 > 不是"所有池都空转"。常驻的行情轮询不阻塞这一步。
+
+---
+
+## 7.5 任务落盘与崩溃恢复
+
+**落盘**（`app/runtime/tasking/journal.py`，独立 SQLite `output/runtime/tasks.db`）：
+
+| 时机 | 策略 |
+|---|---|
+| 通用状态变更 | 标脏，后台线程每 1s 合并成一个事务 |
+| 创建 / 进死信 / 终态 | **立即写**（不等后台） |
+| 引擎停止 | 强制 `flush()` + 在跑任务标中断 |
+
+**恢复**（`SchedulerComponent.on_start` → `store.recover()`，在订阅事件**之前**）：
+
+| 上次状态 | 动作 |
+|---|---|
+| `running` / 已标 `interrupted` | 重新入队，`attempts` 不回滚 |
+| `queued` / `retrying` | 重新入队 |
+| 超龄（>72h） | 转死信 |
+| 重试额度用尽 | 转死信 |
+| `dead_letter` | 读回内存但**不入队**（错误队列跨重启存在） |
+
+恢复完发 `system.tasks.recovered` 事件（带各分类计数），面板顶部显示。
+
+完整设计见 [`EVENT_TASK.md` §八](EVENT_TASK.md)。
 
 ---
 

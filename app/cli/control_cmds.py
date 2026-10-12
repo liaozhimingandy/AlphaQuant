@@ -765,6 +765,91 @@ def ctl_runtime_dead_clear(port) -> None:
     click.secho(f"✅ 已清空 {data.get('cleared', 0)} 条死信", fg="green")
 
 
+@ctl_runtime_group.command(name="dead-retry", help="把死信重新投回队列（人工点“继续”）")
+@click.argument("task_id", required=False, default="")
+@click.option("--all", "all_dead", is_flag=True, help="重投全部可重投的死信")
+@click.option("--task-type", default="", help="--all 时只重投这种任务类型")
+@_ctl_port
+def ctl_runtime_dead_retry(task_id, all_dead, task_type, port) -> None:
+    """人工干预错误队列：让一条（或一批）彻底失败的任务再跑一次。
+
+    自动重试有上限是刻意的 —— 重试不通就该报警，而不是无限重试。
+    但人看过原因之后（补了数据、改了配置）给的新一次机会，
+    不该带着上次的欠账上路，所以重投会把尝试次数清零。
+    """
+    if not all_dead and not task_id:
+        click.secho("❌ 请给出 task_id，或用 --all 批量重投", fg="red")
+        return
+    body = {"task_id": task_id, "all": bool(all_dead), "task_type": task_type}
+    data = _api(port, "/api/runtime/dead/retry", body)
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error') or data.get('reason')}", fg="red")
+        return
+    if all_dead:
+        click.secho(
+            f"✅ 已重投 {data.get('done', 0)} 条"
+            f"（跳过 {data.get('skipped', 0)} 条：下单类任务不可重投）",
+            fg="green",
+        )
+    else:
+        click.secho(f"✅ {data.get('reason')}", fg="green")
+
+
+@ctl_runtime_group.command(name="dead-discard", help="认掉一条死信：不重跑，从清单划掉")
+@click.argument("task_id")
+@_ctl_port
+def ctl_runtime_dead_discard(task_id, port) -> None:
+    """与重投并列的另一个动作。
+
+    不是每条死信都该重跑："三天前的因子"重跑没意义，"昨天的下单"重跑危险。
+    让人能明确说"这条我不处理了"，清单才不会永远堆着。
+    """
+    data = _api(port, "/api/runtime/dead/discard", {"task_id": task_id})
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error') or data.get('reason')}", fg="red")
+        return
+    click.secho(f"✅ {data.get('reason')}", fg="green")
+
+
+@ctl_runtime_group.command(name="journal", help="任务流水账：落盘状态与死信处置历史")
+@_ctl_port
+def ctl_runtime_journal(port) -> None:
+    data = _api(port, "/api/journal")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    if not data.get("enabled"):
+        click.secho(f"⚠️ {data.get('reason')}", fg="yellow")
+        return
+    c = data.get("counts") or {}
+    click.secho(
+        f"流水账 {c.get('path')} | 共 {c.get('total')} 条"
+        f" | 未完成 {c.get('open')} | 死信 {c.get('dead')}",
+        fg="cyan", bold=True,
+    )
+    click.echo(
+        f"已写 {c.get('writes')} 次 / 合并 {c.get('flushes')} 批"
+        f" | 上次刷盘 {c.get('last_flush_at') or '—'}"
+        f" | 待写 {c.get('pending_writes')}"
+    )
+    if c.get("last_error"):
+        click.secho(f"⚠️ 最近一次落盘错误: {c['last_error']}", fg="red")
+    rec = data.get("recovered") or {}
+    if rec.get("ok"):
+        click.echo(
+            f"本次启动恢复: 入队 {rec.get('queued', 0)}"
+            f"（中断 {rec.get('interrupted', 0)}）"
+            f" | 超龄转死信 {rec.get('expired', 0)}"
+            f" | 重试耗尽 {rec.get('exhausted', 0)}"
+            f" | 错误队列 {rec.get('dead_restored', 0)}"
+        )
+    for h in (data.get("dead_history") or [])[:10]:
+        click.echo(
+            f"  · {h.get('task_type')}#{str(h.get('task_id'))[:8]} "
+            f"{h.get('dead_at')} → {h.get('resolution') or '未处置'}"
+        )
+
+
 @ctl_runtime_group.command(name="maint", help="维护计划：日志清理 / 归档 / 定期校验")
 @_ctl_port
 def ctl_runtime_maint(port) -> None:
@@ -867,6 +952,38 @@ def ctl_log_level(level, file_level, window, no_persist, port) -> None:
         + ("" if no_persist else "（已持久化，重启仍生效）"),
         fg="green",
     )
+
+
+# ============================== 启动预检 ==============================
+@ctl_group.command(name="preflight", help="启动预检结论：配置 / 目录 / 数据库 / 数据源")
+@click.option("--rerun", is_flag=True, help="当场再跑一遍（改完配置想立刻验证时用）")
+@_ctl_port
+def ctl_preflight(rerun, port) -> None:
+    """引擎起飞前的"绕机检查"。
+
+    它拦的不是崩溃，是**空转**：配置文件写坏 → 维护计划静默不执行；
+    数据库不可写 → 采集"成功"地把数据全丢掉；股票池空 →
+    一整天什么都没干而日志里全是正常。这些都只有预检能在启动那一刻说出来。
+    """
+    data = _api(port, "/api/preflight/run" if rerun else "/api/preflight")
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    if not data.get("ran"):
+        click.secho(f"⚠️ {data.get('reason')}", fg="yellow")
+        return
+    counts = data.get("counts") or {}
+    head = "✅ 通过" if data.get("ok") else "❌ 未通过"
+    click.secho(
+        f"{head} | 错误 {counts.get('error', 0)} · 警告 {counts.get('warn', 0)}"
+        f" · 正常 {counts.get('info', 0)} | 模式 {data.get('mode') or '—'}",
+        fg="green" if data.get("ok") else "red", bold=True,
+    )
+    for c in data.get("checks") or []:
+        mark = {"error": "❌", "warn": "⚠️ ", "info": "·  "}.get(c.get("level"), "·")
+        click.echo(f"  {mark} {c.get('name')}: {c.get('detail')}")
+        if c.get("hint") and c.get("level") in ("warn", "error"):
+            click.secho(f"        ↳ {c['hint']}", fg="yellow")
 
 
 # ============================== 远程控制 ==============================

@@ -601,7 +601,114 @@ class ControlCenter:
             "dead_letters": sch.store.dead_letters(30),
             "dead_letter_count": sch.store.dead_letter_count(),
             "maintenance": sch.maintenance.snapshot(),
+            "recovery": dict(getattr(sch, "recovery_report", None) or {}),
         }
+
+    # ============================================================
+    # 错误队列：人工干预
+    #
+    # 死信不是"失败日志"，是**待办清单**。清单的价值在于有人处理它，
+    # 所以这里必须提供"继续"和"算了"两个动作 —— 只有清空的话，
+    # 真正该重跑的任务会被一起清掉，而系统无从判断。
+    # ============================================================
+    def dead_retry(self, task_id: str) -> Dict[str, Any]:
+        """把一条死信重新投回队列（人工点"继续"）。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        if not task_id:
+            return {"ok": False, "error": "缺少 task_id"}
+        try:
+            ok, reason = sch.dead_retry(task_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"重投失败: {exc}"}
+        self._audit("dead_retry", {"task_id": task_id, "ok": ok, "reason": reason})
+        return {"ok": ok, "reason": reason, "task_id": task_id}
+
+    def dead_discard(self, task_id: str) -> Dict[str, Any]:
+        """认掉一条死信：不重跑，从待办清单里划掉。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        if not task_id:
+            return {"ok": False, "error": "缺少 task_id"}
+        try:
+            ok, reason = sch.dead_discard(task_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"处置失败: {exc}"}
+        self._audit("dead_discard", {"task_id": task_id, "ok": ok})
+        return {"ok": ok, "reason": reason, "task_id": task_id}
+
+    def dead_retry_all(self, task_type: str = "") -> Dict[str, Any]:
+        """批量重投。不可重投的类型（下单）会被跳过而不是硬来。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        try:
+            done, skipped = sch.dead_retry_all(task_type)
+        except Exception as exc:
+            return {"ok": False, "error": f"批量重投失败: {exc}"}
+        self._audit("dead_retry_all", {"task_type": task_type or "*",
+                                       "done": done, "skipped": skipped})
+        return {"ok": True, "done": done, "skipped": skipped}
+
+    def journal_view(self) -> Dict[str, Any]:
+        """任务流水账状态 + 死信处置历史。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        store = sch.store
+        journal = getattr(store, "journal", None)
+        if journal is None:
+            return {"ok": True, "enabled": False, "reason": "未启用持久化"}
+        try:
+            counts = journal.counts()
+            history = journal.dead_history(50)
+        except Exception as exc:
+            return {"ok": False, "error": f"读取流水账失败: {exc}"}
+        return {
+            "ok": True,
+            "enabled": True,
+            "counts": counts,
+            "dead_history": history,
+            "recovered": {
+                k: v for k, v in (getattr(sch, "recovery_report", None) or {}).items()
+                if k != "items"
+            },
+        }
+
+    # ============================================================
+    # 启动预检
+    # ============================================================
+    def preflight_view(self) -> Dict[str, Any]:
+        """最近一次启动预检的结论。
+
+        引擎还没跑过预检时返回 ``ran=False`` —— 与"跑过且通过"
+        是两回事，面板不该把它们显示成同一个样子。
+        """
+        report = getattr(self.engine, "preflight", None)
+        if report is None:
+            return {"ok": True, "ran": False, "reason": "本次运行尚未执行启动预检"}
+        return {"ok": True, "ran": True, **report.to_dict()}
+
+    def preflight_run(self) -> Dict[str, Any]:
+        """当场再跑一遍预检（改完配置想立刻验证时用）。"""
+        try:
+            from app.engine.preflight import run_preflight
+        except Exception as exc:
+            return {"ok": False, "error": f"预检模块不可用: {exc}"}
+        sch = self._event_scheduler()
+        journal = getattr(getattr(sch, "store", None), "journal", None)
+        mode = str(getattr(getattr(self.engine, "run_mode", None), "value", "") or "")
+        try:
+            report = run_preflight(mode=mode, journal=journal)
+        except Exception as exc:
+            return {"ok": False, "error": f"预检执行失败: {exc}"}
+        self.engine.preflight = report
+        self._audit("preflight_run", {"ok": report.ok,
+                                      "errors": len(report.errors),
+                                      "warnings": len(report.warnings)})
+        return {"ok": True, **report.to_dict()}
 
     def clear_dead_letters(self) -> Dict[str, Any]:
         """清空死信队列（运维处理完这批之后用）。
