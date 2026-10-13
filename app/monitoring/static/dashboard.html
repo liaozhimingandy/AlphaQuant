@@ -752,6 +752,76 @@
   </section>
 
   <section class="panel">
+    <h2>任务明细 <span class="muted" id="rt-ledger-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <label>状态<br><select id="rt-ledger-status" style="width:130px">
+          <option value="">全部（含在途）</option>
+          <option value="success">成功</option>
+          <option value="failed">失败</option>
+          <option value="dead_letter">死信</option>
+          <option value="cancelled">已取消</option>
+          <option value="running">执行中</option>
+          <option value="queued">排队中</option>
+          <option value="retrying">等待重试</option>
+        </select></label>
+        <label>任务类型<br><select id="rt-ledger-type" style="width:210px">
+          <option value="">全部</option>
+        </select></label>
+        <label>关键字<br><input id="rt-ledger-kw" placeholder="ID / 幂等键 / 关联 ID"
+          style="width:210px"></label>
+        <label>条数<br><select id="rt-ledger-limit" style="width:90px">
+          <option value="30">30</option>
+          <option value="100" selected>100</option>
+          <option value="300">300</option>
+        </select></label>
+        <button id="btn-rt-ledger">刷新</button>
+      </div>
+      <div id="rt-ledger-sum" class="hint" style="margin-top:8px"></div>
+      <div class="table-wrap" style="margin-top:8px;max-height:460px;overflow:auto">
+        <table>
+          <thead><tr>
+            <th>状态</th><th>任务类型</th><th>ID</th><th class="num">尝试</th>
+            <th class="num">耗时s</th><th>创建</th><th>说明</th><th></th>
+          </tr></thead>
+          <tbody id="rt-ledger-rows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="hint">汇总数字只能回答"成功 1200 条"，回答不了
+      "这 1200 条分别是哪些、参数对不对、什么时候跑的"。
+      这里给出<b>逐条明细</b>：点「详情」看完整参数、结果与错误原文。<br>
+      <b>累计</b>是本次进程启动以来的总数，<b>历史里有明细</b>是还看得见逐条记录的条数 ——
+      两个数的差是"已经滚出明细窗口的旧任务"。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>事件指标 <span class="muted" id="rt-events-hint"></span></h2>
+    <div class="body">
+      <div id="rt-events-sum" class="hint"></div>
+      <div class="table-wrap" style="margin-top:8px;max-height:380px;overflow:auto">
+        <table>
+          <thead><tr>
+            <th>事件</th><th class="num">发布</th><th class="num">触达</th>
+            <th class="num">订阅者</th><th class="num">处理异常</th><th>最近</th><th></th>
+          </tr></thead>
+          <tbody id="rt-events-rows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="table-wrap" style="margin-top:8px">
+        <table>
+          <thead><tr><th>时间</th><th>事件</th><th>来源</th><th>关联 ID</th></tr></thead>
+          <tbody id="rt-events-recent"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+        </table>
+      </div>
+      <p class="hint"><b>订阅者 = 0 而发布数在涨</b>是最该看的一格：
+      事件发出去了但没人接，链路在跑起来之后断了。
+      <b>处理异常</b>是订阅者抛错次数（异常被隔离，所以不会中断其它订阅者，
+      但也不该是 0 以外的任何数）。</p>
+    </div>
+  </section>
+
+  <section class="panel">
     <h2>调度规则 <span class="muted" id="rt-rules-hint"></span></h2>
     <div class="body"><div class="table-wrap">
       <table>
@@ -870,10 +940,15 @@
         <button id="btn-rt-maint-save" class="primary">保存维护计划</button>
         <span class="hint" id="rt-maint-msg"></span>
       </div>
-      <p class="hint">周期两种：<b>每天 HH:MM</b> 或 <b>每 N 秒</b>。保存即生效并落盘
-      （<code>config/maintenance.json</code>），重启仍在。
-      <b>清理与归档默认只报告不删</b> —— "定时任务自动删文件"是运维事故高发区，
-      要真的删请显式勾选。</p>
+      <p class="hint">周期六种：<b>引擎启动时</b>（每次启动跑一次）、<b>每 N 小时</b>
+      （最小 1 小时）、<b>每天 HH:MM</b>、<b>每周几 HH:MM</b>、
+      <b>Cron 表达式</b>（分 时 日 月 周，支持 <code>*/n</code> / <code>a-b</code> /
+      <code>a,b</code>）、<b>指定时刻一次</b>（跑完自动停用）。
+      切换周期时下面只留下该周期用得到的输入框。保存即生效并落盘
+      （<code>config/maintenance.json</code>），重启仍在。<br>
+      <b>「日」与「周」是 OR 语义</b>：<code>0 3 1 * 1</code> 是"每月 1 号或每周一"，
+      不是"1 号且是周一"。<b>清理与归档默认只报告不删</b> ——
+      "定时任务自动删文件"是运维事故高发区，要真的删请显式勾选。</p>
     </div>
   </section>
 
@@ -1406,6 +1481,16 @@
     if(b.id === 'btn-rt-dispatch'){ doDispatch(); return; }
     if(b.id === 'btn-rt-maint-save'){ doSaveMaintenance(); return; }
     if(b.id === 'btn-rt-log-apply'){ doApplyLogLevel(); return; }
+    if(b.id === 'btn-rt-ledger'){ loadLedger(); return; }
+    var sampleType = b.getAttribute('data-event-sample');
+    if(sampleType){
+      // 点第二次 = 取消过滤，回到"最近所有事件"
+      RT_EVENT_FILTER = (RT_EVENT_FILTER === sampleType) ? '' : sampleType;
+      loadEvents(RT_EVENT_FILTER);
+      return;
+    }
+    var detailId = b.getAttribute('data-ledger-detail');
+    if(detailId){ showLedgerDetail(detailId); return; }
     if(b.id === 'btn-rt-dead-clear'){
       if(!confirm('确认清空死信？已处理的死信清掉后健康判定才会恢复正常。')) return;
       post('/api/runtime/dead/clear', {}).then(function(r){
@@ -2676,6 +2761,7 @@
 
   // ==================== 运行时页 ====================
   var rtTimer = null, RT_JOBS = [], RT_LEVELS = [], RT_MAINT_DIRTY = false;
+  var RT_KINDS = [], RT_WEEKDAYS = [], RT_EVENT_FILTER = '';
 
   function kpiCards(cards){
     return cards.map(function(c){
@@ -2710,6 +2796,8 @@
     loadLogging();
     loadJournal();
     loadPreflight();
+    loadLedger();
+    loadEvents(RT_EVENT_FILTER);
   }
 
   function renderRtRecovery(d){
@@ -2819,6 +2907,153 @@
         '<td class="muted">' + esc(String(t.correlation_id||'').slice(0,8) || '-') + '</td>' +
         '<td>' + esc((t.started_at||'').replace('T',' ').slice(0,19) || '-') + '</td></tr>';
     }).join('');
+  }
+
+  // ---------------- 任务明细 / 事件指标 ----------------
+  var TASK_STATUS_LABEL = {
+    pending: '待入队', queued: '排队中', running: '执行中', success: '成功',
+    failed: '失败', retrying: '等待重试', dead_letter: '死信', cancelled: '已取消',
+  };
+  var TASK_STATUS_CLASS = {
+    success: 'run', running: 'run', retrying: 'warn',
+    failed: 'err', dead_letter: 'err', cancelled: 'off',
+    queued: 'off', pending: 'off',
+  };
+
+  function loadLedger(){
+    var status = $('rt-ledger-status') ? $('rt-ledger-status').value : '';
+    var type = $('rt-ledger-type') ? $('rt-ledger-type').value : '';
+    var kw = $('rt-ledger-kw') ? $('rt-ledger-kw').value : '';
+    var limit = $('rt-ledger-limit') ? $('rt-ledger-limit').value : '100';
+    var q = '/api/ledger?status=' + encodeURIComponent(status) +
+            '&task_type=' + encodeURIComponent(type) +
+            '&keyword=' + encodeURIComponent(kw) + '&limit=' + encodeURIComponent(limit);
+    api(q).then(function(d){
+      if(!d || d.ok === false){
+        $('rt-ledger-rows').innerHTML = '<tr><td colspan="8" class="muted">' +
+          esc((d && d.error) || '不可用') + '</td></tr>';
+        return;
+      }
+      var s = d.summary || {}, hs = d.history_summary || {};
+      $('rt-ledger-hint').textContent =
+        '在册 ' + (d.tracked || 0) + ' 条 · 历史明细 ' + (d.history_size || 0) + ' 条';
+      $('rt-ledger-sum').innerHTML =
+        '累计 成功 <b>' + (s.success||0) + '</b> · 失败 <b>' + (s.failed||0) +
+        '</b> · 死信 <b>' + (s.dead_letter||0) + '</b> · 取消 <b>' + (s.cancelled||0) +
+        '</b> · 共建 <b>' + (s.created||0) + '</b>' +
+        '　｜　历史里有明细的 ' + (Object.keys(hs).length
+          ? Object.keys(hs).map(function(k){
+              return (TASK_STATUS_LABEL[k] || k) + ' ' + hs[k];
+            }).join(' · ')
+          : '无');
+
+      // 类型下拉只在第一次填充，之后保留用户已选中的值
+      var sel = $('rt-ledger-type'), keep = sel ? sel.value : '';
+      if(sel){
+        sel.innerHTML = '<option value="">全部</option>' +
+          (d.task_types || []).map(function(t){
+            return '<option value="' + esc(t) + '">' + esc(t) + '</option>';
+          }).join('');
+        sel.value = keep;
+      }
+
+      var rows = (d.tasks || []).concat(
+        // 历史里已经在 tasks 中出现过的不再重复显示
+        (d.history || []).filter(function(h){
+          return !(d.tasks || []).some(function(t){ return t.task_id === h.task_id; });
+        })
+      );
+      if(!rows.length){
+        $('rt-ledger-rows').innerHTML =
+          '<tr><td colspan="8" class="muted">还没有任务（或都被筛选条件排除了）</td></tr>';
+        return;
+      }
+      $('rt-ledger-rows').innerHTML = rows.map(function(t){
+        var st = t.status || '';
+        var note = t.error || (t.dedup_key ? '幂等键 ' + t.dedup_key : '') ||
+                   (t.worker ? '执行池 ' + t.worker : '');
+        return '<tr data-ledger-row="' + esc(t.task_id) + '">' +
+          '<td><span class="pill ' + (TASK_STATUS_CLASS[st] || 'off') + '">' +
+            esc(TASK_STATUS_LABEL[st] || st) + '</span></td>' +
+          '<td><code>' + esc(t.task_type || '-') + '</code></td>' +
+          '<td><code>' + esc(String(t.task_id || '').slice(0, 8)) + '</code></td>' +
+          '<td class="num">' + (t.attempts || 0) +
+            (t.manual_retries ? ' (+' + t.manual_retries + ')' : '') + '</td>' +
+          '<td class="num">' + (t.elapsed == null ? '-' : Number(t.elapsed).toFixed(2)) + '</td>' +
+          '<td>' + esc((t.created_at || '').replace('T', ' ').slice(0, 19) || '-') + '</td>' +
+          '<td class="muted">' + esc(String(note).slice(0, 70)) + '</td>' +
+          '<td><button class="mini" data-ledger-detail="' + esc(t.task_id) + '">详情</button></td>' +
+          '</tr>';
+      }).join('');
+    }).catch(function(e){
+      $('rt-ledger-rows').innerHTML =
+        '<tr><td colspan="8" class="muted">加载失败: ' + esc(e.message) + '</td></tr>';
+    });
+  }
+
+  function showLedgerDetail(taskId){
+    var anchor = document.querySelector('[data-ledger-row="' + taskId + '"]');
+    if(!anchor) return;
+    var opened = document.querySelector('[data-ledger-panel="' + taskId + '"]');
+    if(opened){ opened.remove(); return; }
+    api('/api/task?id=' + encodeURIComponent(taskId)).then(function(d){
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-ledger-panel', taskId);
+      var body = (d && d.ok) ? d.task : {error: (d && d.error) || '取不到明细'};
+      tr.innerHTML = '<td colspan="8"><pre class="code" style="margin:0;' +
+        'white-space:pre-wrap;max-height:320px;overflow:auto">' +
+        esc(JSON.stringify(body, null, 2)) + '</pre></td>';
+      anchor.parentNode.insertBefore(tr, anchor.nextSibling);
+    }).catch(function(e){
+      toast('加载任务明细失败: ' + e.message, true);
+    });
+  }
+
+  function loadEvents(eventType){
+    var q = '/api/events' + (eventType ? '?type=' + encodeURIComponent(eventType) : '');
+    api(q).then(function(d){
+      if(!d || d.ok === false){
+        $('rt-events-rows').innerHTML = '<tr><td colspan="7" class="muted">' +
+          esc((d && d.error) || '不可用') + '</td></tr>';
+        return;
+      }
+      var st = d.stats || {};
+      $('rt-events-hint').textContent = (d.types || []).length + ' 种事件';
+      $('rt-events-sum').innerHTML =
+        '发布 <b>' + (st.published||0) + '</b> · 触达订阅者 <b>' + (st.delivered||0) +
+        '</b> · 处理异常 <b>' + (st.handler_errors||0) + '</b> · 去重丢弃 <b>' +
+        (st.duplicate_dropped||0) + '</b>' +
+        (eventType ? '　｜　正在看 <code>' + esc(eventType) + '</code> 的样例' : '');
+
+      var rows = d.types || [];
+      $('rt-events-rows').innerHTML = rows.length ? rows.map(function(m){
+        var noSub = (m.published > 0 && m.subscribers === 0);
+        return '<tr>' +
+          '<td><code>' + esc(m.event_type) + '</code></td>' +
+          '<td class="num">' + (m.published||0) + '</td>' +
+          '<td class="num">' + (m.delivered||0) + '</td>' +
+          '<td class="num">' + (m.subscribers||0) +
+            (noSub ? ' <span class="pill err">没人接</span>' : '') + '</td>' +
+          '<td class="num">' + (m.handler_errors||0) +
+            ((m.handler_errors||0) ? ' <span class="pill warn">异常</span>' : '') + '</td>' +
+          '<td>' + esc((m.last_iso || '—').replace('T', ' ')) + '</td>' +
+          '<td><button class="mini" data-event-sample="' + esc(m.event_type) + '">样例</button></td>' +
+          '</tr>';
+      }).join('') : '<tr><td colspan="7" class="muted">还没有事件</td></tr>';
+
+      var recent = d.recent || [];
+      $('rt-events-recent').innerHTML = recent.length
+        ? recent.map(function(e){
+            return '<tr><td>' + esc((e.occurred_at||'').replace('T',' ').slice(0,19)) + '</td>' +
+              '<td><code>' + esc(e.event_type||'') + '</code></td>' +
+              '<td>' + esc(e.source||'-') + '</td>' +
+              '<td class="muted">' + esc(String(e.correlation_id||'').slice(0,10) || '-') + '</td></tr>';
+          }).join('')
+        : '<tr><td colspan="4" class="muted">—</td></tr>';
+    }).catch(function(e){
+      $('rt-events-rows').innerHTML =
+        '<tr><td colspan="7" class="muted">加载失败: ' + esc(e.message) + '</td></tr>';
+    });
   }
 
   function renderRtRules(d){
@@ -2996,6 +3231,8 @@
         return;
       }
       RT_JOBS = d.jobs || [];
+      RT_KINDS = d.kinds || [];
+      RT_WEEKDAYS = d.weekday_names || ['周一','周二','周三','周四','周五','周六','周日'];
       $('rt-maint-hint').textContent = d.enabled + ' / ' + d.total + ' 个启用 · 检查节拍 ' +
         (d.tick_seconds||30) + 's';
       $('rt-maint-jobs').innerHTML = RT_JOBS.map(function(j, i){
@@ -3013,6 +3250,15 @@
               : ('value="' + esc(v) + '" style="width:80px"')) +
             '></label>';
         });
+        // 周期下拉由后台给的 kinds 渲染：新增一种周期时前台不用改
+        var opts = RT_KINDS.map(function(k){
+          return '<option value="' + esc(k.value) + '"' +
+            (j.schedule === k.value ? ' selected' : '') + '>' + esc(k.label) + '</option>';
+        }).join('');
+        var wdOpts = RT_WEEKDAYS.map(function(n, idx){
+          return '<option value="' + (idx+1) + '"' +
+            (j.weekday === (idx+1) ? ' selected' : '') + '>' + esc(n) + '</option>';
+        }).join('');
         return '<div class="comp">' +
           '<div class="top"><span class="nm">' + esc(j.label) + '</span>' +
           '<span class="pill ' + (j.enabled ? 'run' : 'off') + '">' +
@@ -3022,19 +3268,34 @@
             '<label class="hint" style="display:inline-flex;flex-direction:row;align-items:center;gap:4px">' +
               '<input type="checkbox" data-mf="enabled" data-mi="' + i + '"' +
               (j.enabled ? ' checked' : '') + '> 启用</label>' +
-            '<label>周期<select data-mf="schedule" data-mi="' + i + '" style="width:110px">' +
-              '<option value="daily"' + (j.schedule==='daily'?' selected':'') + '>每天</option>' +
-              '<option value="interval"' + (j.schedule==='interval'?' selected':'') + '>每 N 秒</option>' +
-            '</select></label>' +
-            '<label>时刻 (HH:MM)<input data-mf="at" data-mi="' + i + '" value="' +
-              esc(j.at) + '" style="width:90px"></label>' +
-            '<label>N 秒<input data-mf="interval_sec" data-mi="' + i + '" type="number" min="300" value="' +
-              esc(j.interval_sec) + '" style="width:100px"></label>' +
+            '<label>周期<select data-mf="schedule" data-mi="' + i + '" style="width:130px">' +
+              opts + '</select></label>' +
+            // 下面每一组只在对应周期下显示，切换时由 syncMaintFields 控制
+            '<label data-mrole="daily" data-mi="' + i + '">时刻 (HH:MM)' +
+              '<input data-mf="at" data-mi="' + i + '" value="' + esc(j.at) +
+              '" style="width:90px" placeholder="03:10"></label>' +
+            '<label data-mrole="weekly" data-mi="' + i + '">星期' +
+              '<select data-mf="weekday" data-mi="' + i + '" style="width:80px">' +
+              wdOpts + '</select></label>' +
+            '<label data-mrole="weekly" data-mi="' + i + '">时刻 (HH:MM)' +
+              '<input data-mf="weekly_at" data-mi="' + i + '" value="' + esc(j.at) +
+              '" style="width:90px" placeholder="03:10"></label>' +
+            '<label data-mrole="interval" data-mi="' + i + '">N 小时' +
+              '<input data-mf="interval_hours" data-mi="' + i + '" type="number" min="' +
+              (d.min_interval_hours||1) + '" step="1" value="' + esc(j.interval_hours) +
+              '" style="width:90px"></label>' +
+            '<label data-mrole="cron" data-mi="' + i + '" style="flex:1;min-width:220px">Cron（分 时 日 月 周）' +
+              '<input data-mf="cron" data-mi="' + i + '" value="' + esc(j.cron||'') +
+              '" style="width:100%" placeholder="0 3 * * *"></label>' +
+            '<label data-mrole="once" data-mi="' + i + '">时刻 (' + esc(d.once_at_format||'YYYY-MM-DD HH:MM') + ')' +
+              '<input data-mf="once_at" data-mi="' + i + '" value="' + esc(j.once_at||'') +
+              '" style="width:170px" placeholder="' + esc(d.once_at_format||'YYYY-MM-DD HH:MM') + '"></label>' +
             params +
             '<button class="mini" data-mrun="' + esc(j.name) + '">立即执行</button>' +
           '</div>' +
+          '<div class="det" data-mcron="' + i + '"></div>' +
           '<div class="det">上次 ' + (j.last_run_iso || '从未') +
-            ' · 下次 ' + (j.next_run_iso || (j.enabled ? '-' : '未启用')) +
+            ' · 下次 <b>' + esc(j.next_run_text || '—') + '</b>' +
             ' · 已跑 ' + (j.runs||0) + ' 次' +
             (j.last_result ? ' · ' + esc(j.last_result) : '') + '</div>' +
           '</div>';
@@ -3043,12 +3304,45 @@
       Array.prototype.forEach.call(
         $('rt-maint-jobs').querySelectorAll('input, select'),
         function(el){
-          el.addEventListener('change', function(){ RT_MAINT_DIRTY = true; });
+          el.addEventListener('change', function(){
+            RT_MAINT_DIRTY = true;
+            syncMaintFields();
+          });
           el.addEventListener('input', function(){ RT_MAINT_DIRTY = true; });
         });
+      syncMaintFields();
     }).catch(function(e){
       $('rt-maint-jobs').innerHTML = '<div class="muted">加载失败: ' + esc(e.message) + '</div>';
     });
+  }
+
+  // 周期切换时**只显示该周期用得到的字段**。
+  // 之前六种字段全平铺出来，选"每 N 秒"后看不出哪个框生效 ——
+  // 于是填了秒却还是按每天跑，用户以为保存成功了其实没有。
+  function syncMaintFields(){
+    Array.prototype.forEach.call(
+      document.querySelectorAll('select[data-mf="schedule"]'),
+      function(sel){
+        var i = sel.getAttribute('data-mi'), kind = sel.value;
+        Array.prototype.forEach.call(
+          document.querySelectorAll('[data-mrole][data-mi="' + i + '"]'),
+          function(el){
+            el.style.display = (el.getAttribute('data-mrole') === kind) ? '' : 'none';
+          });
+        var tip = document.querySelector('[data-mcron="' + i + '"]');
+        if(tip){
+          var j = RT_JOBS[Number(i)] || {};
+          if(kind === 'cron'){
+            tip.innerHTML = j.config_error
+              ? '<span class="pill err">表达式有误</span> ' + esc(j.config_error)
+              : esc(j.cron_text || '填入 5 段表达式，如 0 3 * * *');
+          } else {
+            tip.textContent = (kind === 'startup')
+              ? '引擎每次启动时跑一次，不参与周期调度'
+              : (kind === 'once' ? '时刻过后会自动停用，超过 5 分钟不再补跑' : '');
+          }
+        }
+      });
   }
 
   function collectMaintenance(){
@@ -3059,17 +3353,26 @@
         return el ? el : null;
       };
       var enabled = get('enabled'), sched = get('schedule');
-      var at = get('at'), iv = get('interval_sec');
       var params = {};
       document.querySelectorAll('[data-mp="' + i + '"]').forEach(function(el){
         var k = el.getAttribute('data-mk');
         params[k] = (el.type === 'checkbox') ? el.checked : el.value;
       });
+      var kind = sched ? sched.value : j.schedule;
+      // 时刻框按周期分成 daily 与 weekly 两个，避免"改了周任务的时刻
+      // 结果把每天任务的时刻也改了"。提交时按当前周期挑对应的那个。
+      var atEl = (kind === 'weekly') ? get('weekly_at') : get('at');
+      var ivEl = get('interval_hours');
+      var hours = ivEl ? parseInt(ivEl.value, 10) : j.interval_hours;
+      if(isNaN(hours) || hours < 1){ hours = 1; }
       jobs[j.name] = {
         enabled: enabled ? enabled.checked : j.enabled,
-        schedule: sched ? sched.value : j.schedule,
-        at: at ? at.value : j.at,
-        interval_sec: iv ? Number(iv.value) : j.interval_sec,
+        schedule: kind,
+        at: atEl ? atEl.value : j.at,
+        weekday: (function(){ var w = get('weekday'); return w ? Number(w.value) : j.weekday; })(),
+        interval_hours: hours,
+        cron: (function(){ var c = get('cron'); return c ? c.value : (j.cron||''); })(),
+        once_at: (function(){ var c = get('once_at'); return c ? c.value : (j.once_at||''); })(),
         params: params,
       };
     });
@@ -3208,6 +3511,10 @@
       return;
     }
     if(el.id === 'bt-strategy'){ toggleSpecBox(); return; }
+    // 任务明细的筛选条件一改就重新拉 —— 这种"改了却没反应"的输入框
+    // 会让人以为接口坏了
+    if(el.id === 'rt-ledger-status' || el.id === 'rt-ledger-type' ||
+       el.id === 'rt-ledger-limit'){ loadLedger(); return; }
     if(el.id === 's-kind'){ syncKindForm(); return; }
     if(el.id === 'pool-source'){ loadPool(); return; }
     if(el.id === 's-multi-mode'){ syncMultiMode(); return; }
@@ -3221,6 +3528,15 @@
         else toast('改频率失败: ' + ((r && (r.error || ('未影响任何任务，当前值: ' + val))) || ''), true);
         loadCollector();
       }).catch(function(e){ toast('改频率失败: ' + e.message, true); });
+  });
+
+  // 关键字框用防抖：每敲一个字就打一次接口，长跑服务上这是白给的负担
+  var ledgerKwTimer = null;
+  document.addEventListener('input', function(ev){
+    if(ev.target && ev.target.id === 'rt-ledger-kw'){
+      if(ledgerKwTimer) clearTimeout(ledgerKwTimer);
+      ledgerKwTimer = setTimeout(loadLedger, 600);
+    }
   });
 
   window.addEventListener('resize', function(){

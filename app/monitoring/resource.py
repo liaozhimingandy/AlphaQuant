@@ -89,6 +89,7 @@ class MonitorResource(Resource):
                 "/api/collector", "/api/dataguard", "/api/providers",
                 "/api/runtime", "/api/maintenance", "/api/logging",
                 "/api/journal", "/api/preflight",
+                "/api/ledger", "/api/task?id=", "/api/events",
             ]})
 
         head = rest[0]
@@ -125,6 +126,29 @@ class MonitorResource(Resource):
         if head == "maintenance":
             # 维护计划：开关 / 周期 / 参数 / 下次执行时间
             return self._json(request, c.control.maintenance_view())
+        if head == "ledger":
+            # 任务明细：已建任务 + 终态历史（成功/失败/死信/取消）
+            # 参数：status / task_type / queue / keyword / limit
+            return self._json(request, c.control.task_ledger(
+                status=self._q(request, "status", ""),
+                task_type=self._q(request, "task_type", ""),
+                queue=self._q(request, "queue", ""),
+                keyword=self._q(request, "keyword", ""),
+                limit=int(self._q(request, "limit", 50) or 50),
+            ))
+        if head == "task":
+            # 单条引擎任务明细：?id=xxx
+            task_id = self._q(request, "id", "") or (
+                rest[1] if len(rest) >= 2 else ""
+            )
+            return self._json(request, c.control.engine_task_detail(task_id))
+        if head == "events":
+            # 事件指标：每种事件发布数 / 订阅者 / 处理错误 / 最近时间
+            # ?type=xxx 时额外返回该类事件的详情与样例
+            return self._json(request, c.control.event_metrics(
+                limit=int(self._q(request, "limit", 0) or 0),
+                event_type=self._q(request, "type", ""),
+            ))
         if head == "logging":
             # 当前生效的日志级别（面板据此显示"我现在是什么档位"）
             return self._json(request, c.control.logging_view())

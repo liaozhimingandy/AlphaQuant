@@ -7,7 +7,10 @@
       "enabled": true,
       "schedule": "daily",
       "at": "03:10",
-      "interval_sec": 86400,
+      "weekday": 1,
+      "interval_hours": 24,
+      "cron": "",
+      "once_at": "",
       "params": {
         "retention_days": 7,
         "apply": false
@@ -20,7 +23,10 @@
       "enabled": false,
       "schedule": "daily",
       "at": "03:40",
-      "interval_sec": 86400,
+      "weekday": 1,
+      "interval_hours": 24,
+      "cron": "",
+      "once_at": "",
       "params": {
         "before_days": 30,
         "apply": false
@@ -31,11 +37,14 @@
       "task_type": "maintenance.validate",
       "label": "运行校验",
       "enabled": true,
-      "schedule": "interval",
+      "schedule": "startup",
       "at": "03:10",
-      "interval_sec": 3600,
+      "weekday": 1,
+      "interval_hours": 1,
+      "cron": "",
+      "once_at": "",
       "params": {},
-      "description": "校验日志目录、数据目录与数据库可用性（只读，不删任何东西）"
+      "description": "引擎启动时校验日志目录、数据目录与数据库可用性（只读，不删任何东西）"
     }
   }
 }

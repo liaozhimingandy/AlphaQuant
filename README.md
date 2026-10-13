@@ -69,6 +69,10 @@ python main.py ctl preflight                   # 启动预检结论（配置/目
 python main.py ctl preflight --rerun           # 改完配置当场再体检一遍
 python main.py ctl runtime maint               # 维护计划（清理/归档/校验）与下次执行时间
 python main.py ctl runtime maint-run validate  # 立刻跑一次（不看周期与开关）
+python main.py ctl runtime tasks               # 任务明细：已建任务 + 成功/失败历史
+python main.py ctl runtime tasks --status failed --type market.kline.collect
+python main.py ctl runtime task <task_id>      # 单条：参数 / 结果 / 错误 / 耗时
+python main.py ctl runtime events              # 事件指标：每种事件发布数/订阅者/异常
 python main.py ctl runtime dispatch --task-type factor.calculate --params '{"symbols":["000001"]}'
 python main.py ctl runtime rule off kline_updated_factor   # 临时关掉一条规则
 
@@ -135,8 +139,14 @@ python main.py ctl log level INFO --no-persist # 只本次生效，不写进配�
   落盘是否出错，外加死信处置历史（内存里清空后仍可追溯）
 - **启动预检**：逐项结果与处置建议，可当场重跑
 - **手动投递任务**：任务类型下拉直接取已注册处理器；没注册的类型会被明确拒绝
-- **维护计划**：日志清理 / 快照归档 / 运行校验 的开关、周期（每天 HH:MM 或每 N 秒）、
-  参数与「立即执行」。清理与归档**默认只报告不删**，要真的删必须显式勾选
+- **任务明细**：按状态 / 类型 / 关键字查已建任务与终态历史，点「详情」看完整
+  参数、结果与错误原文 —— 汇总数字说不清"这 1200 条成功分别是哪些"
+- **事件指标**：每种事件的发布数、触达数、订阅者数、处理异常数与最近时间；
+  「订阅者 = 0 而发布数在涨」意味着链路在跑起来之后断了
+- **维护计划**：日志清理 / 快照归档 / 运行校验 的开关、周期、参数与「立即执行」。
+  周期六种：**引擎启动时 / 每 N 小时 / 每天 / 每周几 / Cron 表达式 / 指定时刻一次**，
+  切换周期时只留下该周期用得到的输入框。
+  清理与归档**默认只报告不删**，要真的删必须显式勾选
 - **日志等级**：控制台级 / 文件级 / 重复日志节流窗口，可勾"重启后仍生效"
 
 面板读的是**引擎内存里的真状态**（不是二手副本），控制指令直接进 `ControlCenter`，

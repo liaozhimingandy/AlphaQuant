@@ -864,15 +864,154 @@ def ctl_runtime_maint(port) -> None:
     )
     for j in data.get("jobs") or []:
         flag = "✅" if j.get("enabled") else "⏸ "
-        when = (f"每天 {j.get('at')}") if j.get("schedule") == "daily" \
-            else f"每 {j.get('interval_sec')}s"
         click.echo(
-            f"{flag} {j.get('name',''):<12}{when:<16}"
+            f"{flag} {j.get('name',''):<12}{_schedule_text(j):<18}"
             f"下次 {j.get('next_run_iso') or '未启用':<21}"
             f"已跑 {j.get('runs', 0)} 次"
         )
+        if j.get("config_error"):
+            click.secho(f"     ⚠️ {j['config_error']}", fg="yellow")
         if j.get("params"):
             click.echo(f"     参数 {j['params']}")
+
+
+def _schedule_text(job: Dict[str, Any]) -> str:
+    """把一条维护任务的周期说成人话。
+
+    周期种类有六种，各自用的字段还不一样；写成一个函数是为了
+    让面板和 CLI 说同一句话，避免出现"面板说启动时、CLI 说每 0 秒"。
+    """
+    kind = job.get("schedule") or "daily"
+    if kind == "startup":
+        return "引擎启动时"
+    if kind == "interval":
+        return f"每 {job.get('interval_hours')} 小时"
+    if kind == "daily":
+        return f"每天 {job.get('at')}"
+    if kind == "weekly":
+        return f"每周{job.get('weekday_label') or ''} {job.get('at')}"
+    if kind == "cron":
+        return job.get("cron_text") or job.get("cron") or "（未填）"
+    if kind == "once":
+        return f"{job.get('once_at') or '（未填）'} 一次"
+    return str(kind)
+
+
+def _qs(path: str, **params: Any) -> str:
+    """拼查询串。
+
+    ``_api`` 传 body 就走 POST，而明细类接口全是 GET ——
+    读操作走 GET 才能在浏览器里直接打开核对。
+    """
+    import urllib.parse
+
+    pairs = [
+        (k, str(v)) for k, v in params.items()
+        if v is not None and str(v) != ""
+    ]
+    return path + ("?" + urllib.parse.urlencode(pairs) if pairs else "")
+
+
+@ctl_runtime_group.command(name="tasks", help="任务明细：已建任务与成功/失败历史")
+@click.option("--status", default="", help="按状态过滤：success/failed/dead_letter/cancelled")
+@click.option("--type", "task_type", default="", help="按任务类型过滤")
+@click.option("--keyword", default="", help="按 task_id / 幂等键 / 关联 ID 模糊匹配")
+@click.option("--history", is_flag=True, help="只看终态历史（默认两块都显示）")
+@click.option("--limit", default=30, show_default=True, help="每种最多显示几条")
+@_ctl_port
+def ctl_runtime_tasks(status, task_type, keyword, history, limit, port) -> None:
+    data = _api(port, _qs(
+        "/api/ledger", status=status, task_type=task_type,
+        keyword=keyword, limit=limit,
+    ))
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    summary = data.get("summary") or {}
+    click.secho(
+        "任务累计  成功 {success} | 失败 {failed} | 死信 {dead_letter} | "
+        "取消 {cancelled} | 共建 {created}".format(
+            **{k: summary.get(k, 0) for k in
+               ("success", "failed", "dead_letter", "cancelled", "created")}
+        ),
+        fg="cyan", bold=True,
+    )
+    click.echo(f"历史里有明细的 {data.get('history_size', 0)} 条：{data.get('history_summary')}")
+
+    if not history:
+        tasks = data.get("tasks") or []
+        click.echo(f"\n已建任务（{len(tasks)} 条）")
+        for t in tasks:
+            click.echo(
+                f"  {t.get('status_label',''):<6}{t.get('task_type',''):<28}"
+                f"#{str(t.get('task_id'))[:8]}  尝试 {t.get('attempts')}  "
+                f"{t.get('created_at','')}"
+            )
+
+    hist = data.get("history") or []
+    click.echo(f"\n终态历史（{len(hist)} 条）")
+    for t in hist:
+        err = (t.get("error") or "")[:60]
+        click.echo(
+            f"  {t.get('status_label',''):<6}{t.get('task_type',''):<28}"
+            f"#{str(t.get('task_id'))[:8]}  耗时 {t.get('elapsed') or 0:.2f}s"
+            + (f"  {err}" if err else "")
+        )
+
+
+@ctl_runtime_group.command(name="task", help="单条引擎任务明细（参数 / 结果 / 错误）")
+@click.argument("task_id")
+@_ctl_port
+def ctl_runtime_task(task_id, port) -> None:
+    data = _api(port, _qs("/api/task", id=task_id))
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    t = data.get("task") or {}
+    click.secho(
+        f"{t.get('task_type')} #{str(t.get('task_id'))[:8]} —— {t.get('status_label')}",
+        fg="cyan", bold=True,
+    )
+    for key in ("queue", "priority", "attempts", "max_retries", "manual_retries",
+                "worker", "dedup_key", "correlation_id", "source_event_id",
+                "created_at", "started_at", "finished_at", "elapsed"):
+        if t.get(key) not in (None, ""):
+            click.echo(f"  {key:<16}{t[key]}")
+    if t.get("params"):
+        click.echo(f"  params          {t['params']}")
+    if t.get("error"):
+        click.secho(f"  error           {t['error']}", fg="red")
+
+
+@ctl_runtime_group.command(name="events", help="事件指标：每种事件发布数 / 订阅者 / 错误")
+@click.option("--type", "event_type", default="", help="只看这一类，并列出最近样例")
+@click.option("--limit", default=0, help="最多显示几类（0=全部）")
+@_ctl_port
+def ctl_runtime_events(event_type, limit, port) -> None:
+    data = _api(port, _qs("/api/events", type=event_type, limit=limit))
+    if not data.get("ok"):
+        click.secho(f"❌ {data.get('error')}", fg="red")
+        return
+    stats = data.get("stats") or {}
+    click.secho(
+        f"事件总线  发布 {stats.get('published', 0)} | "
+        f"触达 {stats.get('delivered', 0)} | "
+        f"处理异常 {stats.get('handler_errors', 0)} | "
+        f"去重丢弃 {stats.get('duplicate_dropped', 0)}",
+        fg="cyan", bold=True,
+    )
+    for m in data.get("types") or []:
+        warn = " ⚠️" if m.get("handler_errors") else ""
+        click.echo(
+            f"  {m.get('event_type',''):<34}{m.get('published', 0):>6} 条  "
+            f"订阅 {m.get('subscribers', 0)}  错误 {m.get('handler_errors', 0)}  "
+            f"最近 {m.get('last_iso') or '—'}{warn}"
+        )
+    for s in (data.get("recent") or [])[:10]:
+        click.echo(
+            f"    · {s.get('occurred_at','')} {s.get('event_type','')} "
+            f"#{str(s.get('event_id'))[:8]}"
+        )
 
 
 @ctl_runtime_group.command(name="maint-run", help="立刻执行一次维护任务（不看周期与开关）")

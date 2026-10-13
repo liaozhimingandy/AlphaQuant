@@ -678,6 +678,88 @@ class ControlCenter:
         }
 
     # ============================================================
+    # 任务明细 / 事件指标（面板核对数据用）
+    #
+    # 这两个视图回答的是同一类问题："系统说它做了，我怎么确认它真做了"。
+    # 只有汇总数字时这个问题答不了 —— "成功 1200 条"和
+    # "这 1200 条分别是哪些、参数是什么、耗时多久"是两种可信度。
+    # ============================================================
+    def task_ledger(
+        self,
+        status: str = "",
+        task_type: str = "",
+        queue: str = "",
+        keyword: str = "",
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """已建任务 + 终态历史。
+
+        ``tasks`` 是"现在还看得见的任务"（含在途），``history`` 是
+        "最近做完的那些"。核对数据时两边一起看：成功数对不上，
+        通常是任务被 ``_tasks`` 淘汰了，只有历史里还留着。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        store = sch.store
+        limit = max(1, min(int(limit or 50), 500))
+        return {
+            "ok": True,
+            "tasks": store.tasks(status=status, task_type=task_type,
+                                 queue=queue, keyword=keyword, limit=limit),
+            "history": store.history(status=status, task_type=task_type,
+                                     limit=limit),
+            "history_summary": store.history_summary(),
+            "summary": {
+                "success": store.stats.get("success", 0),
+                "failed": store.stats.get("failed", 0),
+                "dead_letter": store.stats.get("dead_letter", 0),
+                "cancelled": store.stats.get("cancelled", 0),
+                "created": store.stats.get("created", 0),
+            },
+            "task_types": store.task_types_seen(),
+            "tracked": len(store.tasks(limit=0)),
+            "history_size": len(store.history(limit=0)),
+        }
+
+    def engine_task_detail(self, task_id: str) -> Dict[str, Any]:
+        """单条引擎任务的完整明细（区别于旧式 QuantTask 的 ``task_detail``）。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        detail = sch.store.task_detail(str(task_id or ""))
+        if detail is None:
+            return {"ok": False, "error": f"没有这条任务: {task_id}（可能已被清理）"}
+        return {"ok": True, "task": detail}
+
+    def event_metrics(self, limit: int = 0, event_type: str = "") -> Dict[str, Any]:
+        """事件指标：每种事件发布了几条、有没有人听、处理失败多少。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        bus = getattr(sch, "bus", None)
+        if bus is None:
+            return {"ok": False, "error": "事件总线不可用"}
+        try:
+            types = bus.event_metrics(limit)
+            if event_type:
+                detail = bus.event_detail(event_type)
+                samples = bus.recent(20, event_type=event_type)
+            else:
+                detail = None
+                samples = bus.recent(20)
+        except Exception as exc:
+            return {"ok": False, "error": f"读取事件指标失败: {exc}"}
+        return {
+            "ok": True,
+            "stats": dict(getattr(bus, "stats", {}) or {}),
+            "types": types,
+            "detail": detail,
+            "recent": samples,
+            "known_types": bus.known_event_types(),
+        }
+
+    # ============================================================
     # 启动预检
     # ============================================================
     def preflight_view(self) -> Dict[str, Any]:

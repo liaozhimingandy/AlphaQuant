@@ -271,6 +271,10 @@ class SchedulerComponent(SchedulerBase):
             event_name=EventType.SYSTEM_MAINTENANCE_TICK,
             timer_id="maintenance_tick",
         )
+        # 3.6) 启动型维护任务（默认只有"运行校验"）：只在引擎起来时跑一次。
+        #      必须在周期定时器之外单独触发 —— startup 任务不参与
+        #      is_due 判定，否则它会被"每 30 秒一拍"反复触发。
+        self._run_startup_maintenance()
         # 4) 启动分发循环
         self._dispatch_call = reactor.callLater(
             self.tick_interval, self._dispatch_loop
@@ -466,6 +470,24 @@ class SchedulerComponent(SchedulerBase):
             self.maintenance.tick()
         except Exception as exc:
             logger.error(f"维护计划检查失败: {exc}")
+
+    def _run_startup_maintenance(self) -> List[str]:
+        """引擎启动时跑一遍「启动时」类型的维护任务。
+
+        放在这里而不是 ``on_initialize``：那时事件总线还没就绪，
+        计划器发不出事件（只能记一条"事件总线未就绪"的错误），
+        于是"运行校验"看起来配了却从没跑过，且没有任何人报错。
+        """
+        try:
+            fired = self.maintenance.run_startup()
+        except Exception as exc:
+            # 启动校验失败不该把引擎带崩 —— 它只是"没校验成"，
+            # 引擎继续跑起来比拒绝启动更容易让人补救。
+            logger.error(f"启动维护任务触发失败: {exc}", exc_info=True)
+            return []
+        if fired:
+            logger.info(f"启动维护任务已投递: {fired}")
+        return fired
 
     def _make_listener(self, event_type: str) -> Callable[..., Any]:
         """生成一个**知道自己订阅了什么事件**的监听器。

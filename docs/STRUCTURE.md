@@ -115,7 +115,8 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 | **容器** | `app/engine/` | 生命周期、装配、依赖解析、**启动预检** | `engine.py` `builder.py` `registry.py` `capability.py` `preflight.py` |
 | | `app/engine/hub/` | 多进程协作：一个 hub 拉起 N 个引擎进程 | `supervisor.py` `worker.py` |
 | **运行时** | `app/runtime/scheduler.py` | 调度中枢：订阅事件 → 建任务 → 投队列 → 领活 → 启动恢复 | `SchedulerComponent` |
-| | `app/runtime/maintenance.py` | 维护任务的时间源（周期 / 时刻 → `maintenance.due`） | `MaintenancePlanner` |
+| | `app/runtime/maintenance.py` | 维护任务的时间源（六种周期 → `maintenance.due`） | `MaintenancePlanner` |
+| | `app/runtime/cron.py` | cron 表达式解析与"下一次执行时刻"（不引第三方包） | `CronExpr` |
 | | `app/runtime/events/` | **事件契约层**：类型常量、`EngineEvent` 信封、总线 | `types.py` `schema.py` `bus.py` |
 | | `app/runtime/scheduling/` | **调度层**：规则表（21 条）+ 能力路由 | `rules.py` `router.py` `defaults.py` |
 | | `app/runtime/tasking/` | **任务层**：`EngineTask` 状态机、队列、死信、**流水账（崩溃恢复）** | `models.py` `store.py` `journal.py` |
@@ -208,7 +209,8 @@ AlphaQuant/
 │   ├── runtime/       ── 运行时层（不含业务）──
 │   │   │                      改这里之前先读 EVENT_TASK.md
 │   │   ├── scheduler.py        调度器组件（订阅事件 → 建任务 → 投队列 → 启动恢复）
-│   │   ├── maintenance.py      维护计划（周期/时刻 → maintenance.due 事件）
+│   │   ├── maintenance.py      维护计划（六种周期 → maintenance.due 事件）
+│   │   ├── cron.py             cron 表达式解析（5 段，零依赖）
 │   │   ├── executor.py         WorkerComponent（旧作业执行器）
 │   │   ├── event_bus.py        薄转发兼容层（真身在 events/）
 │   │   ├── task.py             ITask / TaskStatus

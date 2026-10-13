@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import inspect
 import threading
+import time
 from collections import OrderedDict, defaultdict
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from app.common.logging import logger
@@ -114,11 +116,24 @@ class EventBus:
         self._history: "List[Dict[str, Any]]" = []
         self._history_size = max(0, int(history_size))
         self._match_cache: "Dict[str, Tuple[str, ...]]" = {}
+        #: 按事件类型分别计数。只有总量（stats）时，"哪一类事件在暴涨"
+        #: 这个问题答不了，而暴涨的那类往往就是出问题的那类。
+        self._metrics: "Dict[str, Dict[str, Any]]" = defaultdict(self._new_metric)
         self.stats: Dict[str, int] = {
             "published": 0,
             "delivered": 0,
             "duplicate_dropped": 0,
             "handler_errors": 0,
+        }
+
+    @staticmethod
+    def _new_metric() -> "Dict[str, Any]":
+        return {
+            "published": 0,
+            "delivered": 0,
+            "handler_errors": 0,
+            "last_at": 0.0,
+            "last_event_id": "",
         }
 
     # ============================================================
@@ -209,6 +224,10 @@ class EventBus:
         with self._lock:
             self.stats["published"] += 1
             self._remember(event)
+            metric = self._metrics[event.event_type]
+            metric["published"] += 1
+            metric["last_at"] = time.time()
+            metric["last_event_id"] = event.event_id or ""
 
         delivered = 0
         for handler in self._handlers_for(event.event_type):
@@ -217,9 +236,11 @@ class EventBus:
                 delivered += 1
                 with self._lock:
                     self.stats["delivered"] += 1
+                    self._metrics[event.event_type]["delivered"] += 1
             except Exception as exc:
                 with self._lock:
                     self.stats["handler_errors"] += 1
+                    self._metrics[event.event_type]["handler_errors"] += 1
                 # 异常必须隔离：一个订阅者炸了，后面的订阅者仍要收到事件。
                 # 但不静默 —— 计数进 stats，面板能看见"事件处理持续失败"。
                 logger.error(
@@ -347,9 +368,79 @@ class EventBus:
     # ============================================================
     # 可观测
     # ============================================================
-    def recent(self, limit: int = 50) -> "List[Dict[str, Any]]":
+    def recent(
+        self,
+        limit: int = 50,
+        event_type: str = "",
+    ) -> "List[Dict[str, Any]]":
+        """最近事件（倒序保持时间顺序，最新的在末尾）。
+
+        :param event_type: 只看这一类；空表示全部
+        """
         with self._lock:
-            return list(self._history[-max(0, int(limit)):])
+            items = self._history
+            if event_type:
+                wanted = str(event_type)
+                items = [h for h in items if h.get("event_type") == wanted]
+            return list(items[-max(0, int(limit)):])
+
+    def event_metrics(self, limit: int = 0) -> "List[Dict[str, Any]]":
+        """按事件类型分别统计。
+
+        ``subscribers`` 是**实时**算的（不是发布时的快照）：
+        订阅关系是会变的，"这个事件现在有没有人听"比
+        "发布时有没有人听"重要得多 —— 后者正常而前者为 0，
+        意味着链路在跑起来之后断了。
+        """
+        with self._lock:
+            rows: "List[Dict[str, Any]]" = []
+            for name, metric in self._metrics.items():
+                rows.append({
+                    "event_type": name,
+                    "published": metric["published"],
+                    "delivered": metric["delivered"],
+                    "handler_errors": metric["handler_errors"],
+                    "subscribers": len(self._handlers_for(name)),
+                    "last_at": metric["last_at"],
+                    "last_iso": (
+                        datetime.fromtimestamp(metric["last_at"]).isoformat(
+                            timespec="seconds"
+                        )
+                        if metric["last_at"] else ""
+                    ),
+                    "last_event_id": metric["last_event_id"],
+                })
+        rows.sort(key=lambda r: (-int(r["published"]), str(r["event_type"])))
+        if limit and limit > 0:
+            return rows[:int(limit)]
+        return rows
+
+    def event_detail(self, event_type: str) -> "Dict[str, Any]":
+        """单类事件的指标 + 最近几条样例（排障时核对"到底发了什么"）。"""
+        name = str(event_type or "")
+        with self._lock:
+            metric = dict(self._metrics.get(name) or self._new_metric())
+            samples = [
+                h for h in self._history if h.get("event_type") == name
+            ][-10:]
+        return {
+            "event_type": name,
+            "published": metric["published"],
+            "delivered": metric["delivered"],
+            "handler_errors": metric["handler_errors"],
+            "subscribers": len(self._handlers_for(name)),
+            "last_at": metric["last_at"],
+            "last_iso": (
+                datetime.fromtimestamp(metric["last_at"]).isoformat(timespec="seconds")
+                if metric["last_at"] else ""
+            ),
+            "last_event_id": metric["last_event_id"],
+            "samples": samples,
+        }
+
+    def known_event_types(self) -> "List[str]":
+        with self._lock:
+            return sorted(self._metrics.keys())
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -357,6 +448,7 @@ class EventBus:
                 "stats": dict(self.stats),
                 "subscriptions": {k: len(v) for k, v in self._receivers.items()},
                 "recent": list(self._history[-20:]),
+                "types": self.event_metrics(20),
             }
 
     def is_echo_event(self, event_type: str) -> bool:

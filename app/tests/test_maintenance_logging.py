@@ -34,6 +34,8 @@ from typing import Any, Dict, List
 from app.common.logging import current_levels, level_of, set_level
 from app.runtime.events.schema import EngineEvent
 from app.runtime.maintenance import (
+    DEFAULT_JOBS,
+    MIN_INTERVAL_HOURS,
     MISS_GRACE_SECONDS,
     MaintenanceJob,
     MaintenancePlanner,
@@ -96,12 +98,22 @@ class MaintenanceJobScheduleTest(unittest.TestCase):
         self.assertEqual(nxt.day, (_at(3, 30, 0) + timedelta(days=1)).day)
 
     def test_interval_job_due_after_elapsed(self):
+        # 间隔的粒度是**小时**（不是秒）：维护任务做成分钟级只会让引擎
+        # 一直在做无用功。旧字段 interval_sec 只在读旧配置时换算用。
         job = MaintenanceJob(name="x", task_type="t", label="x",
-                             enabled=True, schedule="interval", interval_sec=3600)
+                             enabled=True, schedule="interval", interval_hours=1)
         job.last_run_at = time.time() - 3601
         self.assertTrue(job.is_due())
         job.last_run_at = time.time() - 60
         self.assertFalse(job.is_due())
+
+    def test_interval_floor_is_one_hour(self):
+        """配 0 或负数不能得到"每 0 小时跑一次"（那等于每拍都跑）。"""
+        for raw in (0, -3):
+            job = MaintenanceJob(name="x", task_type="t", label="x",
+                                 enabled=True, schedule="interval",
+                                 interval_hours=raw)
+            self.assertEqual(job.interval_hours_value(), MIN_INTERVAL_HOURS)
 
     def test_bad_at_falls_back_without_crashing(self):
         job = MaintenanceJob(name="x", task_type="t", label="x",
@@ -133,15 +145,31 @@ class MaintenancePlannerTest(unittest.TestCase):
                 )
 
     def test_tick_only_fires_due_jobs(self):
-        # 把两个 daily 推到明天，只留 interval 的到点
+        # 把两个 daily 推到明天；validate 默认是 startup（不参与周期），
+        # 这里临时改成 interval 才能测"周期到点"这条路径
         for name in ("log_cleanup", "archive"):
             self.planner._jobs[name].last_run_at = time.time()
+        self.planner._jobs["validate"].schedule = "interval"
+        self.planner._jobs["validate"].interval_hours = 1
         self.planner._jobs["validate"].last_run_at = time.time() - 99999
         fired = self.planner.tick()
         self.assertEqual(fired, ["validate"])
         self.assertEqual(self.fired[0]["event"], "system.maintenance.due")
         self.assertEqual(self.fired[0]["job"], "validate")
         self.assertIn("params", self.fired[0])
+
+    def test_tick_never_fires_startup_jobs(self):
+        """startup 只由引擎启动触发，周期节拍不能碰它。
+
+        这条漏了的后果是"运行校验"每 30 秒跑一次 —— 用户提的
+        "只在引擎启动时执行"等于没生效，而且日志会被灌满。
+        """
+        self.planner._jobs["validate"].schedule = "startup"
+        self.planner._jobs["validate"].last_run_at = 0.0
+        self.assertEqual(self.planner.tick(), [])
+        self.assertEqual(self.fired, [])
+        # 但启动路径必须能触发它
+        self.assertEqual(self.planner.run_startup(), ["validate"])
 
     def test_run_now_ignores_enabled_flag(self):
         """手动"立即执行"被 enabled=false 挡住是最让人困惑的设计。"""
@@ -189,8 +217,14 @@ class MaintenancePlannerTest(unittest.TestCase):
         self.assertEqual(len(reloaded._jobs), 3)
 
     def test_invalid_schedule_falls_back_to_default(self):
-        self.planner.update({"jobs": {"validate": {"schedule": "weekly"}}})
-        self.assertIn(self.planner._jobs["validate"].schedule, ("daily", "interval"))
+        # "weekly" 现在是合法周期了，用一个真正不认识的值。
+        # 回落到**该任务自己的默认值**，而不是全局写死 daily ——
+        # 运行校验的默认就是 startup，回落成 daily 反而会让它半夜跑起来。
+        self.planner.update({"jobs": {"validate": {"schedule": "every-full-moon"}}})
+        self.assertEqual(
+            self.planner._jobs["validate"].schedule,
+            DEFAULT_JOBS["validate"].kind,
+        )
 
     def test_emit_failure_counts_as_error(self):
         def boom(*a, **k):

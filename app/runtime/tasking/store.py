@@ -69,7 +69,12 @@ class TaskStore:
         #: 幂等键 → 任务 ID。仅在任务**未终结**期间有效，
         #: 终结后释放，于是"同一批 K 线第二天再来"仍能触发新任务。
         self._dedup: "Dict[str, str]" = {}
+        # 终态任务历史。**只记终态**（成功 / 失败 / 死信 / 取消）：
+        # "已建任务"里在途的那部分看 pending/running 就够，
+        # 而"做成没做成、为什么没做成"只有终态说得清。
+        # 有界是因为长跑服务不能为了"留个凭证"无限吃内存。
         self._history_size = max(0, int(history_size))
+        self._history: "List[Dict[str, Any]]" = []
         self._max_tasks = max(1, int(max_tasks))
 
         # ---- 落盘 ----
@@ -253,6 +258,7 @@ class TaskStore:
             self._running.pop(task.task_id, None)
             self._release_dedup(task)
             self.stats["success"] += 1
+            self._remember(task)
             self._persist(task, immediate=True)
 
     def mark_failure(self, task: EngineTask, error: Any = "") -> str:
@@ -280,6 +286,7 @@ class TaskStore:
             # 判定失败的任务一直算进去。
             self._drop_from_queue(task)
             self.stats["dead_letter"] += 1
+            self._remember(task)
             self._persist(task, immediate=True)
             if self.journal is not None:
                 try:
@@ -301,6 +308,7 @@ class TaskStore:
             self._release_dedup(task)
             self._drop_from_queue(task)   # 同 mark_failure：别让死信占着积压数
             self.stats["dead_letter"] += 1
+            self._remember(task)
             self._persist(task, immediate=True)
             if self.journal is not None:
                 try:
@@ -328,6 +336,7 @@ class TaskStore:
             self._drop_from_queue(task)
             self._release_dedup(task)
             self.stats["cancelled"] += 1
+            self._remember(task)
             self._persist(task, immediate=True)
             return True
 
@@ -350,6 +359,19 @@ class TaskStore:
     def _release_dedup(self, task: EngineTask) -> None:
         if task.dedup_key and self._dedup.get(task.dedup_key) == task.task_id:
             self._dedup.pop(task.dedup_key, None)
+
+    def _remember(self, task: EngineTask) -> None:
+        """把一条**终态**任务记进历史（面板"任务明细"的数据源）。
+
+        为什么不在 ``_tasks`` 里直接查：``_tasks`` 满了会淘汰终态任务，
+        于是"刚才那批采集到底成了几条"这个问题的答案就消失了。
+        历史与任务表分开，淘汰策略才不用互相迁就。
+        """
+        if self._history_size <= 0:
+            return
+        self._history.append(task.to_dict())
+        while len(self._history) > self._history_size:
+            self._history.pop(0)
 
     # ============================================================
     # 查询 / 可观测
@@ -379,6 +401,108 @@ class TaskStore:
         with self._lock:
             items = list(self._tasks.values())[-max(0, int(limit)):]
             return [t.to_dict() for t in items]
+
+    # ---------------- 任务明细（面板核对用）----------------
+    def tasks(
+        self,
+        status: str = "",
+        task_type: str = "",
+        queue: str = "",
+        keyword: str = "",
+        limit: int = 50,
+    ) -> "List[Dict[str, Any]]":
+        """已建任务全量查询（**含在途**），倒序（最新在前）。
+
+        与 :meth:`history` 的分工：这里回答"系统现在有哪些活、各自什么状态"，
+        那里回答"最近有哪些活做完了、结果是什么"。
+        核对数据时两边要能对上，所以筛选条件刻意做成同一套。
+        """
+        limit = max(0, int(limit))
+        kw = str(keyword or "").strip().lower()
+        with self._lock:
+            out: "List[Dict[str, Any]]" = []
+            for task in reversed(list(self._tasks.values())):
+                if status and task.status.value != status:
+                    continue
+                if task_type and task.task_type != task_type:
+                    continue
+                if queue and task.queue != queue:
+                    continue
+                if kw and kw not in task.task_id.lower() \
+                        and kw not in task.task_type.lower() \
+                        and kw not in str(task.dedup_key or "").lower() \
+                        and kw not in str(task.correlation_id or "").lower():
+                    continue
+                out.append(task.to_dict())
+                if limit and len(out) >= limit:
+                    break
+            return out
+
+    def history(
+        self,
+        status: str = "",
+        task_type: str = "",
+        limit: int = 50,
+    ) -> "List[Dict[str, Any]]":
+        """**终态**任务历史，倒序（最新在前）。
+
+        :param status: ``success`` / ``failed`` / ``dead_letter`` / ``cancelled``
+        :param task_type: 只看某类任务
+        """
+        limit = max(0, int(limit))
+        with self._lock:
+            out: "List[Dict[str, Any]]" = []
+            for item in reversed(self._history):
+                if status and item.get("status") != status:
+                    continue
+                if task_type and item.get("task_type") != task_type:
+                    continue
+                out.append(item)
+                if limit and len(out) >= limit:
+                    break
+            return out
+
+    def history_summary(self) -> "Dict[str, int]":
+        """历史里各状态的条数。
+
+        注意它与 ``stats`` 的区别：``stats`` 是**进程启动以来**的累计值，
+        这里是**还看得见明细**的那些。面板上两个数都要给 ——
+        "累计成功 1200" 和 "最近 300 条里失败 12" 回答的是不同问题。
+        """
+        with self._lock:
+            out: "Dict[str, int]" = {}
+            for item in self._history:
+                key = str(item.get("status") or "unknown")
+                out[key] = out.get(key, 0) + 1
+            return out
+
+    def task_detail(self, task_id: str) -> "Optional[Dict[str, Any]]":
+        """单条任务明细：先在任务表找，找不到再翻历史。
+
+        翻历史不是多余的：``_tasks`` 满了会淘汰终态任务，
+        而"这条三分钟前失败的任务为什么失败"恰恰是最常被问的。
+        """
+        with self._lock:
+            task = self._tasks.get(str(task_id or ""))
+            if task is not None:
+                return task.to_dict()
+            for item in reversed(self._history):
+                if item.get("task_id") == task_id:
+                    return item
+            return None
+
+    def task_types_seen(self) -> "List[str]":
+        """出现过的任务类型（面板筛选下拉框用）。"""
+        with self._lock:
+            seen: "List[str]" = []
+            for task in self._tasks.values():
+                if task.task_type not in seen:
+                    seen.append(task.task_type)
+            for item in self._history:
+                name = str(item.get("task_type") or "")
+                if name and name not in seen:
+                    seen.append(name)
+            return sorted(seen)
 
     def dead_letters(self, limit: int = 30) -> "List[Dict[str, Any]]":
         """错误队列。**顺序是倒序（最新在前）**：这是给人看的待办清单，
@@ -716,6 +840,8 @@ class TaskStore:
                 "dedup_keys": len(self._dedup),
                 "idle": self.is_idle(),
                 "persist": bool(self.persist),
+                "history_size": len(self._history),
+                "history_summary": self.history_summary(),
             }
         if self.journal is not None:
             try:

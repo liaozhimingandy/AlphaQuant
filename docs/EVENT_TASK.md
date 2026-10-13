@@ -324,11 +324,38 @@ scheduler 定时器 ──每 30s──> system.maintenance.tick
 |---|---|---|---|
 | `log_cleanup` 日志清理 | 启用 | 每天 03:10 | `retention_days=7`、`apply=false` |
 | `archive` 快照归档 | **停用** | 每天 03:40 | `before_days=30`、`apply=false` |
-| `validate` 运行校验 | 启用 | 每 3600s | — |
+| `validate` 运行校验 | 启用 | **引擎启动时** | — |
 
-周期两种：**每天 HH:MM** 或 **每 N 秒**。日任务有 5 分钟"错过宽限"：
-到点后 5 分钟内仍会补跑一次（检查是 30s 一拍，"03:10" 实际在 03:10:xx 被看到），
-超过就算错过、顺延明天 —— 补跑维护任务收益极低，不值得为此在启动时制造一轮文件扫描。
+#### 六种周期
+
+| `schedule` | 含义 | 字段 | 约束 |
+|---|---|---|---|
+| `startup` | 引擎每次启动跑一次 | — | 不参与 `tick`；`run_startup()` 在 `scheduler.on_start` 触发 |
+| `interval` | 每 N 小时 | `interval_hours` | ≥ 1 小时 |
+| `daily` | 每天 HH:MM | `at` | 5 分钟错过宽限 |
+| `weekly` | 每周某天 HH:MM | `weekday`(1=周一) + `at` | 同上 |
+| `cron` | cron 表达式 | `cron` | 5 段；写错则不执行并报原因 |
+| `once` | 指定时刻一次 | `once_at` | 跑完自动停用 |
+
+**为什么间隔的最小粒度是小时**：维护任务是"扫一遍日志目录"这种活，
+做成分钟级只会让引擎一直在做无用功。旧配置的 `interval_sec`（秒）读入时
+按**向上取整**换算成小时 —— 向下取整会把 1.5 小时悄悄缩短成 1 小时，
+维护任务跑太频繁比跑少了更烦人。
+
+**为什么 `validate` 是 `startup`**：它的价值就是"这次启动的环境是好的"，
+每小时再校验一遍既不增加信息量，又会在日志里堆一堆"正常"。
+但 startup 必须**在 `tick` 之外单独触发** —— `tick` 是 30 秒一拍，
+让 startup 参与 `is_due` 判定就变成每 30 秒跑一次了
+（`next_run_at` 对 startup 返回 None，判定在 `is_due` 里显式截断）。
+
+cron 由 `app/runtime/cron.py` 自己实现（零依赖，不为 5 段表达式引第三方包），
+支持 `*`、`*/n`、`a-b`、`a,b`、`a-b/n`。**「日」与「周」是 OR 语义**：
+`0 3 1 * 1` 是"每月 1 号**或**每周一"，不是"1 号且是周一"。
+
+日/周任务有 5 分钟"错过宽限"：到点后 5 分钟内仍会补跑一次
+（检查是 30s 一拍，"03:10" 实际在 03:10:xx 被看到），超过就算错过、顺延下个周期 ——
+补跑维护任务收益极低，不值得为此在启动时制造一轮文件扫描。
+一次性任务同理：时刻过了 5 分钟就不再补跑（补跑"上周三该做的校验"没有意义）。
 
 #### 安全默认与硬拦截
 
@@ -526,6 +553,14 @@ python main.py ctl runtime maint-run validate   # 立刻跑一次（不看周期
 python main.py ctl preflight           # 启动预检结论
 python main.py ctl preflight --rerun   # 当场再体检一遍
 
+# 核对数据：任务明细与事件指标
+python main.py ctl runtime tasks                      # 已建任务 + 终态历史
+python main.py ctl runtime tasks --status failed      # 只看失败
+python main.py ctl runtime tasks --type factor.calculate --history
+python main.py ctl runtime task <task_id>             # 单条：参数/结果/错误/耗时
+python main.py ctl runtime events                     # 每种事件发布数/订阅者/异常
+python main.py ctl runtime events --type market.kline.updated
+
 # 手动投递一个引擎任务
 python main.py ctl runtime dispatch \
     --task-type factor.calculate \
@@ -554,12 +589,20 @@ GET  /api/journal                流水账状态 + 死信处置历史
 GET  /api/preflight              启动预检结论（ran=false 表示还没跑过）
 GET  /api/preflight?rerun=1      当场再跑一遍
 POST /api/preflight/run          {}                       同上
-GET  /api/maintenance            维护计划与运行态
+GET  /api/maintenance            维护计划与运行态（含可用周期 kinds 与下次执行）
 POST /api/maintenance/save       {"jobs": {...}}          保存并生效
 POST /api/maintenance/run        {"name": "log_cleanup"}  立即执行
+GET  /api/ledger                 任务明细：已建任务 + 终态历史
+     ?status=success&task_type=factor.calculate&keyword=000001&limit=100
+GET  /api/task?id=<task_id>      单条任务明细（参数 / 结果 / 错误 / 耗时）
+GET  /api/events                 事件指标：每种事件发布数/触达/订阅者/异常
+GET  /api/events?type=<name>     该类事件的指标 + 最近 20 条样例
 GET  /api/logging                当前生效的日志配置
 POST /api/logging/level          {"console":"DEBUG","file":"INFO","persist":true}
 ```
+
+> `/api/tasks/<id>` 是**旧式量化任务**的详情，引擎任务的明细在 `/api/task?id=`。
+> 两个路由刻意分开：它们的字段完全不同，合并只会让两边都要判断"这次返回的是哪种"。
 
 ### 面板
 
@@ -574,7 +617,25 @@ POST /api/logging/level          {"console":"DEBUG","file":"INFO","persist":true
   落盘是否出错 + 死信处置历史（内存清空后仍可追溯）
 - **启动预检**：逐项结果与处置建议，可当场重跑
 - 手动投递任务（任务类型下拉直接取已注册处理器）
-- 维护计划（周期/时刻/参数/立即执行）
+- 维护计划（周期/时刻/参数/立即执行）—— 切换周期时只留下该周期用得到的输入框
+- **任务明细**：按状态/类型/关键字查已建任务与终态历史，点「详情」看完整
+  参数、结果与错误原文
+- **事件指标**：每种事件的发布数、触达订阅者数、订阅者数、处理异常数与最近时间；
+  点「样例」只看该类事件的最近 20 条
+
+#### 为什么要有"明细"这一层
+
+汇总数字只能回答"成功 1200 条"，回答不了"这 1200 条分别是哪些、
+参数对不对、什么时候跑的"。核对数据时这两件事的可信度完全不同：
+前者可以来自任何地方，后者能直接对着日志和数据库验。
+
+两个数的区别也要看得见：**累计**是本次进程启动以来的总数，
+**历史里有明细**是还看得见逐条记录的条数（`TaskStore` 的任务表有上限，
+满了会淘汰终态任务，但终态历史会再留最近 `history_size` 条）。
+两个数差得越多，说明越多旧任务已经滚出明细窗口。
+
+事件指标里 **订阅者 = 0 而发布数在涨** 是最该看的一格：
+事件发出去了但没人接，链路在跑起来之后断了。
 - 日志等级（控制台/文件/节流窗口，可勾"重启后仍生效"）
 
 ### 引擎快照
