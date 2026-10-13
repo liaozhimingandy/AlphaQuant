@@ -106,7 +106,12 @@ class EventBus:
         self,
         history_size: int = 200,
         dedup_size: int = 4096,
+        store: Optional[Any] = None,
+        run_id: str = "",
     ) -> None:
+        #: 事件流水账（Outbox）。None = 不落盘，事件仍是内存广播。
+        self.store: Optional[Any] = store
+        self.run_id: str = str(run_id or "")
         self._receivers: "Dict[str, List[Callable[..., Any]]]" = defaultdict(list)
         self._lock = threading.RLock()
         #: 已见事件 ID（有界 LRU），用于消费去重
@@ -248,7 +253,71 @@ class EventBus:
                     f"执行异常: {exc}",
                     exc_info=True,
                 )
+
+        # 落盘放在**投递之后**：记下来的 subscribers 才有意义。
+        # 顺序反过来只能记"发出去了"，答不了"有没有人接" —— 而后者
+        # 才是排障时真要看的（规则没订阅 → 链路在这一跳就断了）。
+        with self._lock:
+            self._metrics[event.event_type]["subscribers"] = len(
+                self._handlers_for(event.event_type)
+            )
+        self._record(event, delivered)
         return delivered
+
+    # ---------------- 落盘 / 重放 ----------------
+    def _record(self, event: EngineEvent, delivered: int) -> None:
+        store = self.store
+        if store is None:
+            return
+        try:
+            store.record(event, subscribers=delivered,
+                         replay_of=str((event.data or {}).get("replay_of") or ""),
+                         run_id=self.run_id)
+        except Exception as exc:
+            # 记流水账失败绝不许影响事件本身：它只是"留个底"，
+            # 而事件已经在内存里投递完了。
+            logger.warning(f"事件落盘失败（不影响投递）: {exc}")
+
+    def replay(self, origin_id: str, by: str = "manual",
+               note: str = "") -> Optional[EngineEvent]:
+        """重放一条历史事件。
+
+        **新 event_id**（不去重会命中旧 ID 被判为重复而丢弃），
+        但保留 ``trace_id`` —— 重放是同一条链路上的又一次尝试，
+        不是一条新业务。载荷里写 ``replay_of``，
+        于是事后在流水账里能一眼看出"这条是重放来的"。
+
+        重放的幂等性靠**下游**保证：任务侧有 dedup_key，
+        处理器侧该幂等（回测按 task_id 幂等就是例子）。
+        总线不替下游保证幂等 —— 那需要知道每个订阅者的语义。
+        """
+        if self.store is None:
+            return None
+        origin = self.store.get(str(origin_id))
+        if not origin:
+            return None
+        evt = EngineEvent.create(
+            event_type=origin.get("event_type") or "",
+            data=dict(origin.get("data") or {}),
+            source=str(origin.get("source") or ""),
+            correlation_id=str(origin.get("trace_id") or ""),
+            causation_id=str(origin.get("event_id") or ""),
+        )
+        evt.data["replay_of"] = str(origin.get("event_id") or "")
+        evt.data["replay_by"] = str(by or "manual")
+        delivered = self.publish_event(evt)
+        self.store.log_replay(
+            event_id=evt.event_id,
+            origin_id=str(origin.get("event_id") or ""),
+            event_type=evt.event_type,
+            by=str(by or "manual"),
+            note=str(note or ""),
+        )
+        logger.info(
+            f"重放事件 {origin.get('event_type')} #{str(origin_id)[:8]} "
+            f"→ 新事件 {evt.event_id[:8]}，触达 {delivered} 个订阅者"
+        )
+        return evt
 
     # ---------------- 内部 ----------------
     def _coerce(self, *args: Any, **kwargs: Any) -> EngineEvent:
@@ -449,7 +518,15 @@ class EventBus:
                 "subscriptions": {k: len(v) for k, v in self._receivers.items()},
                 "recent": list(self._history[-20:]),
                 "types": self.event_metrics(20),
+                "store": self.store.snapshot() if self.store is not None
+                         else {"enabled": False},
             }
+
+    def bind_store(self, store: Any, run_id: str = "") -> None:
+        """接上事件流水账（引擎启动时调用，晚绑定避免模块级建库）。"""
+        self.store = store
+        if run_id:
+            self.run_id = str(run_id)
 
     def is_echo_event(self, event_type: str) -> bool:
         """是否为"任务系统的回声"事件。调度器用它防止自己触发自己。"""

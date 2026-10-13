@@ -117,7 +117,7 @@ app/cli ──► app/control ──► app/engine ──► app/modules ──�
 | **运行时** | `app/runtime/scheduler.py` | 调度中枢：订阅事件 → 建任务 → 投队列 → 领活 → 启动恢复 | `SchedulerComponent` |
 | | `app/runtime/maintenance.py` | 维护任务的时间源（六种周期 → `maintenance.due`） | `MaintenancePlanner` |
 | | `app/runtime/cron.py` | cron 表达式解析与"下一次执行时刻"（不引第三方包） | `CronExpr` |
-| | `app/runtime/events/` | **事件契约层**：类型常量、`EngineEvent` 信封、总线 | `types.py` `schema.py` `bus.py` |
+| | `app/runtime/events/` | **事件契约层**：类型常量、`EngineEvent` 信封、总线、**事件流水账（Outbox）** | `types.py` `schema.py` `bus.py` `store.py` |
 | | `app/runtime/scheduling/` | **调度层**：规则表（21 条）+ 能力路由 | `rules.py` `router.py` `defaults.py` |
 | | `app/runtime/tasking/` | **任务层**：`EngineTask` 状态机、队列、死信、**流水账（崩溃恢复）** | `models.py` `store.py` `journal.py` |
 | | `app/runtime/workers/` | **执行层**：分池线程池（8 个）+ 处理器注册表 | `pools.py` `registry.py` `handlers.py` |
@@ -217,7 +217,8 @@ AlphaQuant/
 │   │   ├── events/             ★事件契约层
 │   │   │   ├── types.py            EventType / TaskType / Queue / Pool（唯一真源）
 │   │   │   ├── schema.py           EngineEvent 信封（create / child / to_dict）
-│   │   │   └── bus.py              EventBus（去重 / 通配 / 异常隔离）
+│   │   │   ├── bus.py              EventBus（去重 / 通配 / 异常隔离 / 重放）
+│   │   │   └── store.py            EventStore 事件流水账（落盘 / 链路查询 / 重放留痕）
 │   │   ├── scheduling/         ★调度层
 │   │   │   ├── rules.py            Rule / RuleRegistry（事件 → 任务的规则）
 │   │   │   ├── router.py           CapabilityRouter（任务 → 队列 → 池）

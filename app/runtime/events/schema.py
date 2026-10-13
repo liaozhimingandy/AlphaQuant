@@ -71,15 +71,30 @@ class EngineEvent:
         causation_id: str = "",
         event_id: str = "",
     ) -> "EngineEvent":
-        """显式构造。``event_type`` 会折算成规范名（旧名 → 新名）。"""
+        """显式构造。``event_type`` 会折算成规范名（旧名 → 新名）。
+
+        **没给 ``correlation_id`` 时自动拿自己的 event_id 当链条根。**
+        这条看着不起眼，却是"全链路追踪"能不能用的分水岭：
+        调用方绝大多数时候不会主动传 correlation_id，
+        于是链在第一跳就断了 —— 事后要查"这条数据从哪来到哪去"，
+        只能靠时间戳在日志里猜。自动补根之后，
+        ``correlation_id is trace_id``：一条链上的所有事件共享它，
+        从触发的那条一直追到最后一次下单。
+        """
+        eid = event_id or uuid.uuid4().hex
         return cls(
             event_type=canonical_event_type(event_type),
             data=dict(data or {}),
             source=source,
-            event_id=event_id or uuid.uuid4().hex,
-            correlation_id=correlation_id,
+            event_id=eid,
+            correlation_id=correlation_id or eid,
             causation_id=causation_id,
         )
+
+    @property
+    def trace_id(self) -> str:
+        """链路 ID。就是 ``correlation_id`` —— 只是换个名字说清它的用途。"""
+        return self.correlation_id or self.event_id
 
     def child(
         self,

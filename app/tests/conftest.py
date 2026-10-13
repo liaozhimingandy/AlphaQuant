@@ -43,6 +43,9 @@ def pytest_configure(config) -> None:
     #
     # 需要验证落盘本身的用例会显式传 journal 实例，不受这里影响。
     _os.environ["AQ_TASK_PERSIST"] = "0"
+    # 事件流水账同理：跑测试不该在真实输出目录里堆几万条事件。
+    # 要验证落盘的用例会显式构造 EventStore 并指向临时目录。
+    _os.environ["AQ_EVENT_PERSIST"] = "0"
 
     try:
         from app.providers.market.compat.registry import REGISTRY

@@ -757,6 +757,121 @@ class ControlCenter:
             "detail": detail,
             "recent": samples,
             "known_types": bus.known_event_types(),
+            "store": (bus.store.snapshot()
+                      if getattr(bus, "store", None) is not None
+                      else {"enabled": False}),
+        }
+
+    # ============================================================
+    # 链路追踪 / 事件重放
+    # ============================================================
+    def trace_view(
+        self,
+        trace_id: str = "",
+        event_id: str = "",
+        limit: int = 30,
+    ) -> Dict[str, Any]:
+        """一条链路的全景：事件链 + 链上产生的任务。
+
+        事件和任务记在**两本账**里（events.db / tasks.db），
+        靠 trace_id 对齐。分开记的理由是写入频率差一个量级、
+        清理策略也不同；代价是不能 SQL JOIN，只能在 Python 里拼 ——
+        对每天几千条的量级，这个代价远小于引入额外依赖。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        store = getattr(sch, "event_store", None)
+        if store is None or not getattr(store, "enabled", False):
+            return {"ok": False, "error": "事件流水账未启用（事件只在内存广播）"}
+
+        tid = str(trace_id or "")
+        if not tid and event_id:
+            row = store.get(str(event_id))
+            if not row:
+                return {"ok": False, "error": f"没有这条事件: {event_id}"}
+            tid = row.get("trace_id") or ""
+
+        events = store.trace(tid, limit=max(1, int(limit)) * 4) if tid else []
+        if not events and tid:
+            return {"ok": False, "error": f"链路 {tid} 上没有事件（可能已被清理）"}
+
+        # 链上任务：任务表按 correlation_id 找，取不到就退化为空列表
+        tasks: List[Dict[str, Any]] = []
+        try:
+            tasks = sch.store.tasks(keyword=tid, limit=50) if tid else []
+        except Exception:
+            tasks = []
+
+        return {
+            "ok": True,
+            "trace_id": tid,
+            "events": events,
+            "tasks": tasks,
+            "counts": {
+                "events": len(events),
+                "tasks": len(tasks),
+            },
+            "timeline": self._merge_timeline(events, tasks),
+            "traces": store.traces(limit=max(1, int(limit))),
+            "store": store.snapshot(),
+        }
+
+    @staticmethod
+    def _merge_timeline(
+        events: List[Dict[str, Any]], tasks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """把事件与任务拼成一条时间线。
+
+        排序键用 ``published_at`` / ``created_at`` 的**字符串**比较：
+        两本账都用 ``isoformat(timespec="seconds")``，字典序等于时间序，
+        混用 datetime 与字符串反而会抛类型错误。
+        """
+        out: List[Dict[str, Any]] = []
+        for e in events:
+            out.append({
+                "kind": "event",
+                "at": e.get("published_at") or e.get("occurred_at") or "",
+                "name": e.get("event_type") or "",
+                "id": e.get("event_id") or "",
+                "source": e.get("source") or "",
+                "subscribers": e.get("subscribers") or 0,
+                "replay_of": e.get("replay_of") or "",
+                "data": e.get("data") or {},
+            })
+        for t in tasks:
+            out.append({
+                "kind": "task",
+                "at": t.get("created_at") or "",
+                "name": t.get("task_type") or "",
+                "id": t.get("task_id") or "",
+                "status": t.get("status") or "",
+                "attempts": t.get("attempts") or 0,
+                "error": t.get("error") or "",
+            })
+        out.sort(key=lambda x: str(x.get("at") or ""))
+        return out
+
+    def replay_event(self, event_id: str, by: str = "panel") -> Dict[str, Any]:
+        """重放一条历史事件。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        bus = getattr(sch, "bus", None)
+        if bus is None or getattr(bus, "store", None) is None:
+            return {"ok": False, "error": "事件流水账未启用，没有可重放的历史"}
+        try:
+            evt = bus.replay(str(event_id or ""), by=str(by or "panel"))
+        except Exception as exc:
+            return {"ok": False, "error": f"重放失败: {exc}"}
+        if evt is None:
+            return {"ok": False, "error": f"没有这条事件: {event_id}"}
+        return {
+            "ok": True,
+            "event_id": evt.event_id,
+            "origin_id": str(event_id),
+            "event_type": evt.event_type,
+            "trace_id": evt.trace_id,
         }
 
     # ============================================================

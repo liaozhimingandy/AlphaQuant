@@ -245,7 +245,7 @@ start_timer(30s, "system.maintenance.tick")    scheduler.py:on_start
 **有 tick 没 due** = 没到点或计划被停用；**有 due 没任务** = 规则被关了。
 一个事件也能做，但那样排障时只能看到"到点了"，看不出"到的是哪个点"。
 
-#### 六种周期
+#### 七种周期
 
 | `schedule` | 含义 | 用到的字段 | 最小粒度/约束 |
 |---|---|---|---|
@@ -253,6 +253,7 @@ start_timer(30s, "system.maintenance.tick")    scheduler.py:on_start
 | `interval` | 每 N **小时** | `interval_hours` | ≥ 1 小时 |
 | `daily` | 每天 `HH:MM` | `at` | 错过 5 分钟以上不补跑 |
 | `weekly` | 每周某天 `HH:MM` | `weekday`(1=周一) + `at` | 同上 |
+| `monthly` | 每月某日 `HH:MM` | `day_of_month` + `at` | 1–28 号（29–31 小月不存在，封顶） |
 | `cron` | cron 表达式 | `cron` | 5 段，自己实现（`app/runtime/cron.py`，零依赖） |
 | `once` | 指定时刻跑一次 | `once_at`（`YYYY-MM-DD HH:MM`） | 跑完自动停用 |
 
@@ -274,9 +275,10 @@ cron 支持 `*`、`*/n`、`a-b`、`a,b`、`a-b/n`。**「日」与「周」是 O
 而不是悄悄按某个默认值跑。
 
 配置在 `config/maintenance.json`，面板「运行时 → 维护计划」改完即生效。
-切换周期时面板只显示该周期用得到的输入框 —— 六种周期共用一套字段，
+切换周期时面板只显示该周期用得到的输入框 —— 七种周期共用一套字段，
 选错了框就等于配上了一个永远不生效的参数。
-详见 [EVENT_TASK.md](EVENT_TASK.md) §七。
+保留期参数支持**小时/天切换**（`retention_hours` / `before_hours` 优先，
+`*_days` 兼容），详见 [EVENT_TASK.md](EVENT_TASK.md) §七。
 
 > **注意一处名实不符**：`on_start` 注册的 `TIMER_3MIN` 事件传的 `interval=5`（秒），
 > 当前**没有任何规则订阅它**，只是保留了默认节拍。接真实消费者时记得把

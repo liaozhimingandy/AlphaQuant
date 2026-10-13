@@ -104,12 +104,13 @@ SCHEDULE_STARTUP = "startup"      # 引擎启动时跑一次
 SCHEDULE_INTERVAL = "interval"    # 每 N 小时
 SCHEDULE_DAILY = "daily"          # 每天 HH:MM
 SCHEDULE_WEEKLY = "weekly"        # 每周某天 HH:MM
+SCHEDULE_MONTHLY = "monthly"      # 每月某日 HH:MM
 SCHEDULE_CRON = "cron"            # cron 表达式
 SCHEDULE_ONCE = "once"            # 指定时刻跑一次
 
 SCHEDULE_KINDS: tuple = (
     SCHEDULE_STARTUP, SCHEDULE_INTERVAL, SCHEDULE_DAILY,
-    SCHEDULE_WEEKLY, SCHEDULE_CRON, SCHEDULE_ONCE,
+    SCHEDULE_WEEKLY, SCHEDULE_MONTHLY, SCHEDULE_CRON, SCHEDULE_ONCE,
 )
 
 SCHEDULE_LABELS: Dict[str, str] = {
@@ -117,12 +118,17 @@ SCHEDULE_LABELS: Dict[str, str] = {
     SCHEDULE_INTERVAL: "每 N 小时",
     SCHEDULE_DAILY: "每天",
     SCHEDULE_WEEKLY: "每周",
+    SCHEDULE_MONTHLY: "每月",
     SCHEDULE_CRON: "Cron 表达式",
     SCHEDULE_ONCE: "指定时刻一次",
 }
 
 #: 间隔周期的最小粒度（小时）。见模块 docstring「六种周期」。
 MIN_INTERVAL_HOURS: int = 1
+
+#: ``day_of_month`` 的取值上限。封顶 28：29/30/31 在小月不存在，
+#: 允许填的话"每月 31 号"会变成"有大月的月份才跑"，行为难以预期。
+MAX_DAY_OF_MONTH: int = 28
 
 #: 星期几的中文名，下标 = ``weekday``（1=周一 … 7=周日）
 WEEKDAY_NAMES: tuple = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -157,6 +163,18 @@ def _parse_hhmm(value: Any, default: str = "03:10") -> "tuple":
     return _parse_hhmm(default, "03:10")
 
 
+def _next_monthly(base: datetime, dom: int, hour: int, minute: int) -> datetime:
+    """下一个月的 ``dom`` 日 ``HH:MM``。
+
+    ``datetime.replace`` 一次替换全部字段（year/month/day 同时生效），
+    ``dom`` 封顶 28，所以不会构造出 2 月 30 日这种不存在的日期。
+    """
+    year, month = ((base.year + 1, 1) if base.month == 12
+                   else (base.year, base.month + 1))
+    return base.replace(year=year, month=month, day=dom,
+                        hour=hour, minute=minute, second=0, microsecond=0)
+
+
 @dataclass
 class MaintenanceJob:
     """一个维护任务的定义 + 运行态。
@@ -180,6 +198,7 @@ class MaintenanceJob:
     schedule: str = SCHEDULE_DAILY
     at: str = "03:10"
     weekday: int = 1
+    day_of_month: int = 1
     interval_hours: int = 24
     cron: str = ""
     once_at: str = ""
@@ -280,14 +299,28 @@ class MaintenanceJob:
                 return target
             return None
 
-        # ---- daily / weekly ----
+        # ---- daily / weekly / monthly ----
         hour, minute = _parse_hhmm(self.at)
         target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if kind == SCHEDULE_WEEKLY:
             target += timedelta(days=self.weekday_value() - base.isoweekday())
             step = timedelta(days=7)
+        elif kind == SCHEDULE_MONTHLY:
+            dom = self.day_of_month_value()
+            target = target.replace(day=dom)
+            step = None   # 月长不定，"下一轮"不能用固定 timedelta
         else:
             step = timedelta(days=1)
+        if step is None:
+            # monthly：同一结构（已跑过/没到/宽限内/错过），只是"下一轮"
+            # 要重新算——下个月同一天，而不是加固定天数。
+            if self.last_run_at and self.last_run_at >= target.timestamp():
+                return _next_monthly(base, dom, hour, minute)
+            if target > base:
+                return target
+            if (base - target).total_seconds() <= MISS_GRACE_SECONDS:
+                return target
+            return _next_monthly(base, dom, hour, minute)
         # 这个点已经跑过 → 下一周/明天
         if self.last_run_at and self.last_run_at >= target.timestamp():
             return target + step
@@ -304,6 +337,10 @@ class MaintenanceJob:
 
     def weekday_value(self) -> int:
         return min(max(int(self.weekday or 1), 1), 7)
+
+    def day_of_month_value(self) -> int:
+        """每月几号（1-:data:`MAX_DAY_OF_MONTH`）。29-31 在小月不存在，封顶 28。"""
+        return min(max(int(self.day_of_month or 1), 1), MAX_DAY_OF_MONTH)
 
     def is_due(self, now: Optional[datetime] = None) -> bool:
         if not self.enabled:
@@ -337,6 +374,7 @@ class MaintenanceJob:
             "at": self.at,
             "weekday": self.weekday_value(),
             "weekday_label": WEEKDAY_NAMES[self.weekday_value() - 1],
+            "day_of_month": self.day_of_month_value(),
             "interval_hours": self.interval_hours_value(),
             "cron": self.cron,
             "cron_text": self.cron_expr().describe() if self.cron_expr() else "",
@@ -383,6 +421,7 @@ class MaintenanceJob:
             schedule=schedule,
             at=str(raw.get("at") or default.at),
             weekday=int(raw.get("weekday") or default.weekday),
+            day_of_month=int(raw.get("day_of_month") or default.day_of_month),
             interval_hours=int(hours or MIN_INTERVAL_HOURS),
             cron=str(raw.get("cron") or default.cron),
             once_at=str(raw.get("once_at") or default.once_at),
@@ -448,6 +487,19 @@ DEFAULT_JOBS: Dict[str, MaintenanceJob] = {
         schedule=SCHEDULE_STARTUP,
         params={},
         description="引擎启动时校验日志目录、数据目录与数据库可用性（只读，不删任何东西）",
+    ),
+    "dead_history": MaintenanceJob(
+        name="dead_history",
+        task_type=TaskType.MAINTENANCE_DEAD_HISTORY,
+        label="死信历史清理",
+        enabled=True,
+        schedule="daily",
+        at="04:10",
+        # apply 默认 True：它清的**只是已处置**的死信处置记录（数据库行，
+        # 不是文件），未处置的一条不动 —— 那是排障依据。
+        # 这类清理"只报告不删"没有意义，报告一个数量谁也用不上。
+        params={"retention_days": 30, "keep": 200, "apply": True},
+        description="清理已处置超过保留期的死信处置历史（未处置的不动）；对照 Rhapsody 的通知事件历史清理",
     ),
 }
 
@@ -521,6 +573,7 @@ class MaintenancePlanner:
                         "schedule": j.kind,
                         "at": j.at,
                         "weekday": j.weekday_value(),
+                        "day_of_month": j.day_of_month_value(),
                         "interval_hours": j.interval_hours_value(),
                         "cron": j.cron,
                         "once_at": j.once_at,
@@ -729,8 +782,10 @@ __all__ = [
     "SCHEDULE_INTERVAL",
     "SCHEDULE_DAILY",
     "SCHEDULE_WEEKLY",
+    "SCHEDULE_MONTHLY",
     "SCHEDULE_CRON",
     "SCHEDULE_ONCE",
     "MIN_INTERVAL_HOURS",
+    "MAX_DAY_OF_MONTH",
     "WEEKDAY_NAMES",
 ]

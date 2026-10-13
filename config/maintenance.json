@@ -8,12 +8,13 @@
       "schedule": "daily",
       "at": "03:10",
       "weekday": 1,
+      "day_of_month": 1,
       "interval_hours": 24,
       "cron": "",
       "once_at": "",
       "params": {
-        "retention_days": 7,
-        "apply": false
+        "apply": false,
+        "retention_hours": 168
       },
       "description": "扫描并清理超过保留天数的日志文件；未勾选『真的删除』时只列出清单"
     },
@@ -24,12 +25,13 @@
       "schedule": "daily",
       "at": "03:40",
       "weekday": 1,
+      "day_of_month": 1,
       "interval_hours": 24,
       "cron": "",
       "once_at": "",
       "params": {
-        "before_days": 30,
-        "apply": false
+        "apply": false,
+        "before_hours": 720
       },
       "description": "把超过天数的运行快照移入 archive/；默认关闭，需先确认归档目标"
     },
@@ -40,11 +42,30 @@
       "schedule": "startup",
       "at": "03:10",
       "weekday": 1,
+      "day_of_month": 1,
       "interval_hours": 1,
       "cron": "",
       "once_at": "",
       "params": {},
       "description": "引擎启动时校验日志目录、数据目录与数据库可用性（只读，不删任何东西）"
+    },
+    "dead_history": {
+      "task_type": "maintenance.dead_history",
+      "label": "死信历史清理",
+      "enabled": true,
+      "schedule": "daily",
+      "at": "04:10",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "cron": "",
+      "once_at": "",
+      "params": {
+        "keep": "200",
+        "apply": true,
+        "retention_hours": 720
+      },
+      "description": "清理已处置超过保留期的死信处置历史（未处置的不动）；对照 Rhapsody 的通知事件历史清理"
     }
   }
 }

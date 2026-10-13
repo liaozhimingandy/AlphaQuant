@@ -460,8 +460,10 @@ class BacktestViewsMixin:
                 "dispatched": "scheduler",
                 "task_id": task_id,
                 "reason": reason,
-                # 面板轮询用 task_id 查任务状态；作业号要等任务真正开跑才有
-                "job": None,
+                # 注意：不给 "job" 字段。之前返回 "job": None，
+                # 旧版前端无条件读 r.job.job_id，一提交就是
+                # "Cannot read properties of null (reading 'job_id')"。
+                # 缺字段还能用 in 探测，null 会在最意想不到的地方炸。
             }
 
         job = self.backtests.submit(params, executor=self._run_backtest_in_thread)

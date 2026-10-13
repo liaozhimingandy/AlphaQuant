@@ -58,6 +58,7 @@ from app.engine.context import RunMode
 from app.runtime.events import EventType, StandardEvents
 from app.runtime.events.schema import EngineEvent
 from app.runtime.events.types import TaskType
+from app.runtime.events.store import EventStore
 from app.runtime.maintenance import TICK_SECONDS, MaintenancePlanner
 from app.runtime.scheduling import (
     CapabilityRouter,
@@ -69,6 +70,10 @@ from app.runtime.tasking.store import TaskStore
 from app.runtime.utils import async_sleep
 from app.runtime.workers import HandlerRegistry, PoolManager
 from app.runtime.workers.handlers import register_default_handlers
+#: 默认节拍事件的间隔（秒）。必须**与事件名一致**：
+#: 事件名叫 TIMER_3MIN 却 5 秒一拍，任何人看到"timer_3min 几秒一次"
+#: 都会怀疑自己看错了，而这种怀疑排查一遍要半小时。
+TIMER_3MIN_SECONDS: float = 180.0
 
 
 class SchedulerComponent(SchedulerBase):
@@ -149,7 +154,12 @@ class SchedulerComponent(SchedulerBase):
         self._lock = threading.RLock()
 
         # ---- 定时器（兼容旧节拍） ----
-        self._timers: Dict[str, LoopingCall] = {}
+        # 值从 LoopingCall 改成 (LoopingCall, 间隔)：事件指标里看到节拍事件
+        # 时要能答"这是谁发的、多久一次"，光有 LoopingCall 拿不到间隔。
+        self._timers: Dict[str, Any] = {}
+        self._timer_seq: Dict[str, int] = {}
+        #: 事件流水账（Outbox）。接上之后事件才会落盘，链路追踪才有据可查。
+        self.event_store: Optional[Any] = None
         self._is_stopping = False
         self._pending_retries: set = set()
         self._dispatch_call: Optional[Any] = None
@@ -212,6 +222,36 @@ class SchedulerComponent(SchedulerBase):
 
     # ============================================================
     # 生命周期
+    # ---------------- 事件流水账（Outbox） ----------------
+    def _bind_event_store(self) -> None:
+        """接上事件流水账，让事件也能活过重启。
+
+        放在 on_start 而不是 __init__：建库要碰磁盘，
+        而"只想构造一个调度器看看规则"这种场景不该有副作用。
+        """
+        try:
+            store = EventStore()
+            if not store.open():
+                return
+            self.event_store = store
+            if self.event_bus is not None:
+                self.event_bus.bind_store(
+                    store, run_id=str(getattr(self.context, "run_id", "") or "")
+                )
+            logger.info(f"事件流水账已启用 → {store.path}")
+        except Exception as exc:
+            # 落盘失败不能让调度器起不来：它只是"留个底"的能力
+            logger.warning(f"事件流水账未启用（事件仍只在内存广播）: {exc}")
+
+    def _flush_event_store(self) -> None:
+        store = getattr(self, "event_store", None)
+        if store is None:
+            return
+        try:
+            store.close()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"关闭事件流水账异常: {exc}")
+
     # ============================================================
     def on_initialize(self) -> None:
         cfg = self.component_config or {}
@@ -244,6 +284,7 @@ class SchedulerComponent(SchedulerBase):
     def on_start(self) -> None:
         self._running = True
         self._accept_new = True
+        self._bind_event_store()
         logger.info(
             f"调度组件已启动 | 模式: {self.run_mode.value} "
             f"| 执行池: {','.join(self.pools.names())}"
@@ -258,8 +299,11 @@ class SchedulerComponent(SchedulerBase):
         # 2.5) 引擎要停了 → 立刻停止建新任务
         self.subscribe_event(EventType.ENGINE_STOPPING, self._on_engine_stopping)
         # 3) 默认节拍（沿用原定时器组件行为，供存量订阅者使用）
+        # 间隔曾经是 5 秒而事件名写着 3min —— 名实不符的代价是
+        # 面板上看到"timer_3min 几秒一次"却查不出是谁、多久一次。
+        # 现在间隔与名字对齐，且载荷里带 timer_id/interval/seq。
         self.start_timer(
-            interval=5,
+            interval=TIMER_3MIN_SECONDS,
             event_name=StandardEvents.TIMER_3MIN,
             timer_id="default_3min",
         )
@@ -396,13 +440,17 @@ class SchedulerComponent(SchedulerBase):
         """
         self._running = False
 
-        for timer_id, lc in self._timers.items():
+        for timer_id, entry in self._timers.items():
+            lc = entry[0] if isinstance(entry, tuple) else entry
             try:
                 if lc.running:
                     lc.stop()
             except Exception as exc:
                 logger.error(f"停止定时器 {timer_id} 异常: {exc}")
         self._timers.clear()
+        # 停机必须 flush：事件流水账是后台 1s 合并写的，
+        # 不 flush 会丢掉最后一批 —— 而最后一批往往正是出事的那批。
+        self._flush_event_store()
 
         # 取消尚未触发的重试，避免停止后继续往队列里投任务
         for later in list(self._pending_retries):
@@ -891,14 +939,15 @@ class SchedulerComponent(SchedulerBase):
         tid = timer_id or f"{event_name}@{interval}"
         if tid in self._timers:
             return tid
-        lc = LoopingCall(self._publish_timer_event, event_name, event_data or {})
+        lc = LoopingCall(self._publish_timer_event, event_name, event_data or {}, tid)
         lc.start(max(0.01, float(interval)), now=run_immediately)
-        self._timers[tid] = lc
+        self._timers[tid] = (lc, float(interval))
         logger.info(f"定时器[{tid}]已启动 → {interval}s/次")
         return tid
 
     def stop_timer(self, timer_id: str) -> bool:
-        lc = self._timers.pop(timer_id, None)
+        entry = self._timers.pop(timer_id, None)
+        lc = entry[0] if isinstance(entry, tuple) else entry
         if lc is None:
             return False
         try:
@@ -908,12 +957,47 @@ class SchedulerComponent(SchedulerBase):
             logger.error(f"停止定时器 {timer_id} 异常: {exc}")
         return True
 
-    def _publish_timer_event(self, event_name: str, event_data: dict) -> None:
+    def timers(self) -> "List[Dict[str, Any]]":
+        """已注册的定时器清单（面板可见 = 不用猜"谁在每秒发事件"）。"""
+        out = []
+        for tid, entry in self._timers.items():
+            lc, interval = entry if isinstance(entry, tuple) else (entry, 0.0)
+            out.append({
+                "timer_id": tid,
+                "interval": interval,
+                "running": bool(getattr(lc, "running", False)),
+            })
+        return out
+
+    def _publish_timer_event(
+        self, event_name: str, event_data: dict, timer_id: str = ""
+    ) -> None:
+        """发一次节拍事件。
+
+        载荷里带上 ``timer_id`` / ``interval`` / ``seq``：
+        事件指标里看到 ``timer_3min`` 每秒在涨时，
+        光看事件名根本答不了"这是谁发的、多久一次、该不该这么频繁"。
+        带上这三样之后，面板上就能直接看出
+        "event_name 写着 3min、实际 5 秒一拍"这种名实不符。
+        """
         try:
-            if self.event_bus is not None:
-                self.event_bus.publish(
-                    event_name=event_name, context=event_data, source="timer"
-                )
+            if self.event_bus is None:
+                return
+            entry = self._timers.get(timer_id)
+            interval = entry[1] if isinstance(entry, tuple) else 0.0
+            seq = self._timer_seq.get(timer_id, 0) + 1
+            self._timer_seq[timer_id] = seq
+            payload = dict(event_data or {})
+            payload.update({
+                "timer_id": timer_id or "",
+                "interval": interval,
+                "interval_seconds": interval,
+                "seq": seq,
+                "source_kind": "timer",
+            })
+            self.event_bus.publish(
+                event_name=event_name, context=payload, source="timer"
+            )
         except Exception as exc:
             logger.error(f"定时器事件执行失败: {exc}", exc_info=True)
 

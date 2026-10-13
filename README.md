@@ -73,6 +73,7 @@ python main.py ctl runtime tasks               # 任务明细：已建任务 + �
 python main.py ctl runtime tasks --status failed --type market.kline.collect
 python main.py ctl runtime task <task_id>      # 单条：参数 / 结果 / 错误 / 耗时
 python main.py ctl runtime events              # 事件指标：每种事件发布数/订阅者/异常
+python main.py ctl runtime tasks --status failed   # 只看失败任务的明细
 python main.py ctl runtime dispatch --task-type factor.calculate --params '{"symbols":["000001"]}'
 python main.py ctl runtime rule off kline_updated_factor   # 临时关掉一条规则
 
@@ -149,10 +150,19 @@ python main.py ctl log level INFO --no-persist # 只本次生效，不写进配�
   参数、结果与错误原文 —— 汇总数字说不清"这 1200 条成功分别是哪些"
 - **事件指标**：每种事件的发布数、触达数、订阅者数、处理异常数与最近时间；
   「订阅者 = 0 而发布数在涨」意味着链路在跑起来之后断了
-- **维护计划**：日志清理 / 快照归档 / 运行校验 的开关、周期、参数与「立即执行」。
-  周期六种：**引擎启动时 / 每 N 小时 / 每天 / 每周几 / Cron 表达式 / 指定时刻一次**，
-  切换周期时只留下该周期用得到的输入框。
-  清理与归档**默认只报告不删**，要真的删必须显式勾选
+- **链路追踪**：事件发布即落盘（`output/runtime/events.db`），
+  按 `trace_id` 查一条链上的**全部事件 + 产生的任务**，拼成时间线；
+  事件可**重放**（新事件 ID、保留原链路、留痕），幂等靠任务侧 `dedup_key` 保证。
+  心跳与高频事件自动降采样，被降采样的类型会在页面上标出来 ——
+  它往往同时是"发了没人接"的那类
+- **维护计划**：日志清理 / 快照归档 / 运行校验 / 死信历史清理 的开关、周期、
+  参数与「立即执行」。周期七种：**引擎启动时 / 每 N 小时 / 每天 / 每周几 /
+  每月几号 / Cron 表达式 / 指定时刻一次**，切换周期时只留下该周期用得到的输入框。
+  保留期按**小时/天**切换（内部统一存小时）。
+  日志清理与归档**默认只报告不删**，要真的删必须显式勾选；
+  死信历史清理只动已处置的记录
+- **任务统计卡可点击下钻**：「已建任务」「成功/失败」卡点击直达任务明细，
+  死信卡直达错误队列
 - **日志等级**：控制台级 / 文件级 / 重复日志节流窗口，可勾"重启后仍生效"
 
 面板读的是**引擎内存里的真状态**（不是二手副本），控制指令直接进 `ControlCenter`，

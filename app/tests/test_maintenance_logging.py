@@ -136,9 +136,19 @@ class MaintenancePlannerTest(unittest.TestCase):
         )
 
     def test_defaults_are_non_destructive(self):
-        """默认配置一个"会删东西"的开关都不能有。"""
+        """会碰文件的任务（日志清理/归档）默认 apply 必须是 False。
+
+        dead_history 是唯一例外：它清的不是文件，是死信**处置历史**里
+        已处置的数据库行（未处置的一条不动，且有 keep 条下限），
+        "只报告不删"对一个计数报表没有任何价值。
+        """
         for job in self.planner.jobs():
-            if job.params.get("apply") is not None:
+            if job.params.get("apply") is None:
+                continue
+            if job.name == "dead_history":
+                self.assertTrue(job.params["apply"],
+                                "dead_history 默认就该清已处置的老记录")
+            else:
                 self.assertFalse(
                     job.params["apply"],
                     f"{job.name} 默认就开了 apply —— 定时任务自动删文件是运维事故高发区",
@@ -214,7 +224,7 @@ class MaintenancePlannerTest(unittest.TestCase):
             json.dump({"jobs": {"drop_everything": {"enabled": True}}}, fh)
         reloaded = MaintenancePlanner(publish=lambda *a, **k: None, path=self.path)
         self.assertNotIn("drop_everything", reloaded._jobs)
-        self.assertEqual(len(reloaded._jobs), 3)
+        self.assertEqual(len(reloaded._jobs), len(DEFAULT_JOBS))
 
     def test_invalid_schedule_falls_back_to_default(self):
         # "weekly" 现在是合法周期了，用一个真正不认识的值。

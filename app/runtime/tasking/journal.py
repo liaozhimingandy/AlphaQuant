@@ -581,6 +581,38 @@ class TaskJournal:
                 return 0
 
 
+    def count_prunable_dead_history(
+        self, older_than_days: float = 90.0, keep: int = 200
+    ) -> int:
+        """:meth:`prune_dead_history` 的只读版：会清掉多少条，先报个数。
+
+        报告模式（``apply=False``）不能靠先删再数 —— 那就不叫只报告了。
+        条件与 prune 完全一致，两处改一处必须同步改另一处。
+        """
+        if not self.enabled or not self.open():
+            return 0
+        cutoff = time.time() - max(0.0, older_than_days) * 86400.0
+        cut_iso = datetime.fromtimestamp(cutoff).isoformat(timespec="seconds")
+        with self._lock:
+            conn = self._conn
+            if conn is None:
+                return 0
+            try:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM dead_letter_log WHERE resolved_at IS NOT NULL "
+                    "AND resolved_at <> '' AND resolved_at < ? "
+                    "AND id NOT IN ("
+                    "  SELECT id FROM dead_letter_log ORDER BY id DESC LIMIT ?)",
+                    (cut_iso, int(keep)),
+                )
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+            except Exception as exc:
+                self.stats["last_error"] = str(exc)
+                logger.error(f"统计可清理死信历史失败: {exc}")
+                return 0
+
+
 def task_from_row(row: Dict[str, Any], task_cls: Any) -> Any:
     """把一行还原成 :class:`EngineTask`。
 

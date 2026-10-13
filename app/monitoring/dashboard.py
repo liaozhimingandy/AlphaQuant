@@ -12,22 +12,35 @@
 """
 from __future__ import annotations
 
-import functools
+import threading
 from pathlib import Path
 
 # 静态资源目录：monitoring/static/
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DASHBOARD_FILE = STATIC_DIR / "dashboard.html"
 
+#: (mtime, html) 缓存。按文件修改时间失效 —— 以前用 lru_cache，
+#: 结果是改一行 HTML 必须重启服务才能看到，排障时改个提示文案
+#: 都要走一遍完整重启。按 mtime 失效后，刷新页面就是最新的。
+_cache_lock = threading.Lock()
+_cache: tuple[float, str] | None = None
 
-@functools.lru_cache(maxsize=1)
+
 def load_dashboard_html() -> str:
-    """读取面板 HTML（带缓存）。
+    """读取面板 HTML（按文件 mtime 缓存）。
 
     面板刻意做成单文件自包含 —— 不引 CDN，图表用 canvas 手绘。
     因此在离线/内网环境也能直接打开，代价是不做代码分割。
     """
-    return DASHBOARD_FILE.read_text(encoding="utf-8")
+    global _cache
+    mtime = DASHBOARD_FILE.stat().st_mtime
+    with _cache_lock:
+        if _cache is not None and _cache[0] == mtime:
+            return _cache[1]
+    html = DASHBOARD_FILE.read_text(encoding="utf-8")
+    with _cache_lock:
+        _cache = (mtime, html)
+    return html
 
 
 def dashboard_html() -> str:

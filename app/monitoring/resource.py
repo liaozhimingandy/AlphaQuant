@@ -149,6 +149,13 @@ class MonitorResource(Resource):
                 limit=int(self._q(request, "limit", 0) or 0),
                 event_type=self._q(request, "type", ""),
             ))
+        if head == "trace":
+            # 链路追踪：?trace_id=xxx 或 ?event_id=xxx（没有 trace 时按事件反查）
+            return self._json(request, c.control.trace_view(
+                trace_id=self._q(request, "trace_id", ""),
+                event_id=self._q(request, "event_id", ""),
+                limit=int(self._q(request, "limit", 30) or 30),
+            ))
         if head == "logging":
             # 当前生效的日志级别（面板据此显示"我现在是什么档位"）
             return self._json(request, c.control.logging_view())
@@ -566,6 +573,12 @@ class MonitorResource(Resource):
         if seg[1] == "runtime" and len(seg) >= 4 and seg[2] == "dead" and seg[3] == "discard":
             return self._json(request, c.control.dead_discard(
                 str(body.get("task_id") or "")))
+
+        # POST /api/events/replay —— 重放一条历史事件
+        #   body: {"event_id": "..."}
+        if seg[1] == "events" and len(seg) >= 3 and seg[2] == "replay":
+            return self._json(request, c.control.replay_event(
+                str(body.get("event_id") or ""), by="panel"))
 
         # POST /api/preflight/run —— 当场再跑一遍启动预检
         if seg[1] == "preflight" and len(seg) >= 3 and seg[2] == "run":

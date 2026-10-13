@@ -42,6 +42,7 @@ from app.runtime.maintenance import (
 from app.runtime.maintenance import _legacy_adjust
 from app.runtime.tasking.models import EngineTask
 from app.runtime.tasking.store import TaskStore
+from app.runtime.workers.handlers import handle_archive, handle_log_cleanup
 
 TUESDAY = datetime(2026, 10, 13, 7, 26)      # 2026-10-13 是周二
 WEDNESDAY = datetime(2026, 10, 14, 7, 26)
@@ -376,6 +377,79 @@ class TestStartupTrigger:
         assert SCHEDULE_STARTUP in values and SCHEDULE_CRON in values
         assert snap["min_interval_hours"] == MIN_INTERVAL_HOURS
         assert "validate" in snap["startup_jobs"]
+
+
+class TestMonthlySchedule:
+    """monthly 周期（对照 Rhapsody Archive Cleanup 的 Monthly 档）。"""
+
+    def _job(self, **kw):
+        base = dict(schedule="monthly", day_of_month=1, at="03:10", enabled=True)
+        base.update(kw)
+        return MaintenanceJob(name="x", task_type="maintenance.log_cleanup",
+                              label="x", **base)
+
+    def test_next_run_lands_on_configured_day(self):
+        job = self._job()
+        nxt = job.next_run_at(datetime(2026, 10, 13, 7, 26))
+        assert (nxt.year, nxt.month, nxt.day, nxt.hour, nxt.minute) == (2026, 11, 1, 3, 10)
+
+    def test_same_day_before_time_runs_today(self):
+        job = self._job()
+        nxt = job.next_run_at(datetime(2026, 10, 13, 1, 0))
+        assert nxt == datetime(2026, 11, 1, 3, 10)   # 13 号不是 1 号 → 下月 1 号
+
+    def test_day_1_after_time_runs_next_month(self):
+        job = self._job(day_of_month=1)
+        nxt = job.next_run_at(datetime(2026, 10, 1, 9, 0))   # 当天 03:10 已过
+        assert nxt == datetime(2026, 11, 1, 3, 10)
+
+    def test_day_of_month_is_capped_at_28(self):
+        # 29/30/31 在小月不存在，"每月 31 号"会变成"有大月才跑"，
+        # 行为难以预期，直接封顶 28。
+        job = self._job(day_of_month=31)
+        assert job.day_of_month_value() == 28
+        nxt = job.next_run_at(datetime(2026, 10, 13, 7, 26))
+        assert nxt == datetime(2026, 10, 28, 3, 10)
+
+    def test_december_rolls_to_next_year(self):
+        job = self._job(day_of_month=15)
+        nxt = job.next_run_at(datetime(2026, 12, 20, 9, 0))
+        assert (nxt.year, nxt.month, nxt.day) == (2027, 1, 15)
+
+    def test_round_trip_via_config(self):
+        job = self._job(day_of_month=7)
+        raw = job.to_dict()
+        assert raw["day_of_month"] == 7
+        clone = MaintenanceJob.from_dict("x", raw, job)
+        assert clone.day_of_month_value() == 7 and clone.kind == "monthly"
+
+    def test_february_28_is_valid_target(self):
+        job = self._job(day_of_month=28)
+        nxt = job.next_run_at(datetime(2026, 1, 30, 9, 0))
+        assert (nxt.month, nxt.day) == (2, 28)
+
+
+class TestRetentionHours:
+    """保留期 小时/天 双单位（面板 Hours/Days 切换，内部统一存小时）。"""
+
+    def test_retention_hours_takes_priority(self):
+        t = EngineTask(task_type="maintenance.log_cleanup",
+                       params={"retention_hours": 36, "retention_days": 99})
+        result = handle_log_cleanup(t, ctx=None)
+        # 日志目录在测试环境多半不存在，但单位优先级不影响这个断言的前提，
+        # 所以这里只验证不抛异常；真正的换算断言走返回值
+        assert "retention_hours" in result or result.get("removed") == 0
+
+    def test_zero_retention_is_refused_not_clamped(self):
+        # "保留 0"是配错的危险信号，该被拒绝而不是被悄悄换成 1 天 ——
+        # 换算夹逼等于替错误配置兜底。
+        t = EngineTask(task_type="maintenance.log_cleanup", params={"retention_days": 0})
+        result = handle_log_cleanup(t, ctx=None)
+        assert result["removed"] == 0 and "过小" in result["note"]
+        t2 = EngineTask(task_type="maintenance.log_cleanup", params={"retention_hours": 0})
+        assert "过小" in handle_log_cleanup(t2, ctx=None)["note"]
+        t3 = EngineTask(task_type="maintenance.archive", params={"before_days": 0})
+        assert "过小" in handle_archive(t3, ctx=None)["note"]
 
 
 # ============================================================

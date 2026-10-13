@@ -17,15 +17,78 @@
            --warn-bg:#2a2310; --warn-fg:#f0c674; --warn-bd:#4a3d18; }
   }
   *{box-sizing:border-box}
+  /* 布局参考 Rhapsody Engine 的监控台：顶部品牌横幅 + 左侧分组导航 + 主内容区。
+     之前是横向 tabs + 单列长页，运行时页十几个 section 一滚到底，
+     "任务明细"藏在第 4 屏，用户只看得到最上面的任务总数。 */
   body{margin:0;background:var(--bg);color:var(--text);
-       font:13px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",Roboto,sans-serif}
-  header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
-         padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:var(--shadow);flex-wrap:wrap}
-  header h1{font-size:15px;margin:0;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block}
-  .meta{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px}
-  .meta b{color:var(--text);font-weight:600}
-  .spacer{flex:1}
+       font:13px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",Roboto,sans-serif;
+       display:grid;grid-template-columns:208px 1fr;grid-template-rows:auto 1fr;
+       height:100vh;overflow:hidden}
+  /* ---- 顶部品牌横幅 ---- */
+  header.topbar{grid-column:1/-1;position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
+         padding:9px 18px;background:linear-gradient(90deg,#1e4fa3,#2563eb);
+         border-bottom:1px solid rgba(0,0,0,.2);flex-wrap:wrap;color:#fff}
+  .topbar h1{font-size:15px;margin:0;letter-spacing:.4px;display:flex;align-items:center;gap:9px;
+            color:#fff;font-weight:650}
+  header h1 .logo{width:22px;height:22px;border-radius:5px;background:rgba(255,255,255,.18);
+            display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+  .dot{width:8px;height:8px;border-radius:50%;background:#7dd3fc;display:inline-block;
+       box-shadow:0 0 6px rgba(125,211,252,.8)}
+  .topbar .meta{color:rgba(255,255,255,.75)}
+  .topbar .meta b{color:#fff;font-weight:600}
+  .topbar .pill{border-color:transparent}
+  .topbar select{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.3);color:#fff}
+  .topbar select option{color:#1f2937;background:#fff}
+  .topbar button{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.35);color:#fff}
+  .topbar button:hover{background:rgba(255,255,255,.22);color:#fff;border-color:#fff}
+  .topbar button.primary{background:#fff;border-color:#fff;color:#1e4fa3}
+  .topbar button.primary:hover{opacity:.92;color:#1e4fa3}
+  .topbar button.danger{background:rgba(220,38,38,.85);border-color:#fca5a5;color:#fff}
+  .topbar button.danger:hover{background:#dc2626;color:#fff}
+  .topbar .seg{border-color:rgba(255,255,255,.35)}
+  .topbar .seg button{border:0;border-radius:0}
+  .topbar .seg button.on{background:#fff;color:#1e4fa3}
+  #clock{font-variant-numeric:tabular-nums;color:rgba(255,255,255,.85);font-size:12px}
+  /* ---- 左侧导航 ---- */
+  aside.sidebar{overflow-y:auto;border-right:1px solid var(--line);background:var(--panel);
+                padding:10px 0 20px;display:flex;flex-direction:column;gap:2px}
+  .nav-title{padding:12px 16px 4px;font-size:10.5px;font-weight:700;letter-spacing:1.2px;
+             color:var(--muted);text-transform:uppercase}
+  .nav-item{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+            background:transparent;border:0;border-radius:0;padding:7px 16px;font-size:12.5px;
+            color:var(--text);cursor:pointer;border-left:3px solid transparent}
+  .nav-item:hover{background:rgba(37,99,235,.07);color:var(--accent)}
+  .nav-item.on{background:rgba(37,99,235,.10);border-left-color:var(--accent);
+               color:var(--accent);font-weight:600}
+  .nav-badge{margin-left:auto;background:var(--bad);color:#fff;border-radius:999px;
+             font-size:10px;padding:0 6px;line-height:15px;font-weight:700}
+  .nav-badge.hidden{display:none}
+  main{overflow-y:auto;padding:16px 20px 60px;display:flex;flex-direction:column;gap:16px}
+  main.hidden{display:none}
+  /* ---- 状态过滤 chips（Rhapsody 风格：Stopped(5) / Running(465) ...）---- */
+  .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);
+        border-radius:999px;padding:3px 12px;font-size:12px;background:var(--panel);
+        cursor:pointer;color:var(--text)}
+  .chip:hover{border-color:var(--accent);color:var(--accent)}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .chip .cnt{font-variant-numeric:tabular-nums;font-weight:700}
+  .chip.err .cnt{color:var(--bad)} .chip.err.on .cnt{color:#fff}
+  .chip.ok .cnt{color:var(--ok)} .chip.ok.on .cnt{color:#fff}
+  /* ---- 链路追踪时间线 ---- */
+  .trace-tl{display:flex;flex-direction:column;gap:0;padding:4px 0}
+  .trace-tl .step{display:flex;gap:10px;align-items:flex-start;padding:6px 0;position:relative}
+  .trace-tl .step::before{content:"";position:absolute;left:5px;top:18px;bottom:-6px;
+    width:2px;background:var(--line)}
+  .trace-tl .step:last-child::before{display:none}
+  .trace-tl .dot{width:12px;height:12px;border-radius:50%;flex:0 0 12px;margin-top:3px;
+    background:var(--accent);border:2px solid var(--panel);box-shadow:0 0 0 2px var(--line)}
+  .trace-tl .step.task .dot{background:var(--ok)}
+  .trace-tl .step.dead .dot{background:var(--bad)}
+  .trace-tl .step.err .dot{background:var(--warn)}
+  .trace-tl .at{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .trace-tl .nm{font-weight:600}
+  .trace-tl .meta{color:var(--muted);font-size:11px}
   button{cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--text);
          border-radius:6px;padding:5px 11px;font-size:12px;transition:.15s}
   button:hover{border-color:var(--accent);color:var(--accent)}
@@ -114,13 +177,6 @@
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
   .seg button{border:0;border-radius:0}
   .seg button.on{background:var(--accent);color:#fff}
-  .tabs{display:flex;gap:4px;padding:8px 18px 0;border-bottom:1px solid var(--line);
-        background:var(--panel);position:sticky;top:0;z-index:5}
-  .tabs button{background:transparent;border:1px solid transparent;border-bottom:none;
-        border-radius:8px 8px 0 0;padding:8px 18px;cursor:pointer;color:var(--muted);
-        font-size:13px;font-weight:600}
-  .tabs button:hover{color:var(--fg)}
-  .tabs button.on{background:var(--bg);border-color:var(--line);color:var(--accent)}
   label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--muted)}
   label input,label select{font-size:12px}
   main.hidden,#page-backtest.hidden,#page-live.hidden,#page-pool.hidden,
@@ -131,8 +187,8 @@
 </style>
 </head>
 <body>
-<header>
-  <h1><span class="dot"></span>AlphaQuant 运行监控</h1>
+<header class="topbar">
+  <h1><span class="logo">AQ</span>AlphaQuant 运行监控</h1>
   <span id="status" class="pill off">-</span>
   <div class="meta">
     <span>运行 <b id="run-id">-</b></span>
@@ -141,6 +197,7 @@
     <span>面板 <b id="addr">-</b></span>
     <span>快照 <b id="snap-info">-</b></span>
   </div>
+  <span id="clock"></span>
   <div class="spacer"></div>
   <select id="snap-mode" title="快照策略（本页刷新与快照落盘是两件事）">
     <option value="on_event">快照: 有操作才存</option>
@@ -158,14 +215,27 @@
   <button id="btn-stop" class="danger">停止引擎</button>
 </header>
 
-<nav class="tabs" id="tabs">
-  <button data-page="live" class="on">实盘监控</button>
-  <button data-page="factor">因子实验室</button>
-  <button data-page="pool">选股 · 股票池</button>
-  <button data-page="strategy">策略库</button>
-  <button data-page="backtest">回测监控</button>
-  <button data-page="runtime">运行时</button>
-</nav>
+<!-- 左侧分组导航（对照 Rhapsody：Monitoring / Find Messages / Notifications 分组，
+     错误队列带数量角标）。运行时页拆成 6 个子页后，
+     "任务明细"不再藏在第 4 屏。 -->
+<aside class="sidebar" id="sidebar">
+  <div class="nav-title">交易</div>
+  <button class="nav-item on" data-page="live">实盘监控</button>
+  <button class="nav-item" data-page="backtest">回测监控</button>
+  <div class="nav-title">研究</div>
+  <button class="nav-item" data-page="factor">因子实验室</button>
+  <button class="nav-item" data-page="pool">选股 · 股票池</button>
+  <button class="nav-item" data-page="strategy">策略库</button>
+  <div class="nav-title">运维</div>
+  <button class="nav-item" data-page="runtime">系统监控</button>
+  <button class="nav-item" data-page="tasks">任务明细</button>
+  <button class="nav-item" data-page="dead">错误队列
+    <span class="nav-badge hidden" id="nav-dead-badge"></span></button>
+  <button class="nav-item" data-page="events">事件指标</button>
+  <button class="nav-item" data-page="trace">链路追踪</button>
+  <button class="nav-item" data-page="sched">调度与路由</button>
+  <button class="nav-item" data-page="ops">维护 · 持久化</button>
+</aside>
 
 <main id="page-live">
   <section id="kpis" class="kpis"></section>
@@ -735,7 +805,7 @@
     </div></div>
   </section>
 
-  <section class="panel">
+  <section class="panel" id="rt-sec-running">
     <h2>在跑的任务 <span class="muted" id="rt-running-hint"></span></h2>
     <div class="body"><div class="table-wrap">
       <table>
@@ -751,7 +821,21 @@
     有了队列与状态机之后它变成"读一张表"。</p></div>
   </section>
 
-  <section class="panel">
+</main>
+<main id="page-tasks" class="hidden">
+<section class="panel" id="rt-sec-ledger-wrap" style="border:0;box-shadow:none;background:transparent">
+  <div class="chips" id="rt-ledger-chips" style="margin-bottom:2px">
+    <button class="chip on" data-ls="">全部 <span class="cnt">-</span></button>
+    <button class="chip ok" data-ls="success">成功 <span class="cnt">-</span></button>
+    <button class="chip err" data-ls="failed">失败 <span class="cnt">-</span></button>
+    <button class="chip err" data-ls="dead_letter">死信 <span class="cnt">-</span></button>
+    <button class="chip" data-ls="running">执行中 <span class="cnt">-</span></button>
+    <button class="chip" data-ls="queued">排队中 <span class="cnt">-</span></button>
+    <button class="chip" data-ls="cancelled">已取消 <span class="cnt">-</span></button>
+    <span class="hint" style="margin-left:6px">点击按状态过滤，与下面下拉等效</span>
+  </div>
+</section>
+  <section class="panel" id="rt-sec-ledger">
     <h2>任务明细 <span class="muted" id="rt-ledger-hint"></span></h2>
     <div class="body">
       <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
@@ -795,7 +879,9 @@
     </div>
   </section>
 
-  <section class="panel">
+</main>
+<main id="page-events" class="hidden">
+  <section class="panel" id="rt-sec-events">
     <h2>事件指标 <span class="muted" id="rt-events-hint"></span></h2>
     <div class="body">
       <div id="rt-events-sum" class="hint"></div>
@@ -821,6 +907,90 @@
     </div>
   </section>
 
+</main>
+<main id="page-trace" class="hidden">
+  <section class="panel">
+    <h2>链路追踪 <span class="muted" id="rt-trace-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <label>链路 ID / 事件 ID<br>
+          <input id="rt-trace-id" placeholder="留空则列出最近链路" style="width:280px">
+        </label>
+        <button id="btn-rt-trace" class="primary">查询</button>
+        <button id="btn-rt-trace-refresh">刷新链路列表</button>
+        <span class="hint" id="rt-trace-msg"></span>
+      </div>
+      <p class="hint">一条链路 = 一个 <code>trace_id</code>（就是事件的
+      <code>correlation_id</code>）：从触发的那条事件，一路经过规则命中、
+      任务创建、任务执行，全部共享它。事件与任务记在两本账里
+      （<code>events.db</code> / <code>tasks.db</code>），这里靠 trace_id 对齐。
+      心跳类事件（<code>timer_3min</code> 等）按 1/30 采样落盘，
+      所以它们的链路看着稀疏是刻意的。</p>
+      <div id="rt-trace-sum" class="hint" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>时间线 <span class="muted" id="rt-trace-tl-hint"></span></h2>
+    <div class="body">
+      <div id="rt-trace-timeline" class="trace-tl">
+        <span class="muted">留空点「查询」可看最近链路，或填入链路 ID / 事件 ID</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>链路上的事件 <span class="muted" id="rt-trace-ev-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>事件</th><th>来源</th><th>订阅者</th>
+          <th>时间</th><th>载荷</th><th>操作</th>
+        </tr></thead>
+        <tbody id="rt-trace-ev-rows"><tr><td colspan="7" class="muted">—</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel">
+    <h2>链路上产生的任务 <span class="muted" id="rt-trace-task-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>状态</th><th>任务类型</th><th>任务 ID</th>
+          <th class="num">尝试</th><th>结果 / 错误</th>
+        </tr></thead>
+        <tbody id="rt-trace-task-rows"><tr><td colspan="5" class="muted">—</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel">
+    <h2>最近链路 <span class="muted" id="rt-trace-list-hint"></span></h2>
+    <div class="body"><div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>链路 ID</th><th class="num">环节</th><th>首 → 末</th>
+          <th>开始</th><th>操作</th>
+        </tr></thead>
+        <tbody id="rt-trace-list-rows"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section class="panel" id="rt-sec-replay">
+    <h2>重放记录 <span class="muted" id="rt-trace-rp-hint"></span></h2>
+    <div class="body">
+      <div id="rt-trace-replay"><span class="muted">—</span></div>
+      <p class="hint">重放会用**新的事件 ID** 再发一遍（不去重会命中旧 ID），
+      但保留原链路 ID —— 它是同一条业务上的又一次尝试，不是新业务。
+      幂等性靠下游保证：任务侧有 <code>dedup_key</code>，处理器侧该幂等。
+      <b>下单类事件不要重放。</b></p>
+    </div>
+  </section>
+</main>
+
+<main id="page-sched" class="hidden">
   <section class="panel">
     <h2>调度规则 <span class="muted" id="rt-rules-hint"></span></h2>
     <div class="body"><div class="table-wrap">
@@ -850,6 +1020,36 @@
   </section>
 
   <section class="panel">
+    <h2>手动投递任务 <span class="muted">走完整链路：队列 → 路由 → 执行池 → 处理器</span></h2>
+    <div class="body">
+      <div class="row" style="align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <label>任务类型<br><select id="rt-task-type" style="width:230px"></select></label>
+        <label>优先级<br>
+          <select id="rt-priority" style="width:110px">
+            <option value="1">CRITICAL</option>
+            <option value="3" selected>HIGH</option>
+            <option value="5">NORMAL</option>
+            <option value="7">LOW</option>
+            <option value="9">IDLE</option>
+          </select>
+        </label>
+        <label>幂等键（可选）<br><input id="rt-dedup" placeholder="留空=不去重" style="width:180px"></label>
+        <div style="flex:1;min-width:300px">
+          <label>参数 (JSON)</label>
+          <textarea id="rt-params" spellcheck="false" style="min-height:88px">{}</textarea>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btn-rt-dispatch" class="primary">投递</button>
+        <span class="hint" id="rt-dispatch-msg"></span>
+      </div>
+      <p class="hint" id="rt-dispatch-hint"></p>
+    </div>
+  </section>
+
+</main>
+<main id="page-dead" class="hidden">
+  <section class="panel" id="rt-sec-dead">
     <h2>错误队列（死信） <span class="muted" id="rt-dead-hint"></span></h2>
     <div class="body">
       <div class="table-wrap">
@@ -872,6 +1072,8 @@
     </div>
   </section>
 
+</main>
+<main id="page-ops" class="hidden">
   <section class="panel">
     <h2>任务持久化 <span class="muted" id="rt-journal-hint"></span></h2>
     <div class="body">
@@ -905,34 +1107,6 @@
   </section>
 
   <section class="panel">
-    <h2>手动投递任务 <span class="muted">走完整链路：队列 → 路由 → 执行池 → 处理器</span></h2>
-    <div class="body">
-      <div class="row" style="align-items:flex-start;gap:10px;flex-wrap:wrap">
-        <label>任务类型<br><select id="rt-task-type" style="width:230px"></select></label>
-        <label>优先级<br>
-          <select id="rt-priority" style="width:110px">
-            <option value="1">CRITICAL</option>
-            <option value="3" selected>HIGH</option>
-            <option value="5">NORMAL</option>
-            <option value="7">LOW</option>
-            <option value="9">IDLE</option>
-          </select>
-        </label>
-        <label>幂等键（可选）<br><input id="rt-dedup" placeholder="留空=不去重" style="width:180px"></label>
-        <div style="flex:1;min-width:300px">
-          <label>参数 (JSON)</label>
-          <textarea id="rt-params" spellcheck="false" style="min-height:88px">{}</textarea>
-        </div>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="btn-rt-dispatch" class="primary">投递</button>
-        <span class="hint" id="rt-dispatch-msg"></span>
-      </div>
-      <p class="hint" id="rt-dispatch-hint"></p>
-    </div>
-  </section>
-
-  <section class="panel">
     <h2>维护计划 <span class="muted" id="rt-maint-hint"></span></h2>
     <div class="body">
       <div id="rt-maint-jobs" style="display:flex;flex-direction:column;gap:12px"></div>
@@ -940,15 +1114,19 @@
         <button id="btn-rt-maint-save" class="primary">保存维护计划</button>
         <span class="hint" id="rt-maint-msg"></span>
       </div>
-      <p class="hint">周期六种：<b>引擎启动时</b>（每次启动跑一次）、<b>每 N 小时</b>
-      （最小 1 小时）、<b>每天 HH:MM</b>、<b>每周几 HH:MM</b>、
-      <b>Cron 表达式</b>（分 时 日 月 周，支持 <code>*/n</code> / <code>a-b</code> /
-      <code>a,b</code>）、<b>指定时刻一次</b>（跑完自动停用）。
+      <p class="hint">周期七种：<b>引擎启动时</b>（每次启动跑一次）、<b>每 N 小时</b>
+      （最小 1 小时）、<b>每天 HH:MM</b>、<b>每周几 HH:MM</b>、<b>每月几号 HH:MM</b>
+      （1–28 号，小月自动顺延）、<b>Cron 表达式</b>（分 时 日 月 周，支持
+      <code>*/n</code> / <code>a-b</code> / <code>a,b</code>）、
+      <b>指定时刻一次</b>（跑完自动停用）。
       切换周期时下面只留下该周期用得到的输入框。保存即生效并落盘
       （<code>config/maintenance.json</code>），重启仍在。<br>
+      <b>保留期按 小时/天 切换</b>，内部统一按小时存储。日志清理与快照归档
+      <b>默认只报告不删</b> —— "定时任务自动删文件"是运维事故高发区，
+      要真的删请显式勾选；死信历史清理只动<b>已处置</b>的记录，
+      未处置的不动。<br>
       <b>「日」与「周」是 OR 语义</b>：<code>0 3 1 * 1</code> 是"每月 1 号或每周一"，
-      不是"1 号且是周一"。<b>清理与归档默认只报告不删</b> ——
-      "定时任务自动删文件"是运维事故高发区，要真的删请显式勾选。</p>
+      不是"1 号且是周一"。</p>
     </div>
   </section>
 
@@ -1419,6 +1597,33 @@
     requestAnimationFrame(function(){ drawChart($('d-chart'), d.equity_curve||[]); });
   }
 
+  // ============================================================
+  // 无感刷新
+  // ------------------------------------------------------------
+  // 用户反馈："点详情正常查看，突然页面被刷新掉了"。
+  // 根因是轮询无条件重绘整个表格 —— 而展开的详情面板、打开的抽屉、
+  // 改到一半的表单都活在那些 innerHTML 里，一重绘就灰飞烟灭。
+  //
+  // 规则很简单：**统计数字可以刷，用户正在看/正在改的东西不能刷。**
+  // 具体做法是一个交互锁 uiBusy()：轮询里凡是"重绘列表"的动作都先问它，
+  // 被占用就跳过这一轮（下一轮再试），只有纯数字节点照常更新。
+  // ============================================================
+  function uiBusy(){
+    // 有展开的任务明细面板
+    if(document.querySelector('[data-ledger-panel]')) return true;
+    // 抽屉（任务详情）打开着 —— 里面的内容每 2s 重绘一次，
+    // 用户正读到一半就跳回顶部，是最招人烦的一种
+    var dw = $('drawer');
+    if(dw && !dw.classList.contains('hidden')) return true;
+    // 焦点在输入控件上（含搜索框、维护计划表单）
+    var act = document.activeElement;
+    if(act && (act.tagName === 'INPUT' || act.tagName === 'SELECT' ||
+               act.tagName === 'TEXTAREA')) return true;
+    // 维护计划表单被改动过（沿用原有的脏标记）
+    if(RT_MAINT_DIRTY) return true;
+    return false;
+  }
+
   function refresh(){
     api('/api/overview').then(function(o){
       lastOverview = o;
@@ -1433,9 +1638,17 @@
       $('snap-info').textContent = (m.writes||0) + ' 份' +
         (m.snapshot_pending ? ' (待写)' : '');
       syncSnapMode(m.snapshot_mode);
-      renderKpis(o); renderComponents(o); renderTasks(o); renderAudit(o);
-      if(PAGE === 'live') loadLive();
-      if(selected){ loadDetail(selected, true); }
+      // 统计数字（KPI/组件状态）照常刷新 —— 那是"看"的部分，无感更新即可
+      renderKpis(o); renderComponents(o);
+      // 列表类只在没有交互时重绘
+      if(!uiBusy()){
+        renderTasks(o); renderAudit(o);
+        if(PAGE === 'live') loadLive();
+      }
+      // 抽屉只在**它没被打开时**静默预热；打开了就别碰，
+      // 用户正在读，重绘会把它拽回顶部并丢掉滚动位置
+      var dwOpen = $('drawer') && !$('drawer').classList.contains('hidden');
+      if(selected && !dwOpen){ loadDetail(selected, true); }
     }).catch(function(err){
       $('status').outerHTML = '<span id="status" class="pill err">离线</span>';
       $('logs').textContent = '连接面板失败: ' + err.message;
@@ -1445,6 +1658,11 @@
   function loadLogs(){
     api('/api/logs?n=200').then(function(d){
       var lines = d.lines || [];
+      // 用户选中了日志里的某几行（要复制去查）—— 这时重设文本Content
+      // 会把选区清掉。宁可晚一拍再刷，也别把人正在复制的东西弄没。
+      var sel = window.getSelection && window.getSelection();
+      if(sel && String(sel).length && $('logs') &&
+         $('logs').contains(sel.anchorNode)){ return; }
       $('log-hint').textContent = '(' + lines.length + ' 行，源: ' + (d.source||'-') + ')';
       var pre = $('logs'), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
       pre.textContent = lines.join('\n');
@@ -1477,11 +1695,25 @@
     var page = b.getAttribute('data-page');
     if(page){ switchPage(page); return; }
 
+    // ---- 任务明细状态 chips（与状态下拉等效）----
+    if(b.hasAttribute('data-ls')){
+      var sel = $('rt-ledger-status');
+      if(sel) sel.value = b.getAttribute('data-ls');
+      loadLedger();
+      return;
+    }
+
     // ---- 运行时页 ----
     if(b.id === 'btn-rt-dispatch'){ doDispatch(); return; }
     if(b.id === 'btn-rt-maint-save'){ doSaveMaintenance(); return; }
     if(b.id === 'btn-rt-log-apply'){ doApplyLogLevel(); return; }
     if(b.id === 'btn-rt-ledger'){ loadLedger(); return; }
+    if(b.id === 'btn-rt-trace'){ loadTrace($('rt-trace-id').value.trim()); return; }
+    if(b.id === 'btn-rt-trace-refresh'){ loadTrace(''); return; }
+    var replayId = b.getAttribute('data-replay');
+    if(replayId){ doReplay(replayId); return; }
+    var gotoTrace = b.getAttribute('data-trace');
+    if(gotoTrace){ $('rt-trace-id').value = gotoTrace; loadTrace(gotoTrace); return; }
     var sampleType = b.getAttribute('data-event-sample');
     if(sampleType){
       // 点第二次 = 取消过滤，回到"最近所有事件"
@@ -1600,15 +1832,19 @@
       $('bt-msg').textContent = '提交中…';
       post('/api/backtest/run', body).then(function(r){
         if(r && r.ok){
-          // 两种投递方式：有调度器时走 backtest 池（返回 task_id），
-          // 没有时直连（返回 job）。走调度器的场景作业号要等任务开跑才有，
-          // 所以这里只能显示任务号，作业列表靠下面的轮询刷出来。
+          // 两种投递方式：有调度器时走 backtest 池（返回 task_id，无 job 字段），
+          // 没有时直连（返回 job）。job 必须先判再读 —— 后端在调度器模式下
+          // 不带 job 字段，旧版这里无条件读 r.job.job_id，
+          // 报过 "Cannot read properties of null (reading 'job_id')"。
           if(r.task_id){
             $('bt-msg').textContent = '已提交任务 ' + r.task_id + '，在 backtest 池排队执行…';
             toast('回测已提交：任务 ' + r.task_id);
-          } else {
+          } else if(r.job && r.job.job_id){
             $('bt-msg').textContent = '已提交 ' + r.job.job_id + '，正在后台执行…';
             toast('回测已提交: ' + r.job.job_id);
+          } else {
+            $('bt-msg').textContent = '已提交，正在后台执行…';
+            toast('回测已提交');
           }
           loadBacktest();
         } else {
@@ -2735,7 +2971,12 @@
   }
 
   function loadBacktest(){
-    api('/api/backtest?limit=30').then(renderBacktest).catch(function(e){
+    api('/api/backtest?limit=30').then(function(d){
+      // 回测详情页打开时不重绘列表：详情里有权益曲线画布，
+      // 重绘会把它连带清空，而曲线画一次要好几百毫秒
+      if(uiBusy()) return;
+      renderBacktest(d);
+    }).catch(function(e){
       $('bt-hint').textContent = '(加载失败: ' + e.message + ')';
     });
   }
@@ -2773,18 +3014,30 @@
 
   function kpiCards(cards){
     return cards.map(function(c){
-      return '<div class="kpi"><div class="k">' + esc(c[0]) + '</div>' +
+      // c[4] 有值时整张卡可点击。`page:xxx` = 跨页跳转（任务明细/错误队列
+      // 已拆成独立页），否则当作本页元素 id 平滑滚动过去。
+      if(!c[4]) { return '<div class="kpi"><div class="k">' + esc(c[0]) + '</div>' +
+        '<div class="v ' + (c[2]||'') + '">' + esc(c[1]) + '</div>' +
+        '<div class="s">' + esc(c[3]||'') + '</div></div>'; }
+      var click = c[4].indexOf('page:') === 0
+        ? (' style="cursor:pointer" title="点击查看明细" onclick="switchPage(\'' +
+           c[4].slice(5) + '\')"')
+        : (' style="cursor:pointer" title="点击查看明细" ' +
+           'onclick="document.getElementById(\'' + c[4] +
+           '\').scrollIntoView({behavior:\'smooth\'})"');
+      return '<div class="kpi"' + click + '><div class="k">' + esc(c[0]) + '</div>' +
              '<div class="v ' + (c[2]||'') + '">' + esc(c[1]) + '</div>' +
              '<div class="s">' + esc(c[3]||'') + '</div></div>';
     }).join('');
   }
 
-  function loadRuntime(){
-    api('/api/runtime').then(function(d){
+  function loadRtCore(){
+    // /api/runtime 一次喂 6 个运维子页共用的数据（KPI/池/队列/在跑/规则/路由/死信/恢复）
+    return api('/api/runtime').then(function(d){
       if(!d || d.ok === false){
         $('rt-pools').innerHTML = '<div class="muted">' +
           esc((d && d.error) || '运行时不可用') + '</div>';
-        return;
+        return d;
       }
       renderRtKpis(d);
       renderRtPools(d);
@@ -2795,17 +3048,33 @@
       renderRtDead(d);
       renderRtTaskTypes(d);
       renderRtRecovery(d);
+      updateDeadBadge(d);
+      return d;
     }).catch(function(e){
       $('rt-pools').innerHTML = '<div class="muted">加载失败: ' + esc(e.message) + '</div>';
+      return null;
     });
+  }
+
+  function rtTickDetails(){
     // 自动刷新只更新"看"的部分。维护计划是可编辑表单，用户改到一半
     // 被 5s 一次的轮询重绘掉是最招人烦的那类 bug，所以脏了就不重绘。
-    if(!RT_MAINT_DIRTY) loadMaintenance();
-    loadLogging();
-    loadJournal();
-    loadPreflight();
-    loadLedger();
-    loadEvents(RT_EVENT_FILTER);
+    if(PAGE === 'ops'){
+      if(!RT_MAINT_DIRTY) loadMaintenance();
+      loadLogging();
+      loadJournal();
+      loadPreflight();
+    }
+    if(PAGE === 'tasks') loadLedger();
+    if(PAGE === 'events') loadEvents(RT_EVENT_FILTER);
+    // 链路追踪只在**没在输入/查看**时刷新：查询框里打着字、或正看某条链
+    // 的重放结果时，自动刷新会把人正在读的内容换掉
+    if(PAGE === 'trace' && !uiBusy()) loadTrace($('rt-trace-id').value.trim());
+  }
+
+  function loadRuntime(){
+    loadRtCore();
+    rtTickDetails();
   }
 
   function renderRtRecovery(d){
@@ -2837,15 +3106,15 @@
     var inflight = 0, cap = 0;
     pools.forEach(function(p){ inflight += p.inflight||0; cap += p.capacity||0; });
     $('rt-kpis').innerHTML = kpiCards([
-      ['待执行', d.pending||0, d.pending > 20 ? 'down' : '', '队列里排队中'],
-      ['在跑', d.running||0, '', '已派给执行池'],
-      ['池占用', inflight + ' / ' + cap, inflight >= cap ? 'down' : '', '在跑 / 总槽位'],
-      ['已建任务', st.tasks_created||0, '', '被幂等挡下 ' + (st.tasks_deduped||0)],
+      ['待执行', d.pending||0, d.pending > 20 ? 'down' : '', '队列里排队中', 'page:tasks'],
+      ['在跑', d.running||0, '', '已派给执行池', ''],
+      ['池占用', inflight + ' / ' + cap, inflight >= cap ? 'down' : '', '在跑 / 总槽位', ''],
+      ['已建任务', st.tasks_created||0, '', '点击看逐条明细', 'page:tasks'],
       ['成功 / 失败', (ss.success||0) + ' / ' + (ss.failed||0),
-       (ss.failed||0) ? 'down' : '', '重试 ' + (ss.retried||0) + ' 次'],
+       (ss.failed||0) ? 'down' : '', '重试 ' + (ss.retried||0) + ' 次 · 点击看明细', 'page:tasks'],
       ['死信', d.dead_letter_count||0, (d.dead_letter_count||0) ? 'down' : '',
-       '累计进过 ' + (ss.dead_letter||0) + ' 条'],
-      ['事件', st.events_seen||0, '', '回声 ' + (st.events_echo||0) + ' 已拦截'],
+       '累计进过 ' + (ss.dead_letter||0) + ' 条', 'page:dead'],
+      ['事件', st.events_seen||0, '', '回声 ' + (st.events_echo||0) + ' 已拦截', 'page:events'],
     ]);
   }
 
@@ -2955,6 +3224,24 @@
             }).join(' · ')
           : '无');
 
+      // 顶部状态 chips：计数 + 选中态（与下拉等效，Rhapsody 的过滤条样式）
+      var liveCnt = {};
+      (d.tasks || []).forEach(function(t){
+        liveCnt[t.status] = (liveCnt[t.status]||0) + 1;
+      });
+      var chipCnt = {
+        '': s.created||0, success: s.success||0, failed: s.failed||0,
+        dead_letter: s.dead_letter||0, cancelled: s.cancelled||0,
+        running: liveCnt.running||0, queued: liveCnt.queued||0,
+      };
+      var curStatus = $('rt-ledger-status') ? $('rt-ledger-status').value : '';
+      document.querySelectorAll('#rt-ledger-chips .chip').forEach(function(c){
+        var v = c.getAttribute('data-ls');
+        var cnt = c.querySelector('.cnt');
+        if(cnt) cnt.textContent = chipCnt[v] != null ? chipCnt[v] : '-';
+        c.classList.toggle('on', v === curStatus);
+      });
+
       // 类型下拉只在第一次填充，之后保留用户已选中的值
       var sel = $('rt-ledger-type'), keep = sel ? sel.value : '';
       if(sel){
@@ -2971,6 +3258,10 @@
           return !(d.tasks || []).some(function(t){ return t.task_id === h.task_id; });
         })
       );
+      // 用户在看某条任务的详情（面板展开着）或正操作筛选框时，
+      // 统计数字照常更新，但**不重绘表格** —— 重绘会连展开的详情面板
+      // 一起抹掉，这正是"点详情看着看着页面被刷新"的来源。
+      if(uiBusy()) return;
       if(!rows.length){
         $('rt-ledger-rows').innerHTML =
           '<tr><td colspan="8" class="muted">还没有任务（或都被筛选条件排除了）</td></tr>';
@@ -3017,6 +3308,127 @@
     });
   }
 
+  // ---------------- 链路追踪 / 重放 ----------------
+  function loadTrace(traceId){
+    var q = '/api/trace?' + (traceId
+      ? 'trace_id=' + encodeURIComponent(traceId) + '&event_id=' + encodeURIComponent(traceId)
+      : 'limit=30');
+    return api(q).then(function(d){
+      if(!d || d.ok === false){
+        var msg = (d && d.error) || '不可用';
+        $('rt-trace-msg').textContent = msg;
+        if(String(msg).indexOf('未启用') >= 0){
+          $('rt-trace-hint').textContent = '事件未落盘';
+          $('rt-trace-timeline').innerHTML = '<span class="pill off">未启用</span> ' +
+            esc(msg) + '（事件只在内存广播，重启即丢）';
+        }
+        return d;
+      }
+      renderTrace(d);
+      return d;
+    }).catch(function(e){
+      $('rt-trace-msg').textContent = '加载失败: ' + e.message;
+    });
+  }
+
+  function renderTrace(d){
+    var tl = d.timeline || [], evs = d.events || [], tasks = d.tasks || [];
+    $('rt-trace-hint').textContent = '链路 ' + String(d.trace_id || '').slice(0, 8) +
+      ' · ' + (d.counts || {}).events + ' 事件 / ' + (d.counts || {}).tasks + ' 任务';
+    $('rt-trace-tl-hint').textContent = tl.length + ' 个环节';
+    $('rt-trace-ev-hint').textContent = evs.length + ' 条';
+    $('rt-trace-task-hint').textContent = tasks.length + ' 条';
+
+    $('rt-trace-timeline').innerHTML = tl.length ? tl.map(function(s, i){
+      var cls = s.kind === 'task'
+        ? (s.status === 'dead_letter' || s.status === 'failed' ? 'task dead' : 'task')
+        : (((s.subscribers || 0) === 0) ? 'err' : '');
+      var meta = s.kind === 'task'
+        ? ('任务 · ' + (TASK_STATUS_LABEL[s.status] || s.status || '') +
+           (s.attempts ? ' · 尝试 ' + s.attempts : '') +
+           (s.error ? ' · ' + String(s.error).slice(0, 60) : ''))
+        : ('事件 · 来源 ' + (s.source || '-') + ' · 订阅者 ' + (s.subscribers || 0) +
+           (s.replay_of ? ' · <b>重放</b>' : ''));
+      return '<div class="step ' + cls + '"><span class="dot"></span>' +
+        '<div><div class="nm">' + esc(s.name || '') +
+        (s.kind === 'task' ? ' <span class="pill off">任务</span>'
+                           : ' <span class="pill info">事件</span>') + '</div>' +
+        '<div class="at">' + esc(String(s.at || '').replace('T', ' ')) +
+        ' · <code>' + esc(String(s.id || '').slice(0, 8)) + '</code></div>' +
+        '<div class="meta">' + meta + '</div></div></div>';
+    }).join('') : '<span class="muted">这条链路上还没有环节</span>';
+
+    $('rt-trace-ev-rows').innerHTML = evs.length ? evs.map(function(e, i){
+      var data = e.data || {};
+      var brief = Object.keys(data).slice(0, 4).map(function(k){
+        return esc(k) + '=' + esc(String(data[k]).slice(0, 24));
+      }).join(' ');
+      return '<tr><td class="muted">' + (i + 1) + '</td>' +
+        '<td><code>' + esc(e.event_type) + '</code></td>' +
+        '<td>' + esc(e.source || '-') + '</td>' +
+        '<td class="num">' + (e.subscribers || 0) +
+          ((e.subscribers || 0) === 0 ? ' <span class="pill err">没人接</span>' : '') + '</td>' +
+        '<td class="muted">' + esc(String(e.published_at || '').replace('T', ' ')) + '</td>' +
+        '<td class="muted" title="' + esc(JSON.stringify(data).slice(0, 400)) + '">' +
+          esc(brief || '—') + '</td>' +
+        '<td><button class="mini" data-replay="' + esc(e.event_id) + '">重放</button></td></tr>';
+    }).join('') : '<tr><td colspan="7" class="muted">—</td></tr>';
+
+    $('rt-trace-task-rows').innerHTML = tasks.length ? tasks.map(function(t){
+      return '<tr><td><span class="pill ' +
+          (TASK_STATUS_CLASS[t.status] || 'off') + '">' +
+          esc(TASK_STATUS_LABEL[t.status] || t.status) + '</span></td>' +
+        '<td><code>' + esc(t.task_type || '-') + '</code></td>' +
+        '<td><code>' + esc(String(t.task_id || '').slice(0, 8)) + '</code></td>' +
+        '<td class="num">' + (t.attempts || 0) + '</td>' +
+        '<td class="muted">' + esc(String(t.error || '').slice(0, 60) || '—') + '</td></tr>';
+    }).join('') : '<tr><td colspan="5" class="muted">链路上没有任务</td></tr>';
+
+    var traces = d.traces || [];
+    $('rt-trace-list-hint').textContent = traces.length + ' 条';
+    $('rt-trace-list-rows').innerHTML = traces.length ? traces.map(function(t){
+      return '<tr><td><code>' + esc(String(t.trace_id).slice(0, 8)) + '</code></td>' +
+        '<td class="num">' + (t.events || 0) + '</td>' +
+        '<td>' + esc(t.head || '') + ' → ' + esc(t.tail || '') + '</td>' +
+        '<td class="muted">' + esc(String(t.started || '').replace('T', ' ')) + '</td>' +
+        '<td><button class="mini" data-trace="' + esc(t.trace_id) + '">查看</button></td></tr>';
+    }).join('') : '<tr><td colspan="5" class="muted">还没有链路</td></tr>';
+
+    var store = d.store || {};
+    var flooded = store.flooded_types || [];
+    $('rt-trace-sum').innerHTML = store.enabled
+      ? ('落盘 <b>' + ((store.counts || {}).events || 0) + '</b> 条事件 · ' +
+         '<b>' + ((store.counts || {}).traces || 0) + '</b> 条链路 · 心跳 ' +
+         (store.heartbeat_sample || 30) + ':1 采样 · 保留 ' +
+         (store.retention_hours || 72) + 'h' +
+         // 被降采样的类型本身就是一条线索：密集到要采样，往往同时
+         // 意味着"发了没人接"（规则没配 = 链路在第一跳就断了）
+         (flooded.length
+           ? '　｜　<span class="pill warn">高频降采样</span> ' +
+             flooded.map(function(t){ return '<code>' + esc(t) + '</code>'; }).join(' ')
+           : ''))
+      : '<span class="pill off">未落盘</span> 事件只在内存广播';
+
+    var rps = (store.counts || {}).replays || 0;
+    $('rt-trace-rp-hint').textContent = rps ? (rps + ' 次') : '无';
+  }
+
+  function doReplay(eventId){
+    if(!confirm('重放这条事件？它会用新事件 ID 再发一遍（保留原链路）。\n下单类事件不要重放。')){
+      return;
+    }
+    post('/api/events/replay', {event_id: eventId}).then(function(r){
+      if(r && r.ok){
+        toast('已重放 → ' + String(r.event_id).slice(0, 8));
+        $('rt-trace-msg').textContent = '已重放，新事件 ' + r.event_id;
+        loadTrace($('rt-trace-id').value.trim());
+      } else {
+        toast('重放失败', true);
+        $('rt-trace-msg').textContent = '重放失败: ' + ((r && r.error) || '');
+      }
+    }).catch(function(e){ $('rt-trace-msg').textContent = '重放失败: ' + e.message; });
+  }
+
   function loadEvents(eventType){
     var q = '/api/events' + (eventType ? '?type=' + encodeURIComponent(eventType) : '');
     api(q).then(function(d){
@@ -3034,6 +3446,7 @@
         (eventType ? '　｜　正在看 <code>' + esc(eventType) + '</code> 的样例' : '');
 
       var rows = d.types || [];
+      if(uiBusy()) return;    // 统计已更新；列表等用户看完再重绘
       $('rt-events-rows').innerHTML = rows.length ? rows.map(function(m){
         var noSub = (m.published > 0 && m.subscribers === 0);
         return '<tr>' +
@@ -3226,7 +3639,7 @@
     }).join('');
     sel.setAttribute('data-filled', '1');
     $('rt-dispatch-hint').textContent = hs.length + ' 种任务已注册处理器。' +
-      '未注册的类型（universe.rank / backtest.run / backtest.sweep）会直接进死信 —— ' +
+      '未注册处理器的类型（如 universe.rank / backtest.sweep）投递会直接进死信 —— ' +
       '宁可明确失败，也不给一个跑成功但什么都没做的空壳。';
   }
 
@@ -3248,6 +3661,37 @@
         Object.keys(j.params||{}).forEach(function(k){
           var v = j.params[k];
           var isApply = (k === 'apply');
+          // 保留期参数（retention_days / before_days / retention_hours / before_hours）
+          // 做成「数值 + Hours/Days 切换」，对齐 Rhapsody 的
+          // "Keep ... for 3 Hours/Days"。内部统一存小时。
+          if(k === 'retention_days' || k === 'before_days' ||
+             k === 'retention_hours' || k === 'before_hours'){
+            var hours = Number(j.params[k.replace('_days','_hours')]);
+            if(isNaN(hours) || hours <= 0){ hours = Number(v) * 24; }
+            var isKeepLog = (k.indexOf('retention') === 0);
+            var unit = (hours % 24 === 0) ? 'days' : 'hours';
+            var shown = (unit === 'days') ? (hours / 24) : hours;
+            var pname = isKeepLog ? '保留' : '归档保留';
+            params += '<label class="hint" style="display:inline-flex;flex-direction:row;' +
+              'align-items:center;gap:4px;font-size:12px">' + pname +
+              '<input type="number" min="1" step="1" value="' + esc(shown) + '" ' +
+              'data-mh="' + i + '" data-hname="' + (isKeepLog ? 'retention' : 'before') + '" ' +
+              'style="width:70px">' +
+              '<select data-mhu="' + i + '" data-hname="' + (isKeepLog ? 'retention' : 'before') + '" ' +
+              'style="width:70px">' +
+              '<option value="hours"' + (unit === 'hours' ? ' selected' : '') + '>小时</option>' +
+              '<option value="days"' + (unit === 'days' ? ' selected' : '') + '>天</option>' +
+              '</select></label>';
+            return;
+          }
+          if(k === 'keep'){
+            params += '<label class="hint" style="display:inline-flex;flex-direction:row;' +
+              'align-items:center;gap:4px;font-size:12px">最近保留' +
+              '<input type="number" min="50" step="10" value="' + esc(v) + '" ' +
+              'data-mp="' + i + '" data-mk="keep" style="width:70px" title="无论多老，最新 N 条永远保留">' +
+              '</label>';
+            return;
+          }
           params += '<label class="hint" style="display:inline-flex;flex-direction:row;' +
             'align-items:center;gap:4px;font-size:12px">' + esc(k) +
             (isApply ? '（真的执行）' : '') +
@@ -3287,6 +3731,15 @@
               wdOpts + '</select></label>' +
             '<label data-mrole="weekly" data-mi="' + i + '">时刻 (HH:MM)' +
               '<input data-mf="weekly_at" data-mi="' + i + '" value="' + esc(j.at) +
+              '" style="width:90px" placeholder="03:10"></label>' +
+            '<label data-mrole="monthly" data-mi="' + i + '">每月' +
+              '<select data-mf="day_of_month" data-mi="' + i + '" style="width:70px">' +
+              (function(){ var o = ''; for(var dd=1; dd<=28; dd++){
+                o += '<option value="' + dd + '"' + (j.day_of_month === dd ? ' selected' : '') + '>' +
+                  dd + ' 日</option>'; } return o; })() +
+              '</select></label>' +
+            '<label data-mrole="monthly" data-mi="' + i + '">时刻 (HH:MM)' +
+              '<input data-mf="monthly_at" data-mi="' + i + '" value="' + esc(j.at) +
               '" style="width:90px" placeholder="03:10"></label>' +
             '<label data-mrole="interval" data-mi="' + i + '">N 小时' +
               '<input data-mf="interval_hours" data-mi="' + i + '" type="number" min="' +
@@ -3367,17 +3820,30 @@
         params[k] = (el.type === 'checkbox') ? el.checked : el.value;
       });
       var kind = sched ? sched.value : j.schedule;
-      // 时刻框按周期分成 daily 与 weekly 两个，避免"改了周任务的时刻
-      // 结果把每天任务的时刻也改了"。提交时按当前周期挑对应的那个。
-      var atEl = (kind === 'weekly') ? get('weekly_at') : get('at');
+      // 时刻框按周期分成 daily / weekly / monthly 三个，避免"改了周任务
+      // 的时刻结果把每天任务的时刻也改了"。提交时按当前周期挑对应的那个。
+      var atEl = (kind === 'weekly') ? get('weekly_at')
+               : (kind === 'monthly') ? get('monthly_at') : get('at');
       var ivEl = get('interval_hours');
       var hours = ivEl ? parseInt(ivEl.value, 10) : j.interval_hours;
       if(isNaN(hours) || hours < 1){ hours = 1; }
+      // 保留期统一换算成小时提交（retention_hours / before_hours）。
+      // 旧的 *_days 键不再回传 —— 后端 params 是整体替换，旧键自然消失。
+      document.querySelectorAll('[data-mh="' + i + '"]').forEach(function(el){
+        var base = el.getAttribute('data-hname');           // retention / before
+        var unitSel = document.querySelector(
+          '[data-mhu="' + i + '"][data-hname="' + base + '"]');
+        var n = parseInt(el.value, 10);
+        if(isNaN(n) || n < 1){ n = 1; }
+        params[base + '_hours'] = n * ((unitSel && unitSel.value === 'days') ? 24 : 1);
+        delete params[base + '_days'];
+      });
       jobs[j.name] = {
         enabled: enabled ? enabled.checked : j.enabled,
         schedule: kind,
         at: atEl ? atEl.value : j.at,
         weekday: (function(){ var w = get('weekday'); return w ? Number(w.value) : j.weekday; })(),
+        day_of_month: (function(){ var dd = get('day_of_month'); return dd ? Number(dd.value) : j.day_of_month; })(),
         interval_hours: hours,
         cron: (function(){ var c = get('cron'); return c ? c.value : (j.cron||''); })(),
         once_at: (function(){ var c = get('once_at'); return c ? c.value : (j.once_at||''); })(),
@@ -3474,23 +3940,27 @@
     });
   }
 
+  var PAGE_IDS = ['live','factor','pool','strategy','backtest',
+                  'runtime','tasks','dead','events','trace','sched','ops'];
+  // 运维页共用一套 /api/runtime 轮询（核心 5s + 按页细节）
+  var RT_FAMILY = {runtime:1, tasks:1, dead:1, events:1, trace:1, sched:1, ops:1};
+
   function switchPage(page){
     PAGE = page;
-    $('page-live').classList.toggle('hidden', page !== 'live');
-    $('page-factor').classList.toggle('hidden', page !== 'factor');
-    $('page-strategy').classList.toggle('hidden', page !== 'strategy');
-    $('page-pool').classList.toggle('hidden', page !== 'pool');
-    $('page-backtest').classList.toggle('hidden', page !== 'backtest');
-    $('page-runtime').classList.toggle('hidden', page !== 'runtime');
-    Array.prototype.forEach.call($('tabs').children, function(b){
+    PAGE_IDS.forEach(function(p){
+      var el = $('page-' + p);
+      if(el) el.classList.toggle('hidden', p !== page);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.nav-item'), function(b){
       b.classList.toggle('on', b.getAttribute('data-page') === page);
     });
     if(btTimer){ clearInterval(btTimer); btTimer = null; }
     if(rtTimer){ clearInterval(rtTimer); rtTimer = null; }
-    if(page === 'runtime'){
-      loadRuntime();
+    if(RT_FAMILY[page]){
+      loadRtCore();
+      rtTickDetails();
       // 2s 太密（维护计划与日志等级不需要秒级刷新），5s 足够看清积压趋势
-      rtTimer = setInterval(loadRuntime, 5000);
+      rtTimer = setInterval(function(){ loadRtCore(); rtTickDetails(); }, 5000);
     }
     if(page === 'backtest'){
       loadBacktest();
@@ -3506,6 +3976,19 @@
       if(!$('s-in-rules').children.length){ addRuleRow('s-in-rules'); }
       if(!$('s-out-rules').children.length){ addRuleRow('s-out-rules'); }
     }
+  }
+  // KPI 卡的 inline onclick 跑在全局作用域，闭包里的 switchPage 摸不到，
+  // 必须显式挂到 window。
+  window.switchPage = switchPage;
+
+  // 侧栏「错误队列」角标 —— 挂在核心加载里，运维页 5s 一刷；
+  // 非运维页另有 10s 的轻轮询（statusTimer，见 init）兜底。
+  function updateDeadBadge(d){
+    var el = $('nav-dead-badge');
+    if(!el) return;
+    var n = (d && d.dead_letter_count) || 0;
+    el.textContent = n > 99 ? '99+' : String(n);
+    el.classList.toggle('hidden', !n);
   }
 
   // 表格里的频率输入框回车/失焦即生效——改频率不该还要点第二个按钮
@@ -3560,6 +4043,18 @@
   setInterval(loadCollector, 5000);
   // 体检一小时才跑一次，页面按 5s 刷纯属浪费请求；30s 足够跟上手动触发
   setInterval(loadGuard, 30000);
+  // 顶部横幅时钟
+  function tickClock(){
+    var el = $('clock');
+    if(el) el.textContent = new Date().toLocaleString('zh-CN', {hour12:false});
+  }
+  tickClock(); setInterval(tickClock, 1000);
+  // 非运维页时低频拉一次运行时概要，只为了侧栏「错误队列」角标不过期 ——
+  // 运维页自己有 5s 轮询，这里跳过，别发双份请求。
+  setInterval(function(){
+    if(RT_FAMILY[PAGE]) return;
+    api('/api/runtime').then(updateDeadBadge).catch(function(){});
+  }, 10000);
 })();
 </script>
 </body>

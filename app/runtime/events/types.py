@@ -323,6 +323,7 @@ class TaskType:
     MAINTENANCE_LOG_CLEANUP = "maintenance.log_cleanup"
     MAINTENANCE_ARCHIVE = "maintenance.archive"
     MAINTENANCE_VALIDATE = "maintenance.validate"
+    MAINTENANCE_DEAD_HISTORY = "maintenance.dead_history"
 
 
 # =============================================================================

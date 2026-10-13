@@ -530,10 +530,18 @@ def handle_log_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     from app.common.config import settings
 
     params = task.params or {}
-    # 不能写 ``params.get("retention_days") or 7``：0 是假值，
-    # 一个配错的"保留 0 天"会被悄悄换成保留 7 天，反而多留了一周。
-    raw_retention = params.get("retention_days")
-    retention = 7 if raw_retention is None else int(raw_retention)
+    # 保留期支持"小时/天"两种写法（面板的 Hours/Days 切换写 retention_hours）：
+    # retention_hours 优先，旧的 retention_days 仍然认（×24 换算）。
+    # 这里**不做 max(1,..) 夹逼**："保留 0"是配错的危险信号，
+    # 该被拒绝而不是被悄悄换成 1 —— 换算夹逼等于替错误配置兜底。
+    raw_hours = params.get("retention_hours")
+    if raw_hours is not None:
+        retention_hours = int(raw_hours)
+        retention_days = round(retention_hours / 24.0, 2)
+    else:
+        raw_retention = params.get("retention_days")
+        retention_days = 7 if raw_retention is None else int(raw_retention)
+        retention_hours = retention_days * 24
     apply_delete = bool(params.get("apply"))
     # 单次最多删多少。没有上限的话，一个配错的保留天数会在一拍之内
     # 把整个日志目录清空 —— 而那一拍里你连"正在删"的日志都看不到。
@@ -541,10 +549,10 @@ def handle_log_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     root = Path(str(getattr(settings, "LOG_DIR", "") or ""))
     if not root or not root.is_dir():
         return {"removed": 0, "note": "日志目录不存在或不可读"}
-    if retention < 1:
-        return {"removed": 0, "note": f"保留天数 {retention} 过小，已拒绝执行（至少 1 天）"}
+    if retention_hours < 1:
+        return {"removed": 0, "note": f"保留期 {retention_hours} 小时过小，已拒绝执行（至少 1 小时）"}
 
-    cutoff = datetime.now() - timedelta(days=retention)
+    cutoff = datetime.now() - timedelta(hours=retention_hours)
     stale, freed = [], 0
     for f in root.rglob("*"):
         if not f.is_file():
@@ -569,7 +577,8 @@ def handle_log_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
                 logger.warning(f"删除过期日志失败 {item['path']}: {exc}")
 
     return {
-        "retention_days": retention,
+        "retention_hours": retention_hours,
+        "retention_days": retention_days,
         "stale": len(stale),
         "removed": removed,
         "freed_bytes": freed,
@@ -597,8 +606,16 @@ def handle_archive(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     from app.common.config import settings
 
     params = task.params or {}
-    raw_days = params.get("before_days")
-    before_days = 30 if raw_days is None else int(raw_days)
+    # 同日志清理：before_hours（面板 Hours/Days 切换）优先，before_days 兼容；
+    # 不做夹逼 —— "保留 0"是危险配置，拒绝而不是悄悄换算。
+    raw_hours = params.get("before_hours")
+    if raw_hours is not None:
+        before_hours = int(raw_hours)
+        before_days = round(before_hours / 24.0, 2)
+    else:
+        raw_days = params.get("before_days")
+        before_days = 30 if raw_days is None else int(raw_days)
+        before_hours = before_days * 24
     apply_move = bool(params.get("apply"))
     max_files = int(params.get("max_files") or 1000)
 
@@ -606,11 +623,11 @@ def handle_archive(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     root = Path(str(getattr(settings, "SNAPSHOT_DIR", "") or (base / "snapshots")))
     if not root.is_dir():
         return {"archived": 0, "note": "快照目录不存在"}
-    if before_days < 1:
-        return {"archived": 0, "note": f"归档天数 {before_days} 过小，已拒绝执行（至少 1 天）"}
+    if before_hours < 1:
+        return {"archived": 0, "note": f"归档保留期 {before_hours} 小时过小，已拒绝执行（至少 1 小时）"}
 
     archive_root = root / "archive"
-    cutoff = datetime.now() - timedelta(days=before_days)
+    cutoff = datetime.now() - timedelta(hours=before_hours)
     old = []
     for f in root.rglob("*.json"):
         if archive_root in f.parents:      # 已归档的不重复处理
@@ -639,6 +656,7 @@ def handle_archive(task: EngineTask, ctx: Any) -> Dict[str, Any]:
                 failed.append({"path": str(src), "error": str(exc)})
 
     return {
+        "before_hours": before_hours,
         "before_days": before_days,
         "candidates": len(old),
         "archived": moved,
@@ -649,6 +667,48 @@ def handle_archive(task: EngineTask, ctx: Any) -> Dict[str, Any]:
         "target": str(archive_root),
         "note": "" if apply_move else "只统计未移动（默认）；勾选『真的归档』后才会移入 archive/",
         "sample": old[:10],
+    }
+
+
+def handle_dead_history_cleanup(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """清理死信**处置历史**（对照 Rhapsody 的 Cleanup notification event history）。
+
+    与日志/归档清理的安全取向不同：这里默认 ``apply=True`` 真删。
+    原因是清的对象不一样 —— 它只清**已处置**的死信记录（数据库行、
+    有 ``keep`` 条下限保护），还挂在错误队列里等人处理的死信一条不动；
+    而"只报告不删"对一个计数报表没有任何价值。
+
+    :param retention_days: 处置完超过 N 天的才清（默认 30）
+    :param keep: 无论多老，最新 N 条永远保留（默认 200）
+    """
+    journal = getattr(getattr(ctx, "store", None), "journal", None)
+    if journal is None or not getattr(journal, "enabled", False):
+        return {"pruned": 0, "note": "任务流水账未启用，没有可清理的处置历史"}
+
+    params = task.params or {}
+    raw_days = params.get("retention_days")
+    days = 30 if raw_days is None else int(raw_days)
+    keep = max(50, int(params.get("keep") or 200))   # 下限保护：别把历史清光
+    if days < 1:
+        return {"pruned": 0, "note": f"保留期 {days} 天过小，已拒绝执行（至少 1 天）"}
+
+    apply_delete = bool(params.get("apply", True))
+    if not apply_delete:
+        # 报告模式：只数不清。参数与 prune 完全一致。
+        prunable = journal.count_prunable_dead_history(
+            older_than_days=float(days), keep=keep
+        )
+        return {
+            "retention_days": days, "keep": keep, "prunable": prunable,
+            "pruned": 0, "apply": False,
+            "note": "只统计未删除；勾选『真的执行』后才会清理",
+        }
+
+    pruned = journal.prune_dead_history(older_than_days=float(days), keep=keep)
+    return {
+        "retention_days": days, "keep": keep,
+        "pruned": pruned, "prunable": pruned, "apply": True,
+        "note": f"已清理 {pruned} 条已处置的旧记录",
     }
 
 
@@ -769,6 +829,10 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
     "maintenance.archive": {
         "fn": handle_archive,
         "description": "快照归档统计（默认不移动）",
+    },
+    "maintenance.dead_history": {
+        "fn": handle_dead_history_cleanup,
+        "description": "清理已处置的死信处置历史（未处置的不动）",
     },
     "backtest.run": {
         "fn": handle_backtest_run,
