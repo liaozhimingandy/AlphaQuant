@@ -535,10 +535,49 @@ class TaskJournal:
                     (cut_iso, int(keep)),
                 )
                 conn.commit()
-                return int(cur.rowcount or 0)
+                removed = int(cur.rowcount or 0)
             except Exception as exc:
                 self.stats["last_error"] = str(exc)
                 logger.error(f"清理终态任务记录失败: {exc}")
+                return 0
+        # 顺带清一下死信处置历史：它只增不删，久了就变成"三年前的失败清单"
+        return removed + self.prune_dead_history()
+
+    def prune_dead_history(
+        self, older_than_days: float = 90.0, keep: int = 200
+    ) -> int:
+        """清掉老的**已处置**死信历史。
+
+        ``dead_letter_log`` 只增不删：每条死信从进来到被处置都会留一笔，
+        用来回答"这条上次谁处理的、怎么处理的"。但半年下来它会堆成几千条，
+        面板上真正要紧的那条淹在里面 —— **错误队列自己也会变成垃圾场**
+        （这点在 Rhapsody 的 errorInput 目录里看得很明显：3.9MB 的积压
+        一直没被清走，而 output 只有 40 字节）。
+
+        只清**已处置**（``resolved_at`` 非空）的：还挂在队列里等人处理的
+        死信，它的处置历史正是排障依据，不能动。
+        """
+        if not self.enabled or not self.open():
+            return 0
+        cutoff = time.time() - max(0.0, older_than_days) * 86400.0
+        cut_iso = datetime.fromtimestamp(cutoff).isoformat(timespec="seconds")
+        with self._lock:
+            conn = self._conn
+            if conn is None:
+                return 0
+            try:
+                cur = conn.execute(
+                    "DELETE FROM dead_letter_log WHERE resolved_at IS NOT NULL "
+                    "AND resolved_at <> '' AND resolved_at < ? "
+                    "AND id NOT IN ("
+                    "  SELECT id FROM dead_letter_log ORDER BY id DESC LIMIT ?)",
+                    (cut_iso, int(keep)),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0)
+            except Exception as exc:
+                self.stats["last_error"] = str(exc)
+                logger.error(f"清理死信处置历史失败: {exc}")
                 return 0
 
 

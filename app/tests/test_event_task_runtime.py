@@ -482,12 +482,32 @@ class TestSchedulerFlow(unittest.TestCase):
         self.assertEqual(sch.store.stats["success"], 1)
 
     def test_task_without_handler_goes_to_dead_letter(self):
+        # 用 sweep 而不是 backtest.run：后者已经注册了处理器
+        # （回测接进任务体系后它就是个正常任务，不再能当"没处理器"的样本）
         sch = _scheduler()
-        sch.submit_engine_task(TaskType.BACKTEST_RUN, params={})
+        sch.submit_engine_task(TaskType.BACKTEST_SWEEP, params={})
         sch._dispatch_once()
         self.assertEqual(sch.store.stats["dead_letter"], 1)
         letters = sch.store.dead_letters()
         self.assertIn("没有注册处理器", letters[0]["error"])
+
+    def test_backtest_run_has_handler(self):
+        """回测必须是"能跑的任务"，不是"声明了但没人接"的占位。
+
+        它曾经被列在 UNIMPLEMENTED 里，理由是"建议显式调用"；
+        但那套显式调用是自己另起炉灶，结果回测既不在任务明细里、
+        失败了也不进死信。这个用例钉住它已经接通。
+        """
+        sch = _scheduler()
+        self.assertTrue(sch.handlers.has(TaskType.BACKTEST_RUN))
+        self.assertEqual(sch.router.pool_for(TaskType.BACKTEST_RUN), Pool.BACKTEST)
+
+        # 缺 symbol 要失败进死信，而不是"跑成功但什么都没做"
+        sch.submit_engine_task(TaskType.BACKTEST_RUN, params={})
+        sch._dispatch_once()
+        _wait(lambda: sch.store.stats["dead_letter"] == 1, 6.0)
+        self.assertEqual(sch.store.stats["dead_letter"], 1)
+        self.assertIn("symbol", sch.store.dead_letters()[0]["error"])
 
     def test_failure_is_retried_then_dead_lettered(self):
         sch = _scheduler()
@@ -556,7 +576,7 @@ class TestSchedulerFlow(unittest.TestCase):
 
     def test_health_reports_dead_letters(self):
         sch = _scheduler()
-        sch.submit_engine_task(TaskType.BACKTEST_RUN, params={})
+        sch.submit_engine_task(TaskType.BACKTEST_SWEEP, params={})
         sch._dispatch_once()
         ok, detail = sch.health_check()
         self.assertTrue(ok)

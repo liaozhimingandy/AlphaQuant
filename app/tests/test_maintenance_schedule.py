@@ -404,6 +404,60 @@ class TestTaskLedger:
         assert store.mark_failure(t, "网络错误") == "dead_letter"
         assert store.history(status="dead_letter")[0]["error"] == "网络错误"
 
+    def test_history_dedupes_same_task(self):
+        """同一条任务被记两次，历史里只该有一条。
+
+        进死信时 mark_failure 记一次，状态收敛时又会记一次。不去重的话
+        面板显示"同一条任务失败了两次"，而实际只有一条 —— 拿历史对账的人
+        会以为真跑了两遍，然后去找那个不存在的第二次。
+        """
+        store = self._store()
+        t = EngineTask(task_type="market.kline.collect")
+        store.enqueue(t)
+        store.mark_running(t, worker="market")
+        assert store.mark_failure(t, "网络错误") == "dead_letter"
+        store._remember(t)          # 模拟第二次收敛记录
+        hist = store.history()
+        assert len(hist) == 1, f"同一条任务在历史里出现了 {len(hist)} 次"
+        assert hist[0]["task_id"] == t.task_id
+
+    def test_success_result_is_exported(self):
+        """处理器的返回值要能在明细里看到。
+
+        "任务成功了"只是一个布尔值，用户核对数据要看的是**成功了什么** ——
+        比如回测跑完的收益、夏普、成交流水号。之前 to_dict 没导出 result，
+        于是这部分只能去翻日志。
+        """
+        store = self._store()
+        t = EngineTask(task_type="backtest.run")
+        store.enqueue(t)
+        store.mark_running(t, worker="backtest")
+        store.mark_success(t, {"total_return_pct": -0.89, "trade_count": 3})
+        row = store.task_detail(t.task_id)
+        assert row["result"]["trade_count"] == 3
+
+    def test_result_is_json_safe(self):
+        """处理器爱返回什么就返回什么，别把面板的序列化打崩。
+
+        "任务成功了但面板报错"是最难查的一类失败：任务侧一片绿，
+        只有点开详情页才炸。
+        """
+        import json
+
+        class Weird:
+            def __repr__(self):
+                return "<Weird>"
+
+        store = self._store()
+        t = EngineTask(task_type="x")
+        store.enqueue(t)
+        store.mark_success(t, {"obj": Weird(), "n": 1,
+                               "big": list(range(500))})
+        row = store.task_detail(t.task_id)
+        json.dumps(row, ensure_ascii=False)   # 不抛异常即是过了
+        assert row["result"]["obj"] == "<Weird>"
+        assert len(row["result"]["big"]) == 100   # 超长的要截断
+
     def test_retrying_is_not_history(self):
         """等待重试不是终态，不该出现在历史里。
 

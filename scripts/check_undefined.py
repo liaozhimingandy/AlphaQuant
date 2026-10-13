@@ -134,25 +134,63 @@ def check_file(path: str) -> list[tuple[str, int, str, str]]:
             for p, ln, n, ctx, cnt in seen.values()]
 
 
+#: 不参与检查的目录。
+#:
+#: ``.pytest_tmp`` 必须排除：测试会故意在里面写语法错误的 bad.py
+#: （验证"坏文件被跳过而不是致命"），它们能刷出几十条假警报，
+#: 把真正的问题（比如某个模块漏 import 一个名字）彻底淹没 ——
+#: 这个脚本之前就是这个下场，明明抓到了 bug 却没人看见。
+SKIP_DIRS = frozenset((
+    "__pycache__", ".git", ".pytest_tmp", ".venv", "venv", "node_modules",
+    "output", ".mypy_cache", ".ruff_cache", "build", "dist",
+))
+
+
+def iter_py(roots: "list[str]") -> "list[str]":
+    """展开成 .py 文件列表。**目录和文件都得支持**：
+
+    只对目录做 os.walk 时，传一个文件路径会静默空转、报"0 处"，
+    让人误以为文件是干净的。
+    """
+    found: list[str] = []
+    for root in roots:
+        if os.path.isfile(root):
+            if root.endswith(".py"):
+                found.append(root)
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for fn in sorted(filenames):
+                if fn.endswith(".py"):
+                    found.append(os.path.join(dirpath, fn))
+    return found
+
+
 def main() -> int:
     roots = sys.argv[1:] or ["app"]
     total = 0
-    for root in roots:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
-            for fn in sorted(filenames):
-                if not fn.endswith(".py"):
-                    continue
-                path = os.path.join(dirpath, fn)
-                probs = check_file(path)
-                if not probs:
-                    continue
-                total += len(probs)
-                print(f"\n── {path}")
-                for p, ln, name, ctx in probs[:15]:
-                    print(f"   L{ln:<5} {name:<28} {ctx}")
+    broken: list[str] = []
+    for path in iter_py(roots):
+        raw = check_file(path)
+        probs = [p for p in raw if p[2] != "<SyntaxError>"]
+        if any(p[2] == "<SyntaxError>" for p in raw):
+            broken.append(path)
+        if not probs:
+            continue
+        total += len(probs)
+        print(f"\n── {path}")
+        for p, ln, name, ctx in probs[:15]:
+            print(f"   L{ln:<5} {name:<28} {ctx}")
+
+    if broken:
+        print(f"\n另有 {len(broken)} 个文件语法错误（不计入未定义引用）：")
+        for p in broken[:10]:
+            print(f"   {p}")
+
     print(f"\n合计 {total} 处可疑的未定义引用")
-    return 0
+    # 非 0 退出，这样它能接进 CI / pre-commit。
+    # 之前恒定 return 0，等于这个检查从来没真正拦过任何东西。
+    return 1 if total else 0
 
 
 if __name__ == "__main__":

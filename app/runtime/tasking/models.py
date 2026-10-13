@@ -310,7 +310,29 @@ class EngineTask:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "elapsed": self.elapsed(),
             "error": self.error or None,
+            # 处理器的返回值。之前这一项没导出，于是"任务成功了，但成功了什么"
+            # 只能去翻日志 —— 而用户核对数据要看的正是这个（比如回测跑完的
+            # 收益、夏普、成交流水号）。失败看 error，成功看 result，成对才完整。
+            "result": _safe(self.result),
         }
+
+
+def _safe(value: Any) -> Any:
+    """把处理器返回值收敛成可 JSON 序列化的形状。
+
+    处理器爱返回什么就返回什么（DataFrame、自定义对象、Decimal…），
+    直接丢给面板会在**序列化**那一步炸掉 —— 于是出现"任务明明成功了，
+    面板却在报错"这种最难对账的失败。这里统一收敛：
+    能原样表达的保留，不能的退化成字符串，并且**一律限长**
+    （回测 summary 里可能带着几百个点的曲线，全塞进任务明细没必要）。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _safe(v) for k, v in list(value.items())[:100]}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe(v) for v in list(value)[:100]]
+    return str(value)[:1000]
 
 
 __all__ = ["EngineTask", "TaskState", "Priority"]

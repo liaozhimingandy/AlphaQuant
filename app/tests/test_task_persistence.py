@@ -534,6 +534,32 @@ class JournalPruning(unittest.TestCase):
         self.assertEqual(self.j.load_open(limit=50)[0]["task_id"], "keep1")
         self.assertEqual(len(self.j.load_dead()), 1)
 
+    def test_dead_history_prunes_only_resolved(self):
+        """死信处置历史只清**已处置**的，未处置的一条都不许动。
+
+        错误队列自己也会变成垃圾场：只增不删的处置历史半年能堆几千条，
+        把真正要紧的那条淹掉。但还挂在队列里等人处理的死信，它的历史
+        正是排障依据 —— 这两类必须分开对待。
+        """
+        for i in range(5):
+            t = EngineTask(task_id=f"t{i}", task_type="backtest.run")
+            t.status = TaskState.DEAD_LETTER
+            self.j.log_dead(t)
+        for i in range(3):
+            self.j.resolve_dead(f"t{i}", "discard")     # t0/t1/t2 已处置
+        # 把已处置的时间推回很久以前，模拟"老记录"
+        with self.j._lock:
+            self.j._conn.execute(
+                "UPDATE dead_letter_log SET resolved_at='2026-01-01T00:00:00' "
+                "WHERE resolved_at IS NOT NULL")
+            self.j._conn.commit()
+
+        removed = self.j.prune_dead_history(older_than_days=90.0, keep=1)
+        self.assertEqual(removed, 3)
+        left = {h["task_id"] for h in self.j.dead_history(limit=100)}
+        # 没处置过的 t3/t4 必须还在
+        self.assertEqual(left, {"t3", "t4"})
+
 
 if __name__ == "__main__":
     unittest.main()

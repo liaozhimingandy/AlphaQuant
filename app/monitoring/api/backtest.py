@@ -86,21 +86,35 @@ class BacktestService:
     # ============================================================
     # 提交
     # ============================================================
-    def submit(self, params: Dict[str, Any], executor=None) -> BacktestJob:
-        """提交一个回测作业。立即返回，不阻塞调用方。
+    def submit(self, params: Dict[str, Any], executor=None,
+               execute: bool = True, run_id: str = "") -> BacktestJob:
+        """登记一个回测作业。
 
         :param executor: 线程池执行器（reactor 的线程池）。
                          不传则用一个普通线程（CLI/脚本场景）。
+        :param execute: 为 False 时**只登记不执行**，由调用方自己调
+                        :meth:`run_job`。任务处理器要用这个模式：它已经
+                        站在 ``backtest`` 池的线程里了，再开一个线程等于
+                        绕开池的并发上限（capacity=1 就是摆设），
+                        而且任务会在回测跑完前就被标记成功。
+        :param run_id: 指定结果的业务主键。任务处理器传 ``bt_<task_id>``，
+                       这样同一个任务重投时能对上号、不会重复落一条结果。
+                       不传则自动生成一个带时间戳的（面板/CLI 随手跑的场景）。
         """
         cleaned = self._normalize(params)
         with self._lock:
             job = BacktestJob(f"bt{next(self._seq):05d}", cleaned)
+            if run_id:
+                job.run_id = str(run_id)
             self._jobs[job.job_id] = job
             self._order.append(job.job_id)
             while len(self._order) > self.MAX_JOBS:
                 old = self._order.pop(0)
                 self._jobs.pop(old, None)
             self.stats["submitted"] += 1
+
+        if not execute:
+            return job
 
         if executor is not None:
             executor(job.job_id)
@@ -239,7 +253,9 @@ class BacktestService:
         )
         result = run_backtest(cfg)
 
-        job.run_id = f"bt_{job.job_id}_{datetime.now().strftime('%H%M%S')}"
+        # 处理器会预先指定 run_id（取值来自 task_id，用于幂等去重）；
+        # 面板/CLI 随手提交的则在这里生成一个带时间戳的。
+        job.run_id = job.run_id or f"bt_{job.job_id}_{datetime.now().strftime('%H%M%S')}"
         summary = json_safe(result.summary()) if hasattr(result, "summary") else {}
         job.summary = summary
 
@@ -284,6 +300,22 @@ class BacktestService:
             f"收益 {result.total_return_pct:.2f}% | 回撤 {result.max_drawdown_pct:.2f}% | "
             f"夏普 {result.sharpe:.2f} | 成交 {result.trade_count} 笔"
         )
+
+    @staticmethod
+    def find_result(run_id: str) -> Optional[Dict[str, Any]]:
+        """按 run_id 找一条已落库的回测结果（幂等去重用）。
+
+        查不到返回 None —— 包括库还空着、或这条任务上次根本没跑完。
+        """
+        if not run_id:
+            return None
+        try:
+            for r in TradingRepository.backtests(limit=500):
+                if r.get("run_id") == run_id:
+                    return r
+        except Exception as exc:
+            logger.debug(f"查询回测结果失败（按未跑过处理）: {exc}")
+        return None
 
     @staticmethod
     def _latest_result_id(run_id: str) -> Optional[int]:
@@ -348,24 +380,103 @@ __all__ = ["BacktestJob", "BacktestService", "get_backtest_service"]
 
 
 # --- BEGIN 自动追加（scripts/split_monitoring.py）---
+def _engine_scheduler(host: Any) -> Any:
+    """从宿主上取事件驱动调度器，取不到返回 None。
+
+    必须自己取而不能依赖 ``ControlPlane._event_scheduler``：这个 mixin
+    混进的是 ``MonitorWebComponent``，那边没有这个方法。
+    ``serve`` 模式（纯监控进程）根本没装配引擎，此时就该走降级直连。
+    """
+    # 控制面叫 self.engine，监控组件叫 self.bound_engine —— 两个名字都得试，
+    # 因为 BacktestViewsMixin 会被混进这两处。
+    engine = getattr(host, "engine", None) or getattr(host, "bound_engine", None)
+    getter = getattr(engine, "get_component", None)
+    if not callable(getter):
+        return None
+    try:
+        sch = getter("scheduler")
+    except Exception:
+        return None
+    # "有没有任务存储"才是这里真正依赖的能力，比 isinstance 稳
+    return sch if sch is not None and hasattr(sch, "store") else None
+
+
+def _audit_safe(host: Any, action: str, detail: Dict[str, Any]) -> None:
+    """审计是可选的：控制面有，监控组件没有。没有就跳过，不该因此报错。"""
+    audit = getattr(host, "_audit", None)
+    if callable(audit):
+        try:
+            audit(action, detail)
+        except Exception:
+            pass
+
+
 class BacktestViewsMixin:
     # ============================================================
     # 回测
     # ============================================================
     def submit_backtest(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """提交一个回测作业。
+        """提交一次回测。
 
-        在线程池里跑 —— 回测是 CPU 密集且可能几十秒的操作，
-        跑在 reactor 线程上会让行情、策略、撮合、面板一起停摆。
+        **优先交给调度器**，而不是自己拉一个线程跑：
+
+        - 回测是长任务，``backtest`` 池 capacity=1，排队才不会挤占实盘资源；
+        - 走任务体系后，面板「任务明细」看得见它、失败会进错误队列可人工重投、
+          引擎重启能从流水账里捞回来；
+        - 自己拉线程那套下，回测是"进程内的私有状态"，崩溃即无从追查。
+
+        调度器不可用（纯监控进程、CLI）时降级为直连，但会把降级这件事
+        明确写进返回，避免"看起来提交成功、实际没人管"。
         """
         params = body.get("params") if isinstance(body.get("params"), dict) else body
         if not params.get("symbol"):
             return {"ok": False, "error": "缺少 symbol"}
+
+        sch = _engine_scheduler(self)
+        handlers = getattr(sch, "handlers", None)
+        if sch is not None and handlers is not None and handlers.has("backtest.run"):
+            ok, reason, task_id = sch.submit_engine_task_detail(
+                task_type="backtest.run",
+                params=dict(params),
+                priority=5,
+                dedup_key=str(params.get("dedup_key") or ""),
+                # 回测失败绝大多数是参数或数据问题，自动重试只会再错一次
+                max_retries=0,
+                # 默认 60s 对回测太短：一次全市场扫描可能几分钟
+                timeout_seconds=1800.0,
+            )
+            _audit_safe(
+                self, "submit_backtest",
+                {"via": "scheduler", "symbol": params.get("symbol"), "ok": ok},
+            )
+            if not ok:
+                return {
+                    "ok": False,
+                    "error": f"回测任务未入队：{reason}",
+                    "dispatched": "scheduler",
+                }
+            return {
+                "ok": True,
+                "dispatched": "scheduler",
+                "task_id": task_id,
+                "reason": reason,
+                # 面板轮询用 task_id 查任务状态；作业号要等任务真正开跑才有
+                "job": None,
+            }
+
         job = self.backtests.submit(params, executor=self._run_backtest_in_thread)
-        return {"ok": True, "job": job.to_dict()}
+        _audit_safe(
+            self, "submit_backtest",
+            {"via": "direct", "symbol": params.get("symbol")},
+        )
+        return {"ok": True, "dispatched": "direct", "job": job.to_dict()}
 
     def _run_backtest_in_thread(self, job_id: str) -> None:
-        from twisted.internet import reactor
+        # 两个名字都得在这里导入：模块级导入 twisted 会让"只想读回测列表"
+        # 的进程（CLI、单测）被迫拖起 reactor。
+        # 之前这里只导入了 reactor（而且根本没用到），threads 漏了 ——
+        # 结果是提交回测必抛 NameError，且只有真去提交才会暴露。
+        from twisted.internet import threads
 
         d = threads.deferToThread(self.backtests.run_job, job_id)
         d.addErrback(lambda f: logger.error(f"回测作业异常: {f.getErrorMessage()}"))

@@ -781,8 +781,33 @@ class SchedulerComponent(SchedulerBase):
         返回 ``(是否入队, 原因)``。被幂等键挡下时返回 False 并说明原因 ——
         这是"已经有人在做"的正常信号，不是错误。
         """
+        ok, reason, _ = self.submit_engine_task_detail(
+            task_type=task_type, params=params, priority=priority,
+            queue_name=queue_name, dedup_key=dedup_key,
+            max_retries=max_retries, retry_interval=retry_interval,
+            timeout_seconds=timeout_seconds, correlation_id=correlation_id,
+        )
+        return ok, reason
+
+    def submit_engine_task_detail(
+        self,
+        task_type: str,
+        params: Optional[Dict[str, Any]] = None,
+        priority: int = Priority.NORMAL,
+        queue_name: str = "",
+        dedup_key: str = "",
+        max_retries: int = 0,
+        retry_interval: float = 5.0,
+        timeout_seconds: float = 60.0,
+        correlation_id: str = "",
+    ) -> "Tuple[bool, str, str]":
+        """:meth:`submit_engine_task` 的带 task_id 版本。
+
+        提交方要拿 task_id 去「任务明细」里跟踪进度。靠"提交完再去查
+        最近一条同类型任务"是竞态：两条回测同时提交就会认错人。
+        """
         if not self._running:
-            return False, "调度器未启动"
+            return False, "调度器未启动", ""
         task = EngineTask(
             task_type=task_type,
             params=dict(params or {}),
@@ -799,7 +824,8 @@ class SchedulerComponent(SchedulerBase):
         if ok:
             self.stats["tasks_created"] += 1
             self._publish_task_event(EventType.TASK_CREATED, task)
-        return ok, reason
+            return ok, reason, task.task_id
+        return ok, reason, ""
 
     @staticmethod
     def _as_priority(priority: Any) -> int:

@@ -652,6 +652,59 @@ def handle_archive(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     }
 
 
+def handle_backtest_run(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """跑一次历史回测（长任务，占 ``backtest`` 池唯一的槽位）。
+
+    两个必须遵守的点：
+
+    **同步阻塞，不在处理器里再开线程。**
+    处理器已经站在池的工作线程上了。再开一个线程的结果有三重伤害：
+    绕开 ``backtest`` 池 capacity=1 的并发上限、任务在回测跑完前就被
+    标记成功、以及把池线程空转着等一个没人管的子线程。
+
+    **幂等。**
+    回测会把结果写进 ``backtest_result`` 表，重跑一次就多一条记录。
+    任务可能因为重试、事件重投、崩溃恢复被再执行一次，所以这里用
+    ``run_id`` 做去重键：同一个任务重投时直接返回上次的结果，不重复落库。
+    回测本来就是确定性的（同参数同数据 → 同结果），幂等不会丢信息。
+    """
+    from app.monitoring.api.backtest import get_backtest_service
+
+    svc = get_backtest_service()
+    params = dict(task.params or {})
+    symbol = str(params.get("symbol") or "").strip()
+    if not symbol:
+        # 抛异常而不是返回空结果：让任务失败进死信，死信里写着"缺 symbol"
+        raise ValueError("回测任务缺少 symbol")
+
+    # 幂等键绑定 task_id：重试/重投是同一个任务，不是"用户又跑了一次"
+    run_id = f"bt_{task.task_id}"
+    existing = svc.find_result(run_id)
+    if existing is not None:
+        logger.info(f"回测任务 {task.task_id} 已有结果，跳过重复执行（幂等）")
+        return {
+            "job_id": "", "run_id": run_id, "result_id": existing.get("id"),
+            "symbol": symbol, "summary": existing.get("metrics") or {},
+            "idempotent": True,
+        }
+
+    job = svc.submit(params, execute=False, run_id=run_id)
+    svc.run_job(job.job_id)
+
+    if job.status != "DONE":
+        # run_job 内部吞掉了异常写进 job.error，这里翻出来让任务真的失败
+        raise RuntimeError(job.error or f"回测未成功完成（状态 {job.status}）")
+
+    return {
+        "job_id": job.job_id,
+        "run_id": job.run_id,
+        "result_id": job.result_id,
+        "symbol": symbol,
+        "summary": job.summary or {},
+        "idempotent": False,
+    }
+
+
 # =============================================================================
 # 注册
 # =============================================================================
@@ -717,6 +770,10 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
         "fn": handle_archive,
         "description": "快照归档统计（默认不移动）",
     },
+    "backtest.run": {
+        "fn": handle_backtest_run,
+        "description": "历史回测（长任务，占 backtest 池唯一槽位，幂等）",
+    },
 }
 
 #: 已声明但**尚未接业务实现**的任务类型。
@@ -724,10 +781,13 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
 #: 好过一个"跑成功但什么都没做"的空壳实现。
 UNIMPLEMENTED_TASK_TYPES = (
     "universe.rank",      # 需要接 app.modules.universe 的选股流程
-    "backtest.run",       # 需要回测配置与数据源，建议显式调用而非事件驱动
     "backtest.sweep",     # 大规模参数实验，应由运维显式发起
     "market.quote.snapshot",
 )
+# 注：``backtest.run`` 曾经在这一栏里，理由是"建议显式调用而非事件驱动"。
+# 但"显式调用"这条路是自己另起一套（面板直接调 BacktestService），
+# 结果就是回测既不在任务明细里、失败也不进死信、崩溃了无从恢复。
+# 现已注册处理器：显式提交照样可以，只是提交之后交给调度器分配。
 
 
 def register_default_handlers(registry: HandlerRegistry) -> int:

@@ -1600,8 +1600,16 @@
       $('bt-msg').textContent = '提交中…';
       post('/api/backtest/run', body).then(function(r){
         if(r && r.ok){
-          $('bt-msg').textContent = '已提交 ' + r.job.job_id + '，正在后台执行…';
-          toast('回测已提交: ' + r.job.job_id);
+          // 两种投递方式：有调度器时走 backtest 池（返回 task_id），
+          // 没有时直连（返回 job）。走调度器的场景作业号要等任务开跑才有，
+          // 所以这里只能显示任务号，作业列表靠下面的轮询刷出来。
+          if(r.task_id){
+            $('bt-msg').textContent = '已提交任务 ' + r.task_id + '，在 backtest 池排队执行…';
+            toast('回测已提交：任务 ' + r.task_id);
+          } else {
+            $('bt-msg').textContent = '已提交 ' + r.job.job_id + '，正在后台执行…';
+            toast('回测已提交: ' + r.job.job_id);
+          }
           loadBacktest();
         } else {
           $('bt-msg').textContent = '失败: ' + ((r && r.error) || '未知错误');

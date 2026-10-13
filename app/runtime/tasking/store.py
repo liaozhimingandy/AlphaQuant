@@ -369,7 +369,16 @@ class TaskStore:
         """
         if self._history_size <= 0:
             return
-        self._history.append(task.to_dict())
+        row = task.to_dict()
+        # 同一条任务会被记两次：进死信时 mark_failure 记一次，
+        # 随后状态收敛时又记一次。面板上那就成了"同一条任务失败了两次"，
+        # 而实际只有一条 —— 这正是用户拿历史对账时最容易被带偏的地方。
+        # 所以按 task_id 去重：记过就覆盖成最新状态，不再追加。
+        for i, old in enumerate(self._history):
+            if old.get("task_id") == task.task_id:
+                self._history[i] = row
+                return
+        self._history.append(row)
         while len(self._history) > self._history_size:
             self._history.pop(0)
 
