@@ -17,11 +17,28 @@ from app.common.config import settings
 from app.runtime.event_bus import StandardEvents
 from app.domain.types import TaskState
 from app.runtime.tasking.spec import build_task, parse_task_spec
+from app.runtime.tasking.store import parse_ledger_dt
 from app.common.jsonio import json_safe, read_json, write_json_atomic
 from app.common.logging import logger
 
 if TYPE_CHECKING:  # pragma: no cover
     from app.engine.engine import BaseQuantEngine
+
+
+#: 周期定时器的中文名。定时器 ID 是代码里起的技术名字，
+#: 直接摆在面板上等于让用户猜 ``maintenance_tick`` 是干嘛的。
+TIMER_LABELS: Dict[str, str] = {
+    "maintenance_tick": "维护计划扫描",
+}
+
+#: 每个定时器到底负责什么。"30 秒一拍"只是它的节拍，
+#: 真正的答复是它在替谁干活 —— 这两件事不是一回事。
+TIMER_NOTES: Dict[str, str] = {
+    "maintenance_tick": (
+        "每 30 秒扫一次维护计划，看有没有任务到点；"
+        "到点的才发事件转任务，所以它是「检查者」不是「执行者」"
+    ),
+}
 
 
 class ControlCenter:
@@ -691,24 +708,53 @@ class ControlCenter:
         queue: str = "",
         keyword: str = "",
         limit: int = 50,
+        since: str = "",
+        until: str = "",
+        order: str = "desc",
+        sort: str = "time",
     ) -> Dict[str, Any]:
-        """已建任务 + 终态历史。
+        """已建任务 + 终态历史，合并成**一份**排好序的明细。
 
-        ``tasks`` 是"现在还看得见的任务"（含在途），``history`` 是
-        "最近做完的那些"。核对数据时两边一起看：成功数对不上，
-        通常是任务被 ``_tasks`` 淘汰了，只有历史里还留着。
+        ``rows`` 是唯一该被渲染的那份数据；``tasks`` / ``history`` 保留给
+        既要"现在还活着的任务"又要"已淘汰的记录"的调用方。
+        两者分开看容易算重（同一条任务两边都有），所以列表一律用 ``rows``。
+
+        :param status: 精确状态或状态组名。``failed`` 会把"失败后正在重试"
+                       的也算进来 —— ``failed`` 在存储里从不停留，
+                       精确匹配永远是空
+        :param since/until: 创建时间的上下界，``YYYY-MM-DD`` 或完整 ISO
+        :param sort: ``time``（创建时间）/ ``elapsed``（耗时）/ ``attempts``
+        :param order: ``desc``（默认，最新在前）/ ``asc``
         """
         sch = self._event_scheduler()
         if sch is None:
             return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
         store = sch.store
         limit = max(1, min(int(limit or 50), 500))
+        since_dt = parse_ledger_dt(since)
+        until_dt = parse_ledger_dt(until, end=True)
+        ledger = store.ledger_rows(
+            status=status, task_type=task_type, queue=queue, keyword=keyword,
+            limit=limit, since=since_dt, until=until_dt, order=order, sort=sort,
+        )
         return {
             "ok": True,
+            "rows": ledger["rows"],
+            # 计数与明细同源：按钮上写 N，点下去就是 N 条（超出 limit 除外）
+            "status_counts": ledger["status_counts"],
+            "total": ledger["total"],
+            "scoped": ledger["scoped"],
+            "matched": ledger["matched"],
+            "filters": {
+                "status": status, "task_type": task_type, "queue": queue,
+                "keyword": keyword, "limit": limit,
+                "since": since, "until": until, "sort": sort, "order": order,
+            },
             "tasks": store.tasks(status=status, task_type=task_type,
-                                 queue=queue, keyword=keyword, limit=limit),
+                                 queue=queue, keyword=keyword, limit=limit,
+                                 since=since_dt, until=until_dt),
             "history": store.history(status=status, task_type=task_type,
-                                     limit=limit),
+                                     limit=limit, since=since_dt, until=until_dt),
             "history_summary": store.history_summary(),
             "summary": {
                 "success": store.stats.get("success", 0),
@@ -980,8 +1026,17 @@ class ControlCenter:
                         return {"ok": False, "error": f"{name}.{key} 不是整数"}
             sched = str(cfg.get("schedule") or "").lower()
             if sched == "interval":
+                # **只在旧字段 interval_sec 真的写了才校验**。
+                # 新配置用 interval_minutes，写 `cfg.get("interval_sec") or 0`
+                # 会拿到 0，于是 0 < 300 恒成立 —— 任何周期任务都会被
+                # 这条护栏误拦（包括"十分钟刷一次股票池"这种正当配置）。
+                # 新字段的下限已由 MaintenanceJob.interval_seconds_value()
+                # 按任务类别兜底（维护类 1 小时、业务类 1 分钟），这里不重复设限。
+                raw_sec = cfg.get("interval_sec")
+                if raw_sec is None or str(raw_sec).strip() == "":
+                    continue
                 try:
-                    if int(cfg.get("interval_sec") or 0) < 300:
+                    if int(raw_sec) < 300:
                         return {
                             "ok": False,
                             "error": f"{name} 的周期必须 >= 300 秒（太快会把日志刷满）",
@@ -999,6 +1054,293 @@ class ControlCenter:
         if result.get("ok"):
             self._audit("maintenance_run", {"job": name})
         return result
+
+    def maintenance_add(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """新增一条定时任务（周期性或一次性）。
+
+        这是"调度可配置"的入口：以前任务清单写死在 ``DEFAULT_JOBS`` 里，
+        要加一类周期跑的活只能改代码；现在往配置里写一条就能生效。
+
+        危险参数仍走 :meth:`_guard_destructive` —— 新增通道不该成为绕过口。
+        """
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        payload = payload or {}
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "缺少任务名（name）"}
+        cfg = payload.get("cfg")
+        if not isinstance(cfg, dict):
+            cfg = {k: v for k, v in payload.items() if k != "name"}
+        cfg = dict(cfg)
+        cfg.setdefault("task_type", payload.get("task_type") or "")
+        guard = self._guard_destructive({name: cfg})
+        if guard is not None:
+            return guard
+        try:
+            result = sch.maintenance.add_job(name, cfg)
+        except Exception as exc:
+            return {"ok": False, "error": f"新增失败: {exc}"}
+        if result.get("ok"):
+            self._audit("maintenance_add", {"job": name,
+                                            "task_type": cfg.get("task_type")})
+        return result
+
+    def maintenance_remove(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """删除一条自定义定时任务（内置任务只能停用）。"""
+        sch = self._event_scheduler()
+        if sch is None:
+            return {"ok": False, "error": "当前引擎没有事件驱动的调度器"}
+        name = str((payload or {}).get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "缺少任务名（name）"}
+        try:
+            result = sch.maintenance.remove_job(name)
+        except Exception as exc:
+            return {"ok": False, "error": f"删除失败: {exc}"}
+        if result.get("ok"):
+            self._audit("maintenance_remove", {"job": name})
+        return result
+
+    # ============================================================
+    # 内置定时任务总清单
+    # ============================================================
+    def builtin_schedules(self) -> Dict[str, Any]:
+        """系统里**所有会自动执行的事**的一份清单。
+
+        为什么要单独有这一屏：定时任务散在四个地方 ——
+
+          1. ``MaintenancePlanner`` 的任务（``config/maintenance.json`` 驱动）
+          2. 调度器注册的周期定时器（代码里 ``start_timer`` 出来的节拍源）
+          3. 采集服务内部的四个单元（各自一个 ``LoopingCall``）
+
+        它们的周期、数据来源、能不能改各不相同，但用户关心的只有一个问题：
+        **"这台机器自己会做哪些事，多久做一次"**。以前答这个问题要翻三处代码，
+        现在是读一条接口。
+
+        ``source`` 区分 "@可以改" 与 "只能改代码"：面板上标错这两者的代价比
+        标漏更严重 —— 用户会以为改了配置就有用，然后等一个永远不会来的执行。
+        """
+        items: List[Dict[str, Any]] = []
+        sch = self._event_scheduler()
+        if sch is not None:
+            self._collect_maintenance_schedules(sch, items)
+            self._collect_timer_schedules(sch, items)
+        # 采集单元挂在引擎组件上，与调度器是否存在无关，单独取
+        self._collect_collection_schedules(items)
+        return {
+            "ok": True,
+            "items": items,
+            "total": len(items),
+            "enabled": sum(1 for i in items if i.get("enabled")),
+            "configurable": sum(1 for i in items if i.get("editable")),
+        }
+
+    def _collect_maintenance_schedules(self, sch: Any, items: List[Dict[str, Any]]) -> None:
+        try:
+            snap = sch.maintenance.snapshot()
+        except Exception as exc:  # pragma: no cover - 计划器不可用不算致命
+            logger.warning(f"读取维护计划失败（已跳过）: {exc}")
+            return
+        for job in snap.get("jobs") or []:
+            cadence = self._maintenance_cadence(job)
+            items.append({
+                "name": str(job.get("name") or ""),
+                "label": str(job.get("label") or job.get("name") or ""),
+                "group": "维护计划",
+                "source": "配置",
+                "editable": True,
+                "task_type": str(job.get("task_type") or ""),
+                "enabled": bool(job.get("enabled")),
+                "kind": str(job.get("schedule") or ""),
+                "kind_label": str(job.get("schedule_label") or ""),
+                "cadence": cadence,
+                "interval_text": cadence,
+                "interval_seconds": float(job.get("interval_seconds") or 0.0),
+                "trading_hours_only": bool(job.get("trading_hours_only")),
+                "waiting_market": bool(job.get("waiting_market")),
+                "next_run_text": str(job.get("next_run_text") or "—"),
+                "last_run_text": str(job.get("last_run_iso") or "从未执行"),
+                "runs": int(job.get("runs") or 0),
+                "errors": int(job.get("errors") or 0),
+                "config_error": str(job.get("config_error") or ""),
+                "where": "config/maintenance.json",
+                "note": str(job.get("description") or ""),
+            })
+
+    @staticmethod
+    def _maintenance_cadence(job: Dict[str, Any]) -> str:
+        """把一种周期翻译成人话。七种周期各有自己的字段，落到一行里要说清。"""
+        kind = str(job.get("schedule") or "")
+        minutes = int(job.get("interval_minutes") or 0)
+        if kind == "interval":
+            if minutes > 0:
+                return f"每 {minutes} 分钟"
+            hours = job.get("interval_hours") or 0
+            return f"每 {hours} 小时"
+        if kind == "daily":
+            return f"每天 {job.get('at') or '?'}"
+        if kind == "weekly":
+            return f"每{job.get('weekday_label') or '周?'} {job.get('at') or '?'}"
+        if kind == "monthly":
+            return f"每月 {job.get('day_of_month')} 号 {job.get('at') or '?'}"
+        if kind == "cron":
+            return str(job.get("cron_text") or job.get("cron") or "cron 未填")
+        if kind == "once":
+            return f"一次性（{job.get('once_at') or '时刻未填'}）"
+        if kind == "startup":
+            return "引擎每次启动一次"
+        return kind or "未知周期"
+
+    def _collect_timer_schedules(self, sch: Any, items: List[Dict[str, Any]]) -> None:
+        try:
+            timers = sch.timers() or []
+        except Exception as exc:  # pragma: no cover
+            logger.debug(f"读取周期定时器失败（已跳过）: {exc}")
+            return
+        for timer in timers:
+            tid = str(timer.get("timer_id") or "")
+            seconds = float(timer.get("interval") or 0.0)
+            running = bool(timer.get("running"))
+            items.append({
+                "name": tid,
+                "label": TIMER_LABELS.get(tid, tid),
+                "group": "节拍定时器",
+                "source": "代码",
+                "editable": False,
+                "task_type": "",
+                "enabled": running,
+                "kind": "timer",
+                "kind_label": "周期发事件",
+                "cadence": self._humanize_seconds(seconds),
+                "interval_text": self._humanize_seconds(seconds),
+                "interval_seconds": seconds,
+                "trading_hours_only": False,
+                "waiting_market": False,
+                "next_run_text": "持续运行中" if running else "未运行",
+                "last_run_text": "—",
+                "runs": 0,
+                "errors": 0,
+                "config_error": "",
+                "where": "代码注册",
+                "note": TIMER_NOTES.get(tid, "周期性发出节拍事件，由订阅它的规则转成具体任务"),
+            })
+
+    @staticmethod
+    def _humanize_seconds(seconds: float, bare: bool = False) -> str:
+        """秒数 → 「每 N 分钟」（``bare=True`` 时省掉「每」，用于嵌进句子里）。"""
+        seconds = float(seconds or 0.0)
+        if seconds <= 0:
+            return "—" if bare else "—"
+        if seconds < 90:
+            text = f"{seconds:g} 秒"
+        elif seconds < 5400:
+            text = f"{seconds / 60.0:g} 分钟"
+        elif seconds < 172800:
+            text = f"{seconds / 3600.0:g} 小时"
+        else:
+            text = f"{seconds / 86400.0:g} 天"
+        return text if bare else f"每 {text}"
+
+    def _collect_collection_schedules(self, items: List[Dict[str, Any]]) -> None:
+        """采集服务四个单元的节拍。
+
+        它们不走调度器也不用任务队列，而是各自一个 ``LoopingCall`` ——
+        这是上一轮合并时保留的设计（节拍不同，合并后仍是四个单元）。
+        代价是不进维护计划面板，所以必须在这里手工列出来，
+        否则"系统会定时做什么"这份清单是缺的。
+        """
+        comp = None
+        try:
+            comp = self.engine.get_component("collection_service")
+        except Exception as exc:
+            logger.debug(f"取不到采集服务（未装配？）: {exc}")
+            return
+        if comp is None:
+            return
+        try:
+            snap = comp.snapshot() or {}
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"读取采集服务快照失败（已跳过）: {exc}")
+            return
+
+        def _add(name: str, label: str, unit: Dict[str, Any], cadence: str,
+                 seconds: float, note: str, interval_key: str = "") -> None:
+            stats = unit.get("stats") or {}
+            items.append({
+                "name": name,
+                "label": label,
+                "group": "采集单元",
+                "source": "配置",
+                "editable": True,
+                "task_type": "",
+                "enabled": bool(unit.get("enabled")),
+                "kind": "loop",
+                "kind_label": "常驻循环",
+                "cadence": cadence,
+                "interval_text": cadence,
+                "interval_seconds": float(seconds or 0.0),
+                "trading_hours_only": bool(unit.get("trading_hours_only")),
+                "waiting_market": False,
+                "next_run_text": "运行中" if unit.get("running") else "未运行",
+                "last_run_text": "—",
+                "runs": int(stats.get("runs") or 0),
+                "errors": int(stats.get("errors") or 0),
+                "config_error": str(unit.get("disabled_reason") or ""),
+                "where": "config/collector.json",
+                "note": note,
+            })
+
+        kline = snap.get("kline") or {}
+        if kline:
+            buckets = sorted(kline.get("buckets") or [])
+            jobs = kline.get("jobs") or []
+            # 多个频率就是多个 LoopingCall，说"每 60 秒"会漏掉慢的那批 ——
+            # 明说区间，人才不会对得上了一半觉得错
+            if not buckets:
+                cadence = "按任务各自频率"
+            elif len(buckets) == 1:
+                cadence = self._humanize_seconds(buckets[0])
+            else:
+                cadence = (self._humanize_seconds(buckets[0])
+                           + " ~ " + self._humanize_seconds(buckets[-1]))
+            _add(
+                "collection.kline", "K 线采集", kline, cadence,
+                buckets[0] if buckets else 0.0,
+                f"{len(jobs)} 个采集任务，分 {len(buckets)} 种频率各跑一个循环",
+            )
+        cross = snap.get("cross") or {}
+        if cross:
+            _add(
+                "collection.cross", "日频截面采集", cross,
+                "盘中每 " + self._humanize_seconds(cross.get("interval"), bare=True)
+                + "，盘后再补一次",
+                float(cross.get("interval") or 0.0),
+                "资金流 / 筹码 / 基本面等日频数据，"
+                + (f"下一次窗口 {cross.get('next_slot') or '—'}"
+                   if cross.get("next_slot") else "按交易时段自动安排"),
+            )
+        guard = snap.get("guard") or {}
+        if guard:
+            _add(
+                "collection.guard", "数据完整性与补全", guard,
+                self._humanize_seconds(guard.get("interval")),
+                float(guard.get("interval") or 0.0),
+                f"启动后延迟 {guard.get('start_delay')} 秒首检，自动补全 {guard.get('auto_repair')}",
+            )
+        watch = snap.get("watchlist") or {}
+        if watch:
+            cfg = watch.get("config") or {}
+            _add(
+                "collection.watchlist", "关注标的采集", watch,
+                f"扫描节拍 "
+                + self._humanize_seconds(cfg.get("sweep_seconds"), bare=True)
+                + f"，标的默认 {cfg.get('interval') or '?'}",
+                float(cfg.get("sweep_seconds") or 0.0),
+                f"共 {watch.get('total') or 0} 只关注标的，其中 {watch.get('enabled_count') or 0} 只启用"
+                + f"，当前到期 {watch.get('due_count') or 0} 只",
+            )
 
     # ============================================================
     # 日志级别（运行中可调，不用重启）

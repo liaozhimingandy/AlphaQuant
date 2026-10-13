@@ -389,10 +389,13 @@ def _build_collector(tmp: Path, content: str = "", **kw) -> _StubCollector:
 
 
 class TestCollectionServiceShape(TempWorkspaceMixin, unittest.TestCase):
-    """合并后的形态断言：一个服务、三个能力、一份三分区快照。
+    """合并后的形态断言：一个服务、四个能力、一份四分区快照。
 
     这些用例在合并前是不存在的（那时有三个平级组件、三个快照）。
     它们要守的正是"别再被拆回去"。
+
+    能力集合用**全等**比较而不是包含：这里关心的正是"有没有多出来/少掉"，
+    放宽成 ``issubset`` 就等于放弃了这道护栏 —— 谁都能随手加一个能力。
     """
 
     def test_name_and_capabilities(self):
@@ -401,14 +404,20 @@ class TestCollectionServiceShape(TempWorkspaceMixin, unittest.TestCase):
         self.assertEqual(CollectionService.name, "collection_service")
         self.assertEqual(
             set(CollectionService.provides),
-            {Cap.COLLECT_KLINE, Cap.COLLECT_CROSS, Cap.DATA_INTEGRITY},
+            {Cap.COLLECT_KLINE, Cap.COLLECT_CROSS, Cap.DATA_INTEGRITY,
+             Cap.WATCHLIST_COLLECT},
         )
 
-    def test_snapshot_has_three_unit_sections(self):
+    def test_snapshot_has_all_unit_sections(self):
         comp = _build_collector(self.workdir(), "", symbols=["000001"], interval="5m")
         snap = comp.snapshot()
-        for section in ("kline", "cross", "guard"):
-            self.assertIn(section, snap)
+        # 四个单元各一分区。watchlist 依赖库里的表，
+        # 没有表时 snapshot 会退化成 watchlist_error 而不是崩 —— 那也算进来了
+        for section in ("kline", "cross", "guard", "watchlist"):
+            self.assertTrue(
+                section in snap or (section + "_error") in snap,
+                f"快照缺少 {section} 分区",
+            )
 
     def test_unit_switches_are_read_only_views(self):
         comp = _build_collector(self.workdir(), "", symbols=["000001"], interval="5m")

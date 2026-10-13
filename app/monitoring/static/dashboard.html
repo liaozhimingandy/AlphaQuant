@@ -644,7 +644,8 @@
                title="默认关闭：库里已有当日数据时跳过重复采集，避免白耗请求额度">
           <input id="pool-force" type="checkbox"> 强制重采
         </label>
-        <button id="btn-pool-refresh" class="primary">刷新</button>
+        <button id="btn-pool-refresh" class="primary"
+          title="重新拉候选 → 同步资金流/筹码/基本面 → 打分落库（会联网，几十秒到几分钟）">刷新股票池</button>
         <span class="hint" id="pool-msg"></span>
       </div>
       <div class="row" style="flex-wrap:wrap;gap:14px;align-items:center;margin-top:8px">
@@ -674,6 +675,46 @@
       再减去风险扣分。某维度没数据时它的权重会**分摊给其它维度**（不按 0 算）；
       可用维度不足 2 个时**拒绝给分** —— 维度太少就打分只会骗人。
       权重与阈值都在 <code>config/score.json</code>，候选池在 <code>config/pool.json</code>。</p>
+    </div>
+  </section>
+
+  <!-- ==================== 关注标的（自选股定时自动采集） ==================== -->
+  <section class="panel">
+    <h2>关注标的 <span class="muted" id="wl-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <label>标的<br><input id="wl-symbol" placeholder="600519" style="width:120px"></label>
+        <label>频率<br><input id="wl-freq" placeholder="1h" style="width:80px"
+               title="30s / 5m / 1h / 1d，裸数字按秒；留空 = 用下面的默认值"></label>
+        <label>额外类别<br><input id="wl-cats" placeholder="lhb,margin" style="width:150px"
+               title="留空 = 跟随服务默认类别。K线/资金流/筹码/基本面本来就包含在内"></label>
+        <label>备注<br><input id="wl-name" placeholder="可选名称" style="width:110px"></label>
+        <button id="btn-wl-add" class="primary">关注</button>
+        <button id="btn-wl-now">全部立即采集</button>
+        <span class="hint" id="wl-msg"></span>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px">
+        <span class="hint">新增标的的默认频率：</span>
+        <input id="wl-default-freq" style="width:80px">
+        <button id="btn-wl-default">保存默认值</button>
+        <span class="hint muted" id="wl-default-note"></span>
+      </div>
+      <div id="wl-warn" class="banner err hidden"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>代码</th><th>名称</th><th class="num">频率</th><th>类别</th>
+            <th>上次采集</th><th class="num">成功</th><th class="num">失败</th>
+            <th>状态</th><th>操作</th>
+          </tr></thead>
+          <tbody id="wl-rows"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="hint">关注标的（自选股）会<b>按各自的频率</b>定时自动采集：<code>K线 / 资金流 / 筹码 / 基本面</code>
+        加上这里填的额外类别。每只票的频率可以单独改，改动<b>存在库里</b>、
+        不会被 <code>config/collector.json</code> 覆盖 —— 那里配的只是<b>新增</b>标的时的默认值。
+        采集失败不会立刻重试，但它也<b>不会被记成"已采集"</b>，下一轮扫描自然会补上。
+        停用的标的会被跳过，但清单与其配置都留着，随时能开回来。</p>
     </div>
   </section>
 
@@ -786,6 +827,7 @@
     <h2>执行池 <span class="muted" id="rt-pools-hint"></span></h2>
     <div class="body">
       <div class="comp-grid" id="rt-pools"></div>
+      <p class="hint" id="rt-pools-cfg"></p>
       <p class="hint">每个池是<b>独立</b>的线程池：回测跑满也吃不掉行情的线程，
       批量因子算不完也不会拖慢撤单。占用条满格不代表有问题 ——
       那是"这个池正在满负荷干活"，只有<b>长期满格且队列持续积压</b>才需要扩容。</p>
@@ -854,12 +896,33 @@
         </select></label>
         <label>关键字<br><input id="rt-ledger-kw" placeholder="ID / 幂等键 / 关联 ID"
           style="width:210px"></label>
+        <label>排序<br><select id="rt-ledger-sort" style="width:160px">
+          <option value="time:desc" selected>创建时间（新 → 旧）</option>
+          <option value="time:asc">创建时间（旧 → 新）</option>
+          <option value="elapsed:desc">耗时（长 → 短）</option>
+          <option value="attempts:desc">尝试次数（多 → 少）</option>
+        </select></label>
         <label>条数<br><select id="rt-ledger-limit" style="width:90px">
           <option value="30">30</option>
           <option value="100" selected>100</option>
           <option value="300">300</option>
         </select></label>
-        <button id="btn-rt-ledger">刷新</button>
+        <button id="btn-rt-ledger" class="primary">搜索</button>
+        <button id="btn-rt-ledger-reset">重置</button>
+        <span class="hint" id="rt-ledger-dirty"></span>
+      </div>
+      <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:8px">
+        <label>创建于（起）<br><input id="rt-ledger-since" type="date" style="width:150px"></label>
+        <label>创建于（止）<br><input id="rt-ledger-until" type="date" style="width:150px"></label>
+        <button class="mini" data-ledger-range="today">今天</button>
+        <button class="mini" data-ledger-range="7d">近 7 天</button>
+        <button class="mini" data-ledger-range="30d">近 30 天</button>
+        <button class="mini" data-ledger-range="all">全部日期</button>
+        <span class="hint" id="rt-ledger-range-hint"></span>
+      </div>
+      <div class="hint muted" style="margin-top:6px">
+        改完筛选条件点「搜索」才查询（关键字框里按回车等价）；
+        只有下面的自动刷新会跳过重绘，避免把你正在看的详情冲掉。
       </div>
       <div id="rt-ledger-sum" class="hint" style="margin-top:8px"></div>
       <div class="table-wrap" style="margin-top:8px;max-height:460px;overflow:auto">
@@ -874,8 +937,15 @@
       <p class="hint">汇总数字只能回答"成功 1200 条"，回答不了
       "这 1200 条分别是哪些、参数对不对、什么时候跑的"。
       这里给出<b>逐条明细</b>：点「详情」看完整参数、结果与错误原文。<br>
-      <b>累计</b>是本次进程启动以来的总数，<b>历史里有明细</b>是还看得见逐条记录的条数 ——
-      两个数的差是"已经滚出明细窗口的旧任务"。</p>
+      <b>失败</b>与<b>死信</b>的分界在这儿：<code>failed</code> 不是一个会留存的状态 ——
+      任务一失败就立刻转成「等待重试」或「死信」，所以「失败」按钮看到的是
+      <b>失败过、还在自动重试</b>的那批；重试次数用尽或不该重试的最终会落到<b>死信</b>，
+      去「错误队列」页处理。<br>
+      <b>日期范围</b>按创建时间过滤，默认不限 —— 长跑服务上明细动辄上万条，
+      先用「今天 / 近 7 天」收窄再看。排序默认<b>创建时间倒序</b>（最新在最前）。<br>
+      <b>累计</b>是本次进程启动以来的总数（永不清零），上面的按钮数字是
+      <b>当前筛选范围内还看得见明细</b>的条数 —— 两者不相等是正常的，
+      差额是"已经滚出明细窗口的旧任务"。</p>
     </div>
   </section>
 
@@ -991,6 +1061,30 @@
 </main>
 
 <main id="page-sched" class="hidden">
+  <section class="panel">
+    <h2>内置定时任务 <span class="muted" id="rt-schedules-hint"></span></h2>
+    <div class="body"><div class="table-wrap" style="max-height:420px;overflow:auto">
+      <table style="min-width:960px">
+        <thead><tr>
+          <th>任务</th><th>分组</th><th>周期</th><th>任务类型</th>
+          <th class="num">跑过</th><th class="num">失败</th>
+          <th>下次执行</th><th>状态</th><th>从哪里改</th>
+        </tr></thead>
+        <tbody id="rt-schedule-rows"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div id="rt-schedules-note" class="hint" style="margin-top:8px"></div></div>
+    <div class="body"><p class="hint">这一屏回答"<b>这台机器自己会做哪些事、多久做一次</b>"。
+      系统的定时任务分散在三处，缺哪一屏都会漏：
+      <b>维护计划</b>（<code>config/maintenance.json</code>，可在面板「维护 · 持久化」里增删改）、
+      <b>节拍定时器</b>（代码里注册的周期事件源，只能改代码）、
+      <b>采集单元</b>（采集服务内部四个常驻循环，节拍在
+      <code>config/collector.json</code>）。<br>
+      「从哪里改」这一列比「周期」更重要：不看它会以为改了配置就会生效，
+      然后一直等一个永远不会来的执行。<b>仅交易时段</b>的任务在休市时会显示
+      「等开盘」，它不是没排上队。</p></div>
+  </section>
+
   <section class="panel">
     <h2>调度规则 <span class="muted" id="rt-rules-hint"></span></h2>
     <div class="body"><div class="table-wrap">
@@ -1114,8 +1208,44 @@
         <button id="btn-rt-maint-save" class="primary">保存维护计划</button>
         <span class="hint" id="rt-maint-msg"></span>
       </div>
-      <p class="hint">周期七种：<b>引擎启动时</b>（每次启动跑一次）、<b>每 N 小时</b>
-      （最小 1 小时）、<b>每天 HH:MM</b>、<b>每周几 HH:MM</b>、<b>每月几号 HH:MM</b>
+
+      <div class="row" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <label>任务名<br>
+          <input id="rt-maint-new-name" style="width:120px" placeholder="pool_refresh"></label>
+        <label>任务类型<br><select id="rt-maint-new-type" style="width:180px"></select></label>
+        <label>标识<br>
+          <input id="rt-maint-new-label" style="width:130px" placeholder="候选池刷新"></label>
+        <label>周期<br><select id="rt-maint-new-sched" style="width:130px">
+          <option value="interval">每 N 分钟/小时</option>
+          <option value="daily">每天 HH:MM</option>
+          <option value="weekly">每周几 HH:MM</option>
+          <option value="monthly">每月几号 HH:MM</option>
+          <option value="cron">Cron 表达式</option>
+          <option value="once">指定时刻一次</option>
+        </select></label>
+        <label data-mnew="interval">N 分钟<br>
+          <input id="rt-maint-new-min" type="number" min="1" step="1" value="10" style="width:90px"></label>
+        <label data-mnew="interval">N 小时<br>
+          <input id="rt-maint-new-hours" type="number" min="1" step="1" value="0" style="width:90px"></label>
+        <label data-mnew="daily" style="display:none">时刻 (HH:MM)<br>
+          <input id="rt-maint-new-at" style="width:90px" placeholder="03:10"></label>
+        <label data-mnew="cron" style="display:none">Cron<br>
+          <input id="rt-maint-new-cron" style="width:150px" placeholder="0 3 * * *"></label>
+        <label data-mnew="once" style="display:none">时刻<br>
+          <input id="rt-maint-new-once" style="width:160px" placeholder="2026-10-14 09:35"></label>
+        <label class="hint" style="display:inline-flex;flex-direction:row;align-items:center;gap:4px">
+          <input type="checkbox" id="rt-maint-new-trading" checked> 仅交易时段</label>
+        <button id="btn-rt-maint-add" class="primary">新增定时任务</button>
+        <span class="hint" id="rt-maint-new-msg"></span>
+      </div>
+      <p class="hint" style="margin-top:6px">任务类型下拉由后台的任务清单渲染；周期＝
+      <b>每 N 分钟/小时</b>时，<b>N 分钟优先</b>（填 10 就是十分钟一次，留 0 则按 N 小时走）。
+      周期性活 <b>建议勾上「仅交易时段」</b> —— 休市刷出来的排名没有意义，
+      还会平白消耗数据源的请求额度。维护类任务（<code>maintenance.*</code>）
+      即使填了更小的值也会被兜底到 1 小时。</p>
+      <p class="hint">周期七种：<b>引擎启动时</b>（每次启动跑一次）、
+      <b>每 N 分钟/小时</b>（业务任务可到分钟级，<code>maintenance.*</code> 最小 1 小时）、
+      <b>每天 HH:MM</b>、<b>每周几 HH:MM</b>、<b>每月几号 HH:MM</b>
       （1–28 号，小月自动顺延）、<b>Cron 表达式</b>（分 时 日 月 周，支持
       <code>*/n</code> / <code>a-b</code> / <code>a,b</code>）、
       <b>指定时刻一次</b>（跑完自动停用）。
@@ -1688,6 +1818,9 @@
     }).catch(function(e){ toast(label + ' 失败: ' + e.message, true); });
   }
 
+  var newSchedSel = document.getElementById('rt-maint-new-sched');
+  if(newSchedSel){ newSchedSel.addEventListener('change', syncNewJobFields); }
+
   document.addEventListener('click', function(ev){
     var b = ev.target.closest('button'); if(!b) return;
 
@@ -1699,21 +1832,25 @@
     if(b.hasAttribute('data-ls')){
       var sel = $('rt-ledger-status');
       if(sel) sel.value = b.getAttribute('data-ls');
-      loadLedger();
+      loadLedger({force: true});
       return;
     }
+    // ---- 任务明细日期范围快捷按钮 ----
+    var lr = b.getAttribute('data-ledger-range');
+    if(lr){ applyLedgerRange(lr); return; }
 
     // ---- 运行时页 ----
     if(b.id === 'btn-rt-dispatch'){ doDispatch(); return; }
     if(b.id === 'btn-rt-maint-save'){ doSaveMaintenance(); return; }
     if(b.id === 'btn-rt-log-apply'){ doApplyLogLevel(); return; }
-    if(b.id === 'btn-rt-ledger'){ loadLedger(); return; }
-    if(b.id === 'btn-rt-trace'){ loadTrace($('rt-trace-id').value.trim()); return; }
-    if(b.id === 'btn-rt-trace-refresh'){ loadTrace(''); return; }
+    if(b.id === 'btn-rt-ledger'){ loadLedger({force: true}); return; }
+    if(b.id === 'btn-rt-ledger-reset'){ ledgerReset(); return; }
+    if(b.id === 'btn-rt-trace'){ loadTrace($('rt-trace-id').value.trim(), {force: true}); return; }
+    if(b.id === 'btn-rt-trace-refresh'){ loadTrace('', {force: true}); return; }
     var replayId = b.getAttribute('data-replay');
     if(replayId){ doReplay(replayId); return; }
     var gotoTrace = b.getAttribute('data-trace');
-    if(gotoTrace){ $('rt-trace-id').value = gotoTrace; loadTrace(gotoTrace); return; }
+    if(gotoTrace){ $('rt-trace-id').value = gotoTrace; loadTrace(gotoTrace, {force: true}); return; }
     var sampleType = b.getAttribute('data-event-sample');
     if(sampleType){
       // 点第二次 = 取消过滤，回到"最近所有事件"
@@ -1785,6 +1922,11 @@
       }).catch(function(e){ toast('触发失败: ' + e.message, true); });
       return;
     }
+
+    var mdel = b.getAttribute('data-mdel');
+    if(mdel){ doDeleteMaintJob(mdel); return; }
+
+    if(b.id === 'btn-rt-maint-add'){ doAddMaintJob(); return; }
 
     // ---- 实盘操作 ----
     if(b.id === 'btn-reconcile'){
@@ -1890,12 +2032,9 @@
     // ---- 股票池 ----
     if(b.id === 'btn-pool-refresh'){
       $('pool-msg').textContent = '提交中…（联网同步 + 打分，可能需要几十秒）';
-      var excl = {
-        exclude_st: $('pool-ex-st').checked,
-        exclude_cyb: $('pool-ex-cyb').checked,
-        exclude_kcb: $('pool-ex-kcb').checked,
-        exclude_bj: $('pool-ex-bj').checked,
-      };
+      // 勾选框是**这一次刷新**的入参，所以在这里现读，不用任何缓存副本：
+      // 缓存一旦和界面不同步，就会出现"明明勾了却没剔除"。
+      var excl = poolExclusionPayload();
       post('/api/pool/refresh', {
         source: $('pool-source').value,
         limit: Number($('pool-limit').value) || 30,
@@ -1920,6 +2059,21 @@
         _renderPoolRefreshResult(r);
         loadPool();
       }).catch(function(e){ $('pool-msg').textContent = '失败: ' + e.message; });
+      return;
+    }
+    // ---- 关注标的 ----
+    if(b.id === 'btn-wl-add'){ wlAdd(); return; }
+    if(b.id === 'btn-wl-now'){ wlCollectAll(); return; }
+    if(b.id === 'btn-wl-default'){ wlSaveDefault(); return; }
+    var wlActName = b.getAttribute('data-wl-act');
+    if(wlActName){
+      // 行可能被轮询重绘过，所以一律从 data-* 上现取，不依赖闭包变量
+      var wlTr = b.closest('[data-wl-sym]');
+      if(wlTr){
+        var wlIn = wlTr.querySelector('input.wl-freq');
+        wlAct(wlTr.getAttribute('data-wl-sym'), wlActName,
+              wlIn ? wlIn.value.trim() : '');
+      }
       return;
     }
     var poolAct = b.getAttribute('data-act');
@@ -2248,17 +2402,37 @@
   }
 
   // 轮询引擎任务直到终态，再渲染结果（让刷新在「任务明细」可见、可恢复）
+  //
+  // 两个踩过的坑都写在这里，别再踩第二次：
+  //  1) 接口是 /api/task?id=xxx。早期这里写 /api/engine_tasks，后端没这条
+  //     路由，于是每次刷新都弹「查询任务失败: 未知接口」—— 而任务其实早就
+  //     跑完了。面板上的报错必须能落到真实的失败上，不能是写错路径。
+  //  2) 状态值是**小写**（success / dead_letter / cancelled），
+  //     拿它跟 'SUCCESS' 比永远不相等 —— 后果是轮询一直不结束，
+  //     白白转满 10 分钟才说"仍在进行"。
+  //  另外 failed 不在终态里：失败会立刻转成 retrying 或 dead_letter，
+  //  failed 从不停留（见 store.py 的 STATUS_GROUPS）。
+  var TASK_TERMINAL = {success: 1, dead_letter: 1, cancelled: 1};
+
+  function engineTaskUrl(task_id){
+    return '/api/task?id=' + encodeURIComponent(task_id);
+  }
+
   function _pollPoolRefresh(task_id, deadline){
     if(Date.now() > deadline){
       $('pool-msg').textContent += '（仍在进行，可在「任务明细」查看进度）';
       return;
     }
-    api('/api/engine_tasks?id=' + encodeURIComponent(task_id)).then(function(d){
+    api(engineTaskUrl(task_id)).then(function(d){
       var t = d && d.task;
-      if(!t){ $('pool-msg').textContent = '查询任务失败（可在「任务明细」查看）'; return; }
+      if(!t){
+        $('pool-msg').textContent = '查询任务失败: ' +
+          ((d && d.error) || '任务不存在') + '（可在「任务明细」查看）';
+        return;
+      }
       var st = t.status || '';
-      if(st === 'SUCCESS' || st === 'FAILED' || st === 'DEAD_LETTER' || st === 'CANCELLED'){
-        if(st === 'SUCCESS'){
+      if(TASK_TERMINAL[st]){
+        if(st === 'success'){
           // 任务跑完了但业务无结果（例如候选池为空）：result.ok=False
           if(t.result && t.result.ok === false){
             $('pool-msg').textContent = '完成但无结果: ' + (t.result.error || '候选池为空');
@@ -2289,11 +2463,11 @@
       onTerminal(null, 'timeout');
       return;
     }
-    api('/api/engine_tasks?id=' + encodeURIComponent(task_id)).then(function(d){
+    api(engineTaskUrl(task_id)).then(function(d){
       var t = d && d.task;
       if(!t){ onTerminal(null, 'no_task'); return; }
       var st = t.status || '';
-      if(st === 'SUCCESS' || st === 'FAILED' || st === 'DEAD_LETTER' || st === 'CANCELLED'){
+      if(TASK_TERMINAL[st]){
         onTerminal(t, st);
       } else {
         setTimeout(function(){ _pollEngineTask(task_id, deadline, onTerminal); }, 1500);
@@ -2331,7 +2505,7 @@
         toast('补采已提交：任务 ' + r.task_id);
         _pollEngineTask(r.task_id, Date.now() + 600000, function(t, st){
           if(!t){ setMsg('补采仍在进行，可在「任务明细」查看'); loadCollector(); return; }
-          if(st === 'SUCCESS'){
+          if(st === 'success'){
             setMsg('');
             toast('补采完成，入库 ' + ((t.result && t.result.rows) || 0) + ' 条');
           } else {
@@ -2396,19 +2570,220 @@
       .catch(function(e){ $('pool-hint').textContent = '(加载失败: ' + e.message + ')'; });
   }
 
-  // 后端配置里的剔除开关 → 同步到面板勾选框（config/pool.json 改了也能反映）
+  // ---- 剔除条件：勾选即生效的说明 ----
+  //
+  // 三件事必须分开，混在一起就是"勾了但右侧文案不对"这类玄学 bug：
+  //  1) **文案**只由勾选框当前状态决定，而且勾完立刻重算（不等下一次轮询）；
+  //  2) **后端配置同步**只在**首次**渲染时做一次。以前每次轮询都用
+  //     config/pool.json 覆盖勾选框 —— 用户勾了创业板，几秒后被悄悄取消，
+  //     他只会以为"多选不好用"，而这其实是面板在覆盖他的操作；
+  //  3) 勾选本身**不写回后端**，它是这一次刷新的入参（见 btn-pool-refresh）。
+  //     真要改默认值，就去 config/pool.json，改完这边首次加载会把它带出来。
+  var POOL_EX_FIELDS = [
+    {id: 'pool-ex-st', text: 'ST'},
+    {id: 'pool-ex-cyb', text: '创业板'},
+    {id: 'pool-ex-kcb', text: '科创板'},
+    {id: 'pool-ex-bj', text: '北交所'},
+  ];
+  var POOL_EX_SYNCED = false;
+
+  // 任务明细里那些"改了就该标脏、等用户点搜索才查"的筛选控件
+  var LEDGER_FILTER_IDS = ['rt-ledger-status', 'rt-ledger-type', 'rt-ledger-kw',
+                           'rt-ledger-limit', 'rt-ledger-sort',
+                           'rt-ledger-since', 'rt-ledger-until'];
+
+  function renderPoolExNote(){
+    var el = $('pool-ex-note');
+    if(!el) return;
+    var on = POOL_EX_FIELDS.filter(function(f){
+      var box = $(f.id);
+      return box && box.checked;
+    }).map(function(f){ return f.text; });
+    el.innerHTML = on.length
+      ? '已开启剔除：<b>' + esc(on.join('、')) + '</b>（点刷新才生效）'
+      : '未开启任何剔除';
+  }
+
+  // 后端配置里的剔除开关 → 同步到面板勾选框（只在首次加载时做一次）
   function syncPoolExclusions(cfg){
+    if(POOL_EX_SYNCED) { renderPoolExNote(); return; }
     cfg = cfg || {};
-    $('pool-ex-st').checked = cfg.exclude_st !== false;
-    $('pool-ex-cyb').checked = !!cfg.exclude_cyb;
-    $('pool-ex-kcb').checked = !!cfg.exclude_kcb;
-    $('pool-ex-bj').checked = !!cfg.exclude_bj;
-    var on = [];
-    if($('pool-ex-st').checked) on.push('ST');
-    if($('pool-ex-cyb').checked) on.push('创业板');
-    if($('pool-ex-kcb').checked) on.push('科创板');
-    if($('pool-ex-bj').checked) on.push('北交所');
-    $('pool-ex-note').textContent = on.length ? '已开启剔除：' + on.join('、') : '未开启任何剔除';
+    var stBox = $('pool-ex-st');
+    // exclude_st 的默认语义是"开启"：只有**显式写成 false** 才是不排除。
+    // 配置里没有这一项时不能退化成 false —— 那等于默认把 ST 股放进候选池。
+    if(stBox) stBox.checked = cfg.exclude_st !== false;
+    var map = [['pool-ex-cyb', 'exclude_cyb'], ['pool-ex-kcb', 'exclude_kcb'],
+               ['pool-ex-bj', 'exclude_bj']];
+    map.forEach(function(pair){
+      var box = $(pair[0]);
+      if(box) box.checked = !!cfg[pair[1]];
+    });
+    POOL_EX_SYNCED = true;
+    renderPoolExNote();
+  }
+
+  function poolExclusionPayload(){
+    return {
+      exclude_st: $('pool-ex-st') ? $('pool-ex-st').checked : true,
+      exclude_cyb: $('pool-ex-cyb') ? $('pool-ex-cyb').checked : false,
+      exclude_kcb: $('pool-ex-kcb') ? $('pool-ex-kcb').checked : false,
+      exclude_bj: $('pool-ex-bj') ? $('pool-ex-bj').checked : false,
+    };
+  }
+
+  // ============================================================
+  // 关注标的（自选股 —— 按各自频率定时自动采集）
+  // ------------------------------------------------------------
+  // 表格每行都有一个可编辑的「频率」输入框，而这里是每 10s 轮询重绘的。
+  // 所以刷新第一件事就是问 uiBusy()：焦点在任何输入控件上（含行内频率框）
+  // 就整轮不重绘 —— 否则用户改到一半的频率会被轮询悄悄写回旧值，
+  // 而且他根本不会发现是写了又被覆盖，只会以为面板在跟他对着干。
+  // ============================================================
+  function wlLastText(it){
+    if(!it.last_collected_at) return '未采集';
+    var d = new Date(it.last_collected_at);
+    if(isNaN(d.getTime())) return '未采集';
+    return d.toLocaleString('zh-CN', {hour12:false});
+  }
+  function wlStateHtml(it){
+    if(!it.enabled) return '<span class="muted">已停用</span>';
+    if(it.last_error){
+      return '<span class="pill err" title="' + esc(String(it.last_error)) + '">上次失败</span>';
+    }
+    if(it.due) return '<span class="pill warn">待采</span>';
+    if(it.due_in_seconds == null) return '<span class="muted">-</span>';
+    return '<span class="pill run">' + ago(it.due_in_seconds) + '后</span>';
+  }
+  function wlRowHtml(it){
+    var cats = (it.categories && it.categories.length)
+      ? esc(it.categories.join(','))
+      : '<span class="muted">默认</span>';
+    return '<tr data-wl-sym="' + esc(it.symbol) + '" data-wl-enabled="' +
+        (it.enabled ? '1' : '0') + '">' +
+      '<td><b>' + esc(it.symbol) + '</b></td>' +
+      '<td class="muted">' + esc(it.name || '-') + '</td>' +
+      '<td class="num"><input class="wl-freq" value="' + esc(it.freq) + '" style="width:62px"></td>' +
+      '<td>' + cats + '</td>' +
+      '<td class="muted">' + wlLastText(it) + '</td>' +
+      '<td class="num">' + Number(it.runs || 0) + '</td>' +
+      '<td class="num">' + Number(it.errors || 0) + '</td>' +
+      '<td>' + wlStateHtml(it) + '</td>' +
+      '<td class="row" style="flex-direction:row;gap:4px">' +
+        '<button class="mini" data-wl-act="save">改频率</button>' +
+        '<button class="mini" data-wl-act="now">采集</button>' +
+        '<button class="mini" data-wl-act="toggle">' + (it.enabled ? '停用' : '启用') + '</button>' +
+        '<button class="mini" data-wl-act="remove" title="取消关注">×</button>' +
+      '</td></tr>';
+  }
+  function loadWatchlist(){
+    // 只在股票池页请求 —— 其它页面挂着这个面板也没用，白花一次请求
+    if(PAGE !== 'pool') return Promise.resolve();
+    return api('/api/watchlist').then(function(d){
+      if(uiBusy()) return;
+      var cfg = d.config || {}, svc = d.service || {}, st = svc.stats || {};
+      if(document.activeElement !== $('wl-default-freq')){
+        $('wl-default-freq').value = cfg.interval || '1h';
+      }
+      $('wl-default-note').textContent =
+        '检查周期 ' + (cfg.sweep_seconds || cfg.sweep_interval || 60) + 's · ' +
+        '单轮上限 ' + (cfg.max_per_round || 0) + ' 只' +
+        (st.runs ? (' · 已跑 ' + st.runs + ' 轮 / ' + (st.collected || 0) + ' 次成功') : '');
+
+      var tail = svc.running ? '定时器在跑'
+               : (svc.enabled === false ? '单元已停用' : '定时器未运行');
+      $('wl-hint').textContent = '(' + (d.total || 0) + ' 只 · 待采 ' +
+        (d.due_count || 0) + ' · ' + tail + ')';
+
+      var rows = d.items || [];
+      if(!rows.length){
+        $('wl-rows').innerHTML = '<tr><td colspan="9" class="muted">' +
+          '还没有关注任何标的 —— 上面填个代码，点「关注」就会被定时自动采集</td></tr>';
+        return;
+      }
+      $('wl-rows').innerHTML = rows.map(wlRowHtml).join('');
+    }).catch(function(e){
+      $('wl-hint').textContent = '(加载失败: ' + e.message + ')';
+    });
+  }
+  function wlAdd(){
+    var sym = $('wl-symbol').value.trim();
+    if(!sym){ toast('请填标的代码', true); return; }
+    var cats = $('wl-cats').value.split(/[,，\s]+/).filter(Boolean);
+    $('wl-msg').textContent = '提交中…';
+    post('/api/watchlist/add', {
+      symbol: sym, freq: $('wl-freq').value.trim(),
+      categories: cats, name: $('wl-name').value.trim(),
+    }).then(function(r){
+      if(!r.ok){
+        toast('关注失败: ' + (r.error || ''), true);
+        $('wl-msg').textContent = ''; return;
+      }
+      var it = r.item || {};
+      toast('已关注 ' + it.symbol + ' · 每 ' + it.freq);
+      $('wl-symbol').value = ''; $('wl-name').value = '';
+      $('wl-msg').textContent = '';
+      loadWatchlist();
+    }).catch(function(e){
+      toast('关注失败: ' + e.message, true); $('wl-msg').textContent = '';
+    });
+  }
+  function wlSaveDefault(){
+    var v = $('wl-default-freq').value.trim();
+    if(!v){ toast('请填默认频率', true); return; }
+    post('/api/watchlist/default_freq', {freq: v}).then(function(r){
+      toast(r.ok ? ('已保存默认值 ' + ((r.config && r.config.interval) || v))
+                : ('保存失败: ' + (r.error || '')), !r.ok);
+      loadWatchlist();
+    }).catch(function(e){ toast('保存失败: ' + e.message, true); });
+  }
+  function wlCollectAll(){
+    toast('已提交：全部关注标的立即采集（联网，可能要几十秒）');
+    post('/api/watchlist/now', {}).then(function(r){
+      var okN = (r.ok_symbols || []).length, badN = (r.failed_symbols || []).length;
+      toast(r.ok ? ('采集完成 · ' + okN + ' 只')
+                 : ('部分失败 · 成功 ' + okN + ' / 失败 ' + badN +
+                    (r.error ? (' | ' + r.error) : '')), !r.ok);
+      loadWatchlist();
+    }).catch(function(e){ toast('采集失败: ' + e.message, true); });
+  }
+  function wlAct(sym, act, freq){
+    if(act === 'remove'){
+      if(!confirm('确认取消关注 ' + sym + '？')) return;
+      post('/api/watchlist/remove', {symbol: sym}).then(function(r){
+        toast(r.ok ? ('已取消关注 ' + sym) : ('失败: ' + (r.error || '')), !r.ok);
+        loadWatchlist();
+      }).catch(function(e){ toast('失败: ' + e.message, true); });
+      return;
+    }
+    if(act === 'now'){
+      toast('已在后台采集 ' + sym + '…');
+      post('/api/watchlist/now', {symbols: [sym]}).then(function(r){
+        var okN = (r.ok_symbols || []).length, badN = (r.failed_symbols || []).length;
+        toast(r.ok ? (sym + ' 采集完成') :
+          ('部分失败 · ' + (r.error || ('失败 ' + badN + ' 只'))), !r.ok);
+        loadWatchlist();
+      }).catch(function(e){ toast('采集失败: ' + e.message, true); });
+      return;
+    }
+    if(act === 'toggle'){
+      var tr = document.querySelector('[data-wl-sym="' + sym + '"]');
+      var nowOn = tr ? tr.getAttribute('data-wl-enabled') !== '0' : true;
+      post('/api/watchlist/enable', {symbol: sym, enabled: !nowOn}).then(function(r){
+        var it = r.item || {};
+        toast(r.ok ? ((it.enabled ? '已启用 ' : '已停用 ') + sym)
+                   : ('失败: ' + (r.error || '')), !r.ok);
+        loadWatchlist();
+      }).catch(function(e){ toast('失败: ' + e.message, true); });
+      return;
+    }
+    if(act === 'save'){
+      if(!freq){ toast('请填频率（如 30m / 1h）', true); return; }
+      post('/api/watchlist/freq', {symbol: sym, freq: freq}).then(function(r){
+        toast(r.ok ? (sym + ' 已改为每 ' + r.item.freq)
+                   : ('失败: ' + (r.error || '')), !r.ok);
+        loadWatchlist();
+      }).catch(function(e){ toast('失败: ' + e.message, true); });
+    }
   }
 
   // ================= 策略库 =================
@@ -2825,7 +3200,7 @@
         toast('立即采集已提交：任务 ' + r.task_id);
         _pollEngineTask(r.task_id, Date.now() + 600000, function(t, st){
           if(!t){ $('c-msg').textContent = '采集仍在进行，可在「任务明细」查看'; return; }
-          if(st === 'SUCCESS'){ _renderCollectReport(t.result || {}); }
+          if(st === 'success'){ _renderCollectReport(t.result || {}); }
           else {
             $('c-msg').textContent = '采集失败（' + (t.status_label || st) + '）：' +
               (t.error || (t.result && t.result.error) || '任务未成功');
@@ -3135,6 +3510,9 @@
   // ==================== 运行时页 ====================
   var rtTimer = null, RT_JOBS = [], RT_LEVELS = [], RT_MAINT_DIRTY = false;
   var RT_KINDS = [], RT_WEEKDAYS = [], RT_EVENT_FILTER = '';
+  // 后台给的可调度任务类型与内置任务名。放在这里而不硬编码在 HTML 里，
+  // 是因为它们会随代码演进；写死则新加的类型在下拉框里永远选不到。
+  var RT_TASK_TYPES = [], RT_MAINT_BUILTIN = [];
 
   function kpiCards(cards){
     return cards.map(function(c){
@@ -3180,7 +3558,8 @@
     });
   }
 
-  function rtTickDetails(){
+  function rtTickDetails(opts){
+    opts = opts || {};
     // 自动刷新只更新"看"的部分。维护计划是可编辑表单，用户改到一半
     // 被 5s 一次的轮询重绘掉是最招人烦的那类 bug，所以脏了就不重绘。
     if(PAGE === 'ops'){
@@ -3189,11 +3568,13 @@
       loadJournal();
       loadPreflight();
     }
-    if(PAGE === 'tasks') loadLedger();
+    // 缺省（5s 轮询）一律**不带 force**：它存在的意义是让数字跟上，
+    // 而不是把用户正在读的那张表换掉。
+    // switchPage 进页面时带 force —— 那是"我要看这个页"，必须真的渲染出来。
+    if(PAGE === 'tasks') loadLedger(opts);
+    if(PAGE === 'sched') loadSchedules();
     if(PAGE === 'events') loadEvents(RT_EVENT_FILTER);
-    // 链路追踪只在**没在输入/查看**时刷新：查询框里打着字、或正看某条链
-    // 的重放结果时，自动刷新会把人正在读的内容换掉
-    if(PAGE === 'trace' && !uiBusy()) loadTrace($('rt-trace-id').value.trim());
+    if(PAGE === 'trace') loadTrace($('rt-trace-id').value.trim(), opts);
   }
 
   function loadRuntime(){
@@ -3246,6 +3627,18 @@
     var pools = (d.pools && d.pools.pools) || [];
     $('rt-pools-hint').textContent = pools.length + ' 个池 · 共 ' +
       ((d.pools && d.pools.total_inflight) || 0) + ' 个任务在跑';
+    // worker 数是**进程级**参数：面板上显示的是"这次启动读到的值"，
+    // 改完 config/runtime.json 必须重启引擎。先把话说在前面，
+    // 免得用户改了文件来面板上看数字没变，以为代码不读配置。
+    var cfgEl = $('rt-pools-cfg');
+    if(cfgEl){
+      var src = (d.pools && d.pools.config_source) || '';
+      var warns = (d.pools && d.pools.config_warnings) || [];
+      cfgEl.innerHTML = 'worker 数来源：<code>' + esc(src || '内置默认') + '</code>' +
+        '（改 <code>config/runtime.json</code> 后需<b>重启引擎</b>生效）' +
+        (warns.length ? '<br><span class="pill err">配置告警</span> ' +
+          warns.map(function(w){ return esc(w); }).join('；') : '');
+    }
     if(!pools.length){ $('rt-pools').innerHTML = '<div class="muted">无</div>'; return; }
     $('rt-pools').innerHTML = pools.map(function(p){
       var s = p.stats || {};
@@ -3310,6 +3703,61 @@
     }).join('');
   }
 
+  // ---------------- 内置定时任务 ----------------
+  // 这些表的每行都回答同一件事："这件事会在什么时候自动发生"。
+  // 关键在于状态列：周期写对了但任务被停用，看起来和"还没到点"一模一样，
+  // 必须有明确区分，否则用户会一直等一个停掉的任务。
+  function loadSchedules(){
+    api('/api/schedules').then(function(d){
+      var rows = (d && d.items) || [];
+      var hint = $('rt-schedules-hint');
+      if(hint){
+        hint.textContent = d && d.ok
+          ? ('共 ' + (d.total||0) + ' 项 · 启用 ' + (d.enabled||0) +
+             ' · 其中 ' + (d.configurable||0) + ' 项可在配置里改')
+          : ((d && d.error) || '不可用');
+      }
+      if(!rows.length){
+        $('rt-schedule-rows').innerHTML = '<tr><td colspan="9" class="muted">' +
+          esc((d && d.error) || '当前没有可显示的定时任务') + '</td></tr>';
+        return;
+      }
+      $('rt-schedule-rows').innerHTML = rows.map(function(it){
+        // 停用 ≠ 没到点。前者是"永远不会执行"，后者只是"还没到时候"，
+        // 混在一起就是排障时的死胡同。
+        var stCls = it.enabled ? 'run' : 'off';
+        var stTxt = it.enabled ? '启用' : '已停用';
+        if(it.config_error){ stCls = 'err'; stTxt = '配置有问题'; }
+        else if(it.trading_hours_only && (it.waiting_market || it.next_run_text === '等开盘')){
+          stCls = 'info'; stTxt = '等开盘';
+        }
+        return '<tr>' +
+          '<td><b>' + esc(it.label || it.name) + '</b>' +
+            (it.note ? '<div class="muted">' + esc(String(it.note).slice(0, 60)) + '</div>' : '') +
+            (it.config_error ? '<div class="muted">⚠ ' + esc(it.config_error) + '</div>' : '') +
+            '</td>' +
+          '<td>' + esc(it.group || '-') + '</td>' +
+          '<td>' + esc(it.cadence || '-') +
+            (it.trading_hours_only ? ' <span class="pill info">仅交易时段</span>' : '') + '</td>' +
+          '<td><code>' + esc(it.task_type || '—') + '</code></td>' +
+          '<td class="num">' + (it.runs || 0) + '</td>' +
+          '<td class="num">' + (it.errors || 0) + '</td>' +
+          '<td>' + esc(it.next_run_text || '—') + '</td>' +
+          '<td><span class="pill ' + stCls + '">' + esc(stTxt) + '</span>' +
+            (it.last_run_text && it.last_run_text !== '—'
+              ? '<div class="muted">上次 ' + esc(it.last_run_text.slice(0, 16)) + '</div>' : '') +
+            '</td>' +
+          '<td>' + (it.source === '配置'
+            ? '<code>' + esc(it.where || '') + '</code>' : '<span class="pill warn">代码内建</span>') +
+            '</td>' +
+          '</tr>';
+      }).join('');
+    }).catch(function(e){
+      $('rt-schedule-rows').innerHTML =
+        '<tr><td colspan="9" class="muted">加载失败: ' + esc(e.message) + '</td></tr>';
+    });
+  }
+
   // ---------------- 任务明细 / 事件指标 ----------------
   var TASK_STATUS_LABEL = {
     pending: '待入队', queued: '排队中', running: '执行中', success: '成功',
@@ -3321,14 +3769,118 @@
     queued: 'off', pending: 'off',
   };
 
-  function loadLedger(){
-    var status = $('rt-ledger-status') ? $('rt-ledger-status').value : '';
-    var type = $('rt-ledger-type') ? $('rt-ledger-type').value : '';
-    var kw = $('rt-ledger-kw') ? $('rt-ledger-kw').value : '';
-    var limit = $('rt-ledger-limit') ? $('rt-ledger-limit').value : '100';
-    var q = '/api/ledger?status=' + encodeURIComponent(status) +
-            '&task_type=' + encodeURIComponent(type) +
-            '&keyword=' + encodeURIComponent(kw) + '&limit=' + encodeURIComponent(limit);
+  // ---------------- 任务明细的日期范围 ----------------
+  // 长跑服务的任务明细能轻易上万条，"只看今天"是最高频的动作。
+  // 这里用本地时间拼 YYYY-MM-DD —— toISOString() 走的是 UTC，
+  // 凌晨时段会把"昨天"当成今天。
+  function ledgerDate(offsetDays){
+    var d = new Date();
+    d.setDate(d.getDate() + (offsetDays || 0));
+    return d.getFullYear() + '-' +
+      ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  }
+
+  // ---------------------------------------------------------------
+  // 「改了条件却查不出来」的根因与修法
+  //
+  // 这个面板的表格之前满足两个条件时不重绘：焦点在任何输入框/下拉上
+  // （``uiBusy()`` 的设计初衷是别把用户改到一半的表单冲掉）。可日期框
+  // 选完日期焦点还在框里 —— 于是用户选了日期、点了「刷新」，请求发了、
+  // 汇总数字也更新了，**表格却一行没动**，看起来就是"筛选没效果"。
+  //
+  // 区分办法只有一个：这轮加载是**用户点了按钮**触发的，还是后台轮询触发的。
+  // 前者必须重绘（哪怕他正按着某个输入框），后者才该让位给 uiBusy()。
+  // ---------------------------------------------------------------
+  var LEDGER_DIRTY = false;
+
+  function ledgerMarkDirty(on){
+    LEDGER_DIRTY = !!on;
+    var el = $('rt-ledger-dirty');
+    if(el) el.innerHTML = on
+      ? '<span class="pill warn">条件已改，点「搜索」查询</span>' : '';
+  }
+
+  function ledgerReadFilters(){
+    var since = $('rt-ledger-since') ? $('rt-ledger-since').value : '';
+    var until = $('rt-ledger-until') ? $('rt-ledger-until').value : '';
+    // 起止填反了不如帮他反过来：这是"手滑"而不是"想查一个空区间"
+    if(since && until && since > until){
+      var t = since; since = until; until = t;
+      if($('rt-ledger-since')) $('rt-ledger-since').value = since;
+      if($('rt-ledger-until')) $('rt-ledger-until').value = until;
+      toast('起止日期填反了，已自动调换', true);
+    }
+    var sortChoice = ($('rt-ledger-sort') ? $('rt-ledger-sort').value
+                      : 'time:desc') || 'time:desc';
+    var pieces = sortChoice.split(':');
+    return {
+      status: $('rt-ledger-status') ? $('rt-ledger-status').value : '',
+      task_type: $('rt-ledger-type') ? $('rt-ledger-type').value : '',
+      keyword: $('rt-ledger-kw') ? $('rt-ledger-kw').value : '',
+      limit: $('rt-ledger-limit') ? $('rt-ledger-limit').value : '100',
+      since: since, until: until,
+      sort: pieces[0] || 'time',
+      order: pieces[1] || 'desc',
+    };
+  }
+
+  function ledgerFiltersText(f){
+    var bits = [];
+    if(f.status) bits.push('状态=' + f.status);
+    if(f.task_type) bits.push('类型=' + f.task_type);
+    if(f.keyword) bits.push('关键字=' + f.keyword);
+    if(f.since || f.until) bits.push('创建于 ' + (f.since || '最早') +
+                                    ' ~ ' + (f.until || '现在'));
+    bits.push('排序=' + f.sort + ' ' + (f.order === 'asc' ? '正序' : '倒序'));
+    bits.push('条数=' + f.limit);
+    return bits.join(' · ');
+  }
+
+  function ledgerReset(){
+    ['rt-ledger-status', 'rt-ledger-type', 'rt-ledger-sort'].forEach(function(id){
+      var el = $(id); if(el) el.selectedIndex = 0;
+    });
+    var kw = $('rt-ledger-kw'); if(kw) kw.value = '';
+    var sd = $('rt-ledger-since'); if(sd) sd.value = '';
+    var ed = $('rt-ledger-until'); if(ed) ed.value = '';
+    var lim = $('rt-ledger-limit'); if(lim) lim.value = '100';
+    var hint = $('rt-ledger-range-hint'); if(hint) hint.textContent = '';
+    loadLedger({force: true});
+  }
+
+  function applyLedgerRange(kind){
+    var sinceEl = $('rt-ledger-since'), untilEl = $('rt-ledger-until');
+    if(!sinceEl || !untilEl) return;
+    if(kind === 'today'){ sinceEl.value = ledgerDate(0); untilEl.value = ledgerDate(0); }
+    else if(kind === '7d'){ sinceEl.value = ledgerDate(-6); untilEl.value = ledgerDate(0); }
+    else if(kind === '30d'){ sinceEl.value = ledgerDate(-29); untilEl.value = ledgerDate(0); }
+    else { sinceEl.value = ''; untilEl.value = ''; }
+    // 快捷按钮本身就是一次明确的查询动作，所以这里直接搜、不留脏标记
+    loadLedger({force: true});
+  }
+
+  function loadLedger(opts){
+    opts = opts || {};
+    var force = !!opts.force;
+    var f = ledgerReadFilters();
+    var q = '/api/ledger?status=' + encodeURIComponent(f.status) +
+            '&task_type=' + encodeURIComponent(f.task_type) +
+            '&keyword=' + encodeURIComponent(f.keyword) +
+            '&limit=' + encodeURIComponent(f.limit) +
+            '&since=' + encodeURIComponent(f.since) +
+            '&until=' + encodeURIComponent(f.until) +
+            '&sort=' + encodeURIComponent(f.sort) +
+            '&order=' + encodeURIComponent(f.order);
+    var rangeHint = $('rt-ledger-range-hint');
+    if(rangeHint) rangeHint.textContent = (f.since || f.until)
+      ? ('已限定 ' + (f.since || '最早') + ' ~ ' + (f.until || '现在')) : '';
+    // 一旦真的去查了，这版条件就是"生效中"的，脏标记可以撤了
+    ledgerMarkDirty(false);
+    if(force){
+      var sumEl = $('rt-ledger-sum');
+      if(sumEl) sumEl.innerHTML = '<span class="muted">查询中… ' +
+        esc(ledgerFiltersText(f)) + '</span>';
+    }
     api(q).then(function(d){
       if(!d || d.ok === false){
         $('rt-ledger-rows').innerHTML = '<tr><td colspan="8" class="muted">' +
@@ -3338,26 +3890,22 @@
       var s = d.summary || {}, hs = d.history_summary || {};
       $('rt-ledger-hint').textContent =
         '在册 ' + (d.tracked || 0) + ' 条 · 历史明细 ' + (d.history_size || 0) + ' 条';
+      // 「累计」是进程启动以来的总数（永不清零），可与窗口里的条数不一致 ——
+      // 两个数回答不同问题，所以都摆出来，而不是挑一个当成真相。
       $('rt-ledger-sum').innerHTML =
+        '查询条件：<span class="muted">' + esc(ledgerFiltersText(f)) + '</span><br>' +
         '累计 成功 <b>' + (s.success||0) + '</b> · 失败 <b>' + (s.failed||0) +
         '</b> · 死信 <b>' + (s.dead_letter||0) + '</b> · 取消 <b>' + (s.cancelled||0) +
         '</b> · 共建 <b>' + (s.created||0) + '</b>' +
-        '　｜　历史里有明细的 ' + (Object.keys(hs).length
-          ? Object.keys(hs).map(function(k){
-              return (TASK_STATUS_LABEL[k] || k) + ' ' + hs[k];
-            }).join(' · ')
-          : '无');
+        '　｜　当前筛选下命中 <b>' + (d.matched||0) + '</b> / 可见 ' + (d.scoped||0) + ' 条' +
+        ((d.matched||0) > (d.rows||[]).length
+          ? '（只显示前 ' + (d.rows||[]).length + ' 条，可调大「条数」）' : '');
 
-      // 顶部状态 chips：计数 + 选中态（与下拉等效，Rhapsody 的过滤条样式）
-      var liveCnt = {};
-      (d.tasks || []).forEach(function(t){
-        liveCnt[t.status] = (liveCnt[t.status]||0) + 1;
-      });
-      var chipCnt = {
-        '': s.created||0, success: s.success||0, failed: s.failed||0,
-        dead_letter: s.dead_letter||0, cancelled: s.cancelled||0,
-        running: liveCnt.running||0, queued: liveCnt.queued||0,
-      };
+      // 计数**必须与明细同源**：以前这里取 stats（进程启动以来的累计），
+      // 明细取有界的窗口 —— 于是"失败 12 条"点进去一条没有，看起来像过滤坏了。
+      // status_counts 由后端按"当前日期/类型/关键字筛选之后"的池子算出，
+      // 所以选了"今天 + 某类型"，按钮上的数字就是那个范围里的真实条数。
+      var chipCnt = d.status_counts || {};
       var curStatus = $('rt-ledger-status') ? $('rt-ledger-status').value : '';
       document.querySelectorAll('#rt-ledger-chips .chip').forEach(function(c){
         var v = c.getAttribute('data-ls');
@@ -3376,19 +3924,20 @@
         sel.value = keep;
       }
 
-      var rows = (d.tasks || []).concat(
-        // 历史里已经在 tasks 中出现过的不再重复显示
-        (d.history || []).filter(function(h){
-          return !(d.tasks || []).some(function(t){ return t.task_id === h.task_id; });
-        })
-      );
-      // 用户在看某条任务的详情（面板展开着）或正操作筛选框时，
-      // 统计数字照常更新，但**不重绘表格** —— 重绘会连展开的详情面板
-      // 一起抹掉，这正是"点详情看着看着页面被刷新"的来源。
-      if(uiBusy()) return;
+      // 直接用后端合并去重排序好的 rows。以前这里 tasks(desc) + history(desc)
+      // 拼起来渲染 —— 两份各自有序，拼完整体却不是有序的，看着像排序失效。
+      var rows = d.rows || [];
+      // 后台轮询来的结果才让位给 uiBusy()：用户正展开某条任务的详情面板，
+      // 或正盯着行内输入框时，定时器那一轮**不应该**把页面刷新掉。
+      // 但用户亲手点的「搜索」必须无视这条 —— 他要的就是现在这一次结果。
+      if(!force && uiBusy()) return;
       if(!rows.length){
         $('rt-ledger-rows').innerHTML =
-          '<tr><td colspan="8" class="muted">还没有任务（或都被筛选条件排除了）</td></tr>';
+          '<tr><td colspan="8" class="muted">当前筛选条件下没有任务' +
+          ((f.since || f.until)
+            ? '（试着放宽日期范围，或点「全部日期」；已查条件：' +
+              esc(ledgerFiltersText(f)) + '）' : '') +
+          '</td></tr>';
         return;
       }
       $('rt-ledger-rows').innerHTML = rows.map(function(t){
@@ -3433,7 +3982,11 @@
   }
 
   // ---------------- 链路追踪 / 重放 ----------------
-  function loadTrace(traceId){
+  // ``opts.force`` 的语义与任务明细一致：用户点「查询」触发的必须照渲染，
+  // 5s 一次的轮询才让位给 uiBusy()（那时用户可能正在读某条链的时间线）。
+  function loadTrace(traceId, opts){
+    opts = opts || {};
+    if(!opts.force && uiBusy()) return Promise.resolve(null);
     var q = '/api/trace?' + (traceId
       ? 'trace_id=' + encodeURIComponent(traceId) + '&event_id=' + encodeURIComponent(traceId)
       : 'limit=30');
@@ -3545,7 +4098,7 @@
       if(r && r.ok){
         toast('已重放 → ' + String(r.event_id).slice(0, 8));
         $('rt-trace-msg').textContent = '已重放，新事件 ' + r.event_id;
-        loadTrace($('rt-trace-id').value.trim());
+        loadTrace($('rt-trace-id').value.trim(), {force: true});
       } else {
         toast('重放失败', true);
         $('rt-trace-msg').textContent = '重放失败: ' + ((r && r.error) || '');
@@ -3778,6 +4331,9 @@
       RT_JOBS = d.jobs || [];
       RT_KINDS = d.kinds || [];
       RT_WEEKDAYS = d.weekday_names || ['周一','周二','周三','周四','周五','周六','周日'];
+      RT_MAINT_BUILTIN = d.builtin_jobs || [];
+      if(d.task_types && d.task_types.length){ RT_TASK_TYPES = d.task_types; }
+      fillNewJobTypes();
       $('rt-maint-hint').textContent = d.enabled + ' / ' + d.total + ' 个启用 · 检查节拍 ' +
         (d.tick_seconds||30) + 's';
       $('rt-maint-jobs').innerHTML = RT_JOBS.map(function(j, i){
@@ -3865,10 +4421,23 @@
             '<label data-mrole="monthly" data-mi="' + i + '">时刻 (HH:MM)' +
               '<input data-mf="monthly_at" data-mi="' + i + '" value="' + esc(j.at) +
               '" style="width:90px" placeholder="03:10"></label>' +
+            // 分钟框的下限按任务类别：维护类被后台兜底到 1 小时，
+            // 这里同步显示同样的下限，免得用户填了 10 却被悄悄改成 3600。
+            '<label data-mrole="interval" data-mi="' + i + '" ' +
+              'title="留 0 = 不使用分钟粒度，改按下面的 N 小时">N 分钟' +
+              '<input data-mf="interval_minutes" data-mi="' + i + '" type="number" min="' +
+              (j.min_interval_seconds ? Math.max(1, Math.round(j.min_interval_seconds/60)) : 1) +
+              '" step="1" value="' + esc(j.interval_minutes||0) + '" style="width:90px"></label>' +
             '<label data-mrole="interval" data-mi="' + i + '">N 小时' +
               '<input data-mf="interval_hours" data-mi="' + i + '" type="number" min="' +
               (d.min_interval_hours||1) + '" step="1" value="' + esc(j.interval_hours) +
               '" style="width:90px"></label>' +
+            // 周期任务大多是在刷数据，休市期间跑既没意义又费额度。
+            '<label data-mrole="interval" data-mi="' + i + '" ' +
+              'class="hint" style="display:inline-flex;flex-direction:row;align-items:center;gap:4px" ' +
+              'title="仅在交易时段（含午休与收盘结算窗口）触发">'
+              + '<input type="checkbox" data-mf="trading_hours_only" data-mi="' + i + '"' +
+              (j.trading_hours_only ? ' checked' : '') + '> 仅交易时段</label>' +
             '<label data-mrole="cron" data-mi="' + i + '" style="flex:1;min-width:220px">Cron（分 时 日 月 周）' +
               '<input data-mf="cron" data-mi="' + i + '" value="' + esc(j.cron||'') +
               '" style="width:100%" placeholder="0 3 * * *"></label>' +
@@ -3877,11 +4446,17 @@
               '" style="width:170px" placeholder="' + esc(d.once_at_format||'YYYY-MM-DD HH:MM') + '"></label>' +
             params +
             '<button class="mini" data-mrun="' + esc(j.name) + '">立即执行</button>' +
+            // 内置任务只给"停用"这条路：它们有部分是引擎自保逻辑，
+            // 删掉之后"谁在清理日志"就失去答案了。
+            (RT_MAINT_BUILTIN.indexOf(j.name) >= 0
+              ? ''
+              : '<button class="mini danger" data-mdel="' + esc(j.name) + '">删除</button>') +
           '</div>' +
           '<div class="det" data-mcron="' + i + '"></div>' +
           '<div class="det">上次 ' + (j.last_run_iso || '从未') +
             ' · 下次 <b>' + esc(j.next_run_text || '—') + '</b>' +
             ' · 已跑 ' + (j.runs||0) + ' 次' +
+            (j.waiting_market ? ' · <span class="pill">休市中，开盘再跑</span>' : '') +
             (j.last_result ? ' · ' + esc(j.last_result) : '') + '</div>' +
           '</div>';
       }).join('');
@@ -3896,6 +4471,7 @@
           el.addEventListener('input', function(){ RT_MAINT_DIRTY = true; });
         });
       syncMaintFields();
+      syncNewJobFields();   // 新增区的周期联动（页面初次加载时同步一次）
     }).catch(function(e){
       $('rt-maint-jobs').innerHTML = '<div class="muted">加载失败: ' + esc(e.message) + '</div>';
     });
@@ -3951,6 +4527,12 @@
       var ivEl = get('interval_hours');
       var hours = ivEl ? parseInt(ivEl.value, 10) : j.interval_hours;
       if(isNaN(hours) || hours < 1){ hours = 1; }
+      // 分钟粒度。**优先于小时**，0 表示不使用。
+      // 它是"十分钟刷一次股票池"这类需求唯一能落到后端的字段。
+      var ivMinEl = get('interval_minutes');
+      var minutes = ivMinEl ? parseInt(ivMinEl.value, 10) : (j.interval_minutes||0);
+      if(isNaN(minutes) || minutes < 0){ minutes = 0; }
+      var tradeEl = get('trading_hours_only');
       // 保留期统一换算成小时提交（retention_hours / before_hours）。
       // 旧的 *_days 键不再回传 —— 后端 params 是整体替换，旧键自然消失。
       document.querySelectorAll('[data-mh="' + i + '"]').forEach(function(el){
@@ -3969,12 +4551,98 @@
         weekday: (function(){ var w = get('weekday'); return w ? Number(w.value) : j.weekday; })(),
         day_of_month: (function(){ var dd = get('day_of_month'); return dd ? Number(dd.value) : j.day_of_month; })(),
         interval_hours: hours,
+        interval_minutes: minutes,
+        trading_hours_only: tradeEl ? tradeEl.checked : !!j.trading_hours_only,
         cron: (function(){ var c = get('cron'); return c ? c.value : (j.cron||''); })(),
         once_at: (function(){ var c = get('once_at'); return c ? c.value : (j.once_at||''); })(),
         params: params,
       };
     });
     return {jobs: jobs};
+  }
+
+  // ---------------- 新增 / 删除定时任务 ----------------
+  // 任务清单以前写死在后端 DEFAULT_JOBS 里，加一类周期跑的活必须改代码。
+  // 这两个函数是把它变成"面板/配置可直接增删"的另一半。
+  function fillNewJobTypes(){
+    var sel = $('rt-maint-new-type');
+    if(!sel || sel.getAttribute('data-filled')){ return; }
+    sel.innerHTML = (RT_TASK_TYPES.length ? RT_TASK_TYPES : ['pool.refresh'])
+      .map(function(t){
+        return '<option value="' + esc(t) + '"' +
+          (t === 'pool.refresh' ? ' selected' : '') + '>' + esc(t) + '</option>';
+      }).join('');
+    sel.setAttribute('data-filled', '1');
+  }
+
+  // 新增表单同样做周期联动：一排框都留着，用户不知道该填哪个
+  function syncNewJobFields(){
+    var schedEl = $('rt-maint-new-sched');
+    var kind = schedEl ? schedEl.value : 'interval';
+    Array.prototype.forEach.call(
+      document.querySelectorAll('[data-mnew]'),
+      function(el){
+        el.style.display = (el.getAttribute('data-mnew') === kind) ? '' : 'none';
+      });
+  }
+
+  function doAddMaintJob(){
+    var name = ($('rt-maint-new-name').value || '').trim();
+    if(!name){
+      $('rt-maint-new-msg').textContent = '请填任务名';
+      return;
+    }
+    var kind = $('rt-maint-new-sched').value;
+    var minutes = parseInt($('rt-maint-new-min').value, 10);
+    if(isNaN(minutes) || minutes < 0){ minutes = 0; }
+    var hours = parseInt($('rt-maint-new-hours').value, 10);
+    if(isNaN(hours) || hours < 1){ hours = 1; }
+    var cfg = {
+      task_type: $('rt-maint-new-type').value,
+      label: ($('rt-maint-new-label').value || '').trim() || name,
+      enabled: true,
+      schedule: kind,
+      params: {},
+    };
+    if(kind === 'interval'){
+      cfg.interval_minutes = minutes;
+      cfg.interval_hours = hours;
+      cfg.trading_hours_only = $('rt-maint-new-trading').checked;
+    } else if(kind === 'daily' || kind === 'weekly' || kind === 'monthly'){
+      cfg.at = ($('rt-maint-new-at').value || '03:10').trim();
+    } else if(kind === 'cron'){
+      cfg.cron = ($('rt-maint-new-cron').value || '').trim();
+    } else if(kind === 'once'){
+      cfg.once_at = ($('rt-maint-new-once').value || '').trim();
+    }
+    $('rt-maint-new-msg').textContent = '新增中…';
+    post('/api/maintenance/add', {name: name, cfg: cfg}).then(function(r){
+      if(r && r.ok){
+        $('rt-maint-new-msg').textContent = '已新增';
+        $('rt-maint-new-name').value = '';
+        $('rt-maint-new-label').value = '';
+        toast('定时任务已新增');
+        loadMaintenance();
+      } else {
+        $('rt-maint-new-msg').textContent = '失败: ' + ((r && r.error) || '未知');
+        toast('新增失败', true);
+      }
+    }).catch(function(e){
+      $('rt-maint-new-msg').textContent = '失败: ' + e.message;
+      toast('新增失败', true);
+    });
+  }
+
+  function doDeleteMaintJob(name){
+    if(!confirm('删除定时任务「' + name + '」？')){ return; }
+    post('/api/maintenance/remove', {name: name}).then(function(r){
+      if(r && r.ok){
+        toast('已删除 ' + name);
+        loadMaintenance();
+      } else {
+        toast('删除失败: ' + ((r && r.error) || '未知'), true);
+      }
+    }).catch(function(e){ toast('删除失败: ' + e.message, true); });
   }
 
   function doSaveMaintenance(){
@@ -4082,7 +4750,7 @@
     if(rtTimer){ clearInterval(rtTimer); rtTimer = null; }
     if(RT_FAMILY[page]){
       loadRtCore();
-      rtTickDetails();
+      rtTickDetails({force: true});
       // 2s 太密（维护计划与日志等级不需要秒级刷新），5s 足够看清积压趋势
       rtTimer = setInterval(function(){ loadRtCore(); rtTickDetails(); }, 5000);
     }
@@ -4092,7 +4760,7 @@
       // 回测页 3 秒刷一次足够：作业是分钟级的
       btTimer = setInterval(loadBacktest, 3000);
     }
-    if(page === 'pool'){ loadPool(); loadCalendar(); }
+    if(page === 'pool'){ loadPool(); loadCalendar(); loadWatchlist(); }
     if(page === 'factor'){ loadFactors(); loadSchedule(); }
     if(page === 'strategy'){
       loadStrategies(); syncKindForm();
@@ -4126,10 +4794,17 @@
       return;
     }
     if(el.id === 'bt-strategy'){ toggleSpecBox(); return; }
-    // 任务明细的筛选条件一改就重新拉 —— 这种"改了却没反应"的输入框
-    // 会让人以为接口坏了
-    if(el.id === 'rt-ledger-status' || el.id === 'rt-ledger-type' ||
-       el.id === 'rt-ledger-limit'){ loadLedger(); return; }
+    // 股票池剔除条件：勾选是"下一次刷新的入参"，不自动发请求，
+    // 但要**立刻**刷新右侧说明 —— 文案晚了就等于界面在骗人
+    if(POOL_EX_FIELDS.some(function(f){ return f.id === el.id; })){
+      renderPoolExNote();
+      return;
+    }
+    // 任务明细的筛选条件改了**只打脏标记**，不自动发请求。
+    // 以前是一改就查：日期框选完焦点还在框里 → uiBusy() 拦掉重绘 →
+    // "选了日期却一行没变"。现在条件和数据何时对齐由用户点「搜索」决定，
+    // 界面上也有明确的"条件已改，点搜索查询"提示，不会再有隐性不一致。
+    if(LEDGER_FILTER_IDS.indexOf(el.id) >= 0){ ledgerMarkDirty(true); return; }
     if(el.id === 's-kind'){ syncKindForm(); return; }
     if(el.id === 'pool-source'){ loadPool(); return; }
     if(el.id === 's-multi-mode'){ syncMultiMode(); return; }
@@ -4145,13 +4820,24 @@
       }).catch(function(e){ toast('改频率失败: ' + e.message, true); });
   });
 
-  // 关键字框用防抖：每敲一个字就打一次接口，长跑服务上这是白给的负担
-  var ledgerKwTimer = null;
+  // 关键字框：不再边打边查（600ms 一次等于把浮动的用户当成稳定的意图），
+  // 改成**回车才查**，其余按键只更新脏标记。
+  // 这让"为什么我打了字它在自己刷"和"为什么我选了日期它不动"
+  // 变成了同一条规则：**所有条件都由「搜索」或回车触发**。
   document.addEventListener('input', function(ev){
-    if(ev.target && ev.target.id === 'rt-ledger-kw'){
-      if(ledgerKwTimer) clearTimeout(ledgerKwTimer);
-      ledgerKwTimer = setTimeout(loadLedger, 600);
+    if(ev.target && LEDGER_FILTER_IDS.indexOf(ev.target.id) >= 0){
+      ledgerMarkDirty(true);
     }
+  });
+  document.addEventListener('keydown', function(ev){
+    if(ev.key !== 'Enter') return;
+    var id = ev.target && ev.target.id;
+    if(id === 'rt-ledger-kw' || LEDGER_FILTER_IDS.indexOf(id) >= 0){
+      ev.preventDefault();
+      loadLedger({force: true});
+      return;
+    }
+    if(id === 'rt-trace-id'){ loadTrace($('rt-trace-id').value.trim(), {force: true}); }
   });
 
   window.addEventListener('resize', function(){
@@ -4167,6 +4853,9 @@
   setInterval(loadCollector, 5000);
   // 体检一小时才跑一次，页面按 5s 刷纯属浪费请求；30s 足够跟上手动触发
   setInterval(loadGuard, 30000);
+  // 关注清单 10s 一次足够：它是"多久采一次"这种分钟/小时级的配置，
+  // 2s 轮询除了多打请求没有意义；而且里面 uiBusy() 会在用户输入时跳过重绘
+  setInterval(loadWatchlist, 10000);
   // 顶部横幅时钟
   function tickClock(){
     var el = $('clock');

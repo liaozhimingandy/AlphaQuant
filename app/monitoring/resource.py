@@ -87,9 +87,10 @@ class MonitorResource(Resource):
                 "/api/overview", "/api/tasks", "/api/tasks/<id>", "/api/orders",
                 "/api/logs", "/api/snapshots", "/api/audit", "/api/health",
                 "/api/collector", "/api/dataguard", "/api/providers",
-                "/api/runtime", "/api/maintenance", "/api/logging",
+                "/api/runtime", "/api/maintenance", "/api/schedules", "/api/logging",
                 "/api/journal", "/api/preflight",
-                "/api/ledger", "/api/task?id=", "/api/events",
+                "/api/ledger", "/api/task?id=", "/api/engine_tasks?id=", "/api/events",
+                "/api/watchlist",
             ]})
 
         head = rest[0]
@@ -126,18 +127,31 @@ class MonitorResource(Resource):
         if head == "maintenance":
             # 维护计划：开关 / 周期 / 参数 / 下次执行时间
             return self._json(request, c.control.maintenance_view())
+        if head == "schedules":
+            # 内置定时任务总清单：维护计划 + 周期定时器 + 采集单元
+            # 「这台机器自己会做哪些事、多久做一次」的唯一答案
+            return self._json(request, c.control.builtin_schedules())
         if head == "ledger":
             # 任务明细：已建任务 + 终态历史（成功/失败/死信/取消）
             # 参数：status / task_type / queue / keyword / limit
+            #      since / until（创建时间范围，YYYY-MM-DD 或 ISO）
+            #      sort（time|elapsed|attempts）/ order（desc|asc）
             return self._json(request, c.control.task_ledger(
                 status=self._q(request, "status", ""),
                 task_type=self._q(request, "task_type", ""),
                 queue=self._q(request, "queue", ""),
                 keyword=self._q(request, "keyword", ""),
                 limit=int(self._q(request, "limit", 50) or 50),
+                since=self._q(request, "since", ""),
+                until=self._q(request, "until", ""),
+                sort=self._q(request, "sort", "time"),
+                order=self._q(request, "order", "desc"),
             ))
-        if head == "task":
+        if head in ("task", "engine_tasks", "engine_task"):
             # 单条引擎任务明细：?id=xxx
+            # ``engine_tasks`` 是面板早期用过的名字 —— 保留别名不为兼容
+            # 旧书签，而是因为"未知接口: /api/engine_tasks"这种错要一路追到
+            # 数百行 JS 里的一行字符串才看得懂。多一个别名，少一次排查。
             task_id = self._q(request, "id", "") or (
                 rest[1] if len(rest) >= 2 else ""
             )
@@ -169,6 +183,13 @@ class MonitorResource(Resource):
             return self._json(request, c.control.preflight_view())
         if head == "collector":
             return self._json(request, c.control.collector_status())
+        if head == "watchlist":
+            # 关注标的：清单 + 默认频率配置 + 服务运行状态。
+            # 这张清单**不依赖采集服务有没有装配** —— 它在库里，
+            # 服务没起来时用户也该看得见自己关注了什么。
+            return self._json(request, c.watchlist_view(
+                enabled_only=bool(self._q(request, "enabled", ""))
+            ))
         if head == "dataguard":
             # 数据校验报告：缺了哪几天、补回多少、用的哪个源
             return self._json(request, c.control.data_guard_status())
@@ -452,6 +473,37 @@ class MonitorResource(Resource):
         if seg[1] == "schedule" and len(seg) >= 3 and seg[2] == "save":
             return self._json(request, c.schedule_save(body))
 
+        # ---- 关注标的（自选股自动采集）----
+        #   增删 listing / 改频率 / 改类别 / 启停 都是毫秒级的库操作 → 同步返回；
+        #   只有"立即采集"要联网，异步（否则把 reactor 连同面板一起堵死）。
+        if seg[1] == "watchlist" and len(seg) >= 3:
+            op = seg[2]
+            sym = str(body.get("symbol") or "").strip()
+            if op == "add":
+                return self._json(request, c.watchlist_add(
+                    sym, freq=body.get("freq"),
+                    categories=body.get("categories"),
+                    name=str(body.get("name") or "")))
+            if op == "remove":
+                return self._json(request, c.watchlist_remove(sym))
+            if op == "freq":
+                return self._json(request, c.watchlist_set_freq(
+                    sym, body.get("freq")))
+            if op == "categories":
+                return self._json(request, c.watchlist_set_categories(
+                    sym, body.get("categories")))
+            if op == "enable":
+                return self._json(request, c.watchlist_set_enabled(
+                    sym, bool(body.get("enabled", True))))
+            if op == "default_freq":
+                # 改"新增标的的默认频率"，落盘到 config/collector.json
+                return self._json(request, c.watchlist_set_default_freq(
+                    body.get("freq")))
+            if op == "now":
+                return self._async(request, threads.deferToThread(
+                    c.watchlist_collect, body.get("symbols")))
+            return self._json(request, {"ok": False, "error": f"未知操作: {op}"}, 400)
+
         # ---- 用户策略库（界面自定义策略）----
         if seg[1] == "strategies" and len(seg) >= 3:
             op = seg[2]
@@ -608,6 +660,14 @@ class MonitorResource(Resource):
         if seg[1] == "maintenance" and len(seg) >= 3 and seg[2] == "run":
             return self._json(request, c.control.maintenance_run(
                 str(body.get("name") or body.get("job") or "")))
+
+        # POST /api/maintenance/add —— 新增一条定时任务（周期/一次性）
+        if seg[1] == "maintenance" and len(seg) >= 3 and seg[2] == "add":
+            return self._json(request, c.control.maintenance_add(body))
+
+        # POST /api/maintenance/remove —— 删除自定义定时任务
+        if seg[1] == "maintenance" and len(seg) >= 3 and seg[2] == "remove":
+            return self._json(request, c.control.maintenance_remove(body))
 
         # POST /api/logging/level —— 运行中切换日志级别（不用重启）
         if seg[1] == "logging" and len(seg) >= 3 and seg[2] == "level":

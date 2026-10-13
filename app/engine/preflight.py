@@ -172,6 +172,7 @@ def check_config_files(report: PreflightReport) -> None:
         ("providers.json", getattr(settings, "CONFIG_DIR", None)),
         ("collector.json", getattr(settings, "CONFIG_DIR", None)),
         ("pool.json", getattr(settings, "CONFIG_DIR", None)),
+        ("runtime.json", getattr(settings, "CONFIG_DIR", None)),
     ]
     broken: List[str] = []
     missing: List[str] = []

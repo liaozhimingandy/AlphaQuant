@@ -91,9 +91,67 @@ class TestPoolTableAlignment(unittest.TestCase):
         self.assertIn("if(el.id === 'pool-source'){ loadPool(); return; }", SCRIPT)
 
     def test_refresh_sends_exclusions(self):
-        # 刷新必须把剔除条件 POST 给后端
+        # 刷新必须把剔除条件 POST 给后端，而且要**现读勾选框**
+        # （用缓存副本会出现"明明勾了却没剔除"）
         self.assertIn("exclusions: excl", SCRIPT)
-        self.assertIn("exclude_cyb: $('pool-ex-cyb').checked", SCRIPT)
+        self.assertIn("function poolExclusionPayload(", SCRIPT)
+        for name in ("exclude_st", "exclude_cyb", "exclude_kcb", "exclude_bj"):
+            self.assertIn(name + ":", SCRIPT, f"剔除入参缺少 {name}")
+
+    def test_exclusion_note_follows_checkboxes(self):
+        """勾选完右侧说明必须立刻跟着变，且**不会**被轮询覆盖。
+
+        以前右侧文案只在 renderPool() 里重算，而 renderPool 又被
+        syncPoolExclusions 反手把勾选框改回 config 的值 —— 于是
+        "勾了创业板但右边只显示 ST"，第二次轮询还会把勾取消掉。
+        """
+        self.assertIn("function renderPoolExNote(", SCRIPT)
+        self.assertIn("POOL_EX_SYNCED", SCRIPT)
+        self.assertIn("if(POOL_EX_SYNCED) { renderPoolExNote(); return; }", SCRIPT,
+                      "后端配置只能同步一次，之后不许覆盖用户勾选")
+        self.assertIn(
+            "POOL_EX_FIELDS.some(function(f){ return f.id === el.id; })",
+            SCRIPT, "勾选变化必须重算说明文案",
+        )
+
+
+class TestEngineTaskPolling(unittest.TestCase):
+    """面板轮询引擎任务的正确性护栏。
+
+    这里是两个已经踩过的坑，都属于"跑起来才炸、日志里还看不出来"：
+
+    1. **接口名写错**：JS 里写 ``/api/engine_tasks``，后端根本没有这条路由，
+       于是每次刷新都弹「查询任务失败: 未知接口」，而任务其实早跑完了。
+    2. **状态大小写错**：store 里的状态是小写（``success``/``dead_letter``），
+       拿 ``'SUCCESS'`` 去比永远不等，轮询只能转满 10 分钟才超时退出。
+    """
+
+    def test_does_not_call_unknown_endpoint(self):
+        self.assertNotIn("/api/engine_tasks'", SCRIPT,
+                         "后端没有 /api/engine_tasks 这条路由（会 404）")
+        self.assertIn("function engineTaskUrl(", SCRIPT)
+        self.assertIn("'/api/task?id='", SCRIPT)
+
+    def test_status_compares_lowercase_or_terminal_map(self):
+        # 不要再出现 === 'SUCCESS' / 'DEAD_LETTER' 这类永假比较
+        for bad in ("=== 'SUCCESS'", "=== 'FAILED'", "=== 'DEAD_LETTER'",
+                    "=== 'CANCELLED'"):
+            self.assertNotIn(bad, SCRIPT, f"状态比较写错了大小写: {bad}")
+        self.assertIn("TASK_TERMINAL", SCRIPT)
+        self.assertIn("=== 'success'", SCRIPT)
+
+    def test_failed_is_not_a_terminal_state(self):
+        """``failed`` 永远不会停留：
+
+        失败会立刻转成 ``retrying`` 或 ``dead_letter``，所以轮询的终态集合
+        里不能包含 failed（见 store.py 的 STATUS_GROUPS）。
+        """
+        m = re.search(r"TASK_TERMINAL\s*=\s*\{(.*?)\}", SCRIPT, re.S)
+        self.assertIsNotNone(m, "缺少 TASK_TERMINAL 终态定义")
+        self.assertIn("success", m.group(1))
+        self.assertIn("dead_letter", m.group(1))
+        self.assertIn("cancelled", m.group(1))
+        self.assertNotIn("failed", m.group(1))
 
     def test_data_day_hint_on_closed_day(self):
         # 未开盘时面板要提示"显示为上一个交易日的数据"：
@@ -145,6 +203,65 @@ class TestDataGuardPanel(unittest.TestCase):
         for b in blocks:
             if "已补" in b:
                 self.assertNotIn("来源", b)
+
+
+class TestLedgerFilterControls(unittest.TestCase):
+    """任务明细：什么时候必须真的去查数据库。
+
+    用户侧的原始现象是"选了日期点刷新，一条记录都没有"。三个成因
+    各留一道护栏：
+
+    1. 表格以前会被 ``uiBusy()`` 拦掉 —— 日期框选完焦点还在框里，
+       于是请求发了、汇总更新了，表格却一行没动；
+    2. 筛选框一改就自动发请求，和「刷新」按钮各说各话，
+       界面上的数据到底对应哪套条件说不清；
+    3. 起止日期填反了会查出一个注定为空的区间。
+    """
+
+    def test_result_shows_the_filters_that_produced_it(self):
+        # "没查出来"最需要知道的是"按什么条件查的"
+        self.assertIn("查询条件：", SCRIPT)
+        self.assertIn("function ledgerFiltersText(", SCRIPT)
+
+    def test_button_is_search_not_refresh(self):
+        self.assertIn('id="btn-rt-ledger"', SRC)
+        self.assertIn('id="btn-rt-ledger-reset"', SRC)
+        block = re.search(
+            r'<button id="btn-rt-ledger"[^>]*>(.*?)</button>', SRC, re.S)
+        self.assertIsNotNone(block)
+        self.assertEqual(block.group(1).strip(), "搜索")
+
+    def test_explicit_search_bypasses_ui_busy(self):
+        self.assertIn(
+            "if(b.id === 'btn-rt-ledger'){ loadLedger({force: true}); return; }",
+            SCRIPT, "点搜索必须真的重绘表格")
+        self.assertIn("function loadLedger(opts){", SCRIPT)
+        self.assertIn("if(!force && uiBusy()) return;", SCRIPT,
+                      "自动轮询让位给 uiBusy()，显式查询必须无视它")
+
+    def test_polling_stays_unforced(self):
+        self.assertIn("if(PAGE === 'tasks') loadLedger(opts);", SCRIPT)
+        self.assertIn("rtTickDetails({force: true})", SCRIPT,
+                      "切进页面=明确要看，必须渲染")
+        self.assertIn(
+            "setInterval(function(){ loadRtCore(); rtTickDetails(); }", SCRIPT)
+
+    def test_filter_change_only_marks_dirty(self):
+        self.assertIn("var LEDGER_FILTER_IDS", SCRIPT)
+        self.assertIn("function ledgerMarkDirty(", SCRIPT)
+        self.assertIn(
+            "LEDGER_FILTER_IDS.indexOf(el.id) >= 0){ ledgerMarkDirty(true); return; }",
+            SCRIPT, "改筛选条件不该自动发请求")
+        # 关键字不再边打边查，改成回车查
+        self.assertNotIn("ledgerKwTimer = setTimeout(loadLedger, 600)", SCRIPT)
+
+    def test_reversed_date_range_is_swapped(self):
+        self.assertIn("if(since && until && since > until){", SCRIPT)
+        self.assertIn("起止日期填反了，已自动调换", SCRIPT)
+
+    def test_dirty_state_is_visible(self):
+        self.assertIn('id="rt-ledger-dirty"', SRC)
+        self.assertIn("条件已改，点「搜索」查询", SCRIPT)
 
 
 if __name__ == "__main__":

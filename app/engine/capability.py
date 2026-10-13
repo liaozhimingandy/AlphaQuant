@@ -104,6 +104,7 @@ class Cap:
     COLLECT_KLINE = "collect.kline"     # 抓 K 线入库
     COLLECT_CROSS = "collect.cross"     # 抓日频截面（资金流/筹码/涨停池）
     DATA_INTEGRITY = "collect.integrity"  # 数据完整性与缺口补全
+    WATCHLIST_COLLECT = "collect.watchlist"  # 关注标的：按标的各自的频率定时自动采
 
     # —— 交易 ——
     ORDER_ROUTE = "trade.route"         # 把订单路由到券商

@@ -10,13 +10,16 @@
       "weekday": 1,
       "day_of_month": 1,
       "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
       "cron": "",
       "once_at": "",
       "params": {
         "apply": false,
         "retention_hours": 168
       },
-      "description": "扫描并清理超过保留天数的日志文件；未勾选『真的删除』时只列出清单"
+      "description": "扫描并清理超过保留天数的日志文件；未勾选『真的删除』时只列出清单",
+      "custom": false
     },
     "archive": {
       "task_type": "maintenance.archive",
@@ -27,13 +30,16 @@
       "weekday": 1,
       "day_of_month": 1,
       "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
       "cron": "",
       "once_at": "",
       "params": {
         "apply": false,
         "before_hours": 720
       },
-      "description": "把超过天数的运行快照移入 archive/；默认关闭，需先确认归档目标"
+      "description": "把超过天数的运行快照移入 archive/；默认关闭，需先确认归档目标",
+      "custom": false
     },
     "validate": {
       "task_type": "maintenance.validate",
@@ -44,10 +50,13 @@
       "weekday": 1,
       "day_of_month": 1,
       "interval_hours": 1,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
       "cron": "",
       "once_at": "",
       "params": {},
-      "description": "引擎启动时校验日志目录、数据目录与数据库可用性（只读，不删任何东西）"
+      "description": "引擎启动时校验日志目录、数据目录与数据库可用性（只读，不删任何东西）",
+      "custom": false
     },
     "dead_history": {
       "task_type": "maintenance.dead_history",
@@ -58,6 +67,8 @@
       "weekday": 1,
       "day_of_month": 1,
       "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
       "cron": "",
       "once_at": "",
       "params": {
@@ -65,7 +76,29 @@
         "apply": true,
         "retention_hours": 720
       },
-      "description": "清理已处置超过保留期的死信处置历史（未处置的不动）；对照 Rhapsody 的通知事件历史清理"
+      "description": "清理已处置超过保留期的死信处置历史（未处置的不动）；对照 Rhapsody 的通知事件历史清理",
+      "custom": false
+    },
+    "pool_refresh": {
+      "task_type": "pool.refresh",
+      "label": "候选股票池刷新",
+      "enabled": true,
+      "schedule": "interval",
+      "at": "03:10",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "interval_minutes": 10,
+      "trading_hours_only": true,
+      "cron": "",
+      "once_at": "",
+      "params": {
+        "source": "flow",
+        "limit": 30,
+        "sync": false
+      },
+      "description": "每 10 分钟刷新一次候选股票池（资金流排行取前 30 只打分）。仅在交易时段执行——休市刷出的排名没有意义，还会平白消耗数据源的请求额度。",
+      "custom": true
     }
   }
 }

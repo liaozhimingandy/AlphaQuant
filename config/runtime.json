@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "运行时配置：执行池（线程池）容量等**进程级**参数。",
+    "改完必须**重启引擎**才生效 —— 这是刻意的。",
+    "ThreadPoolExecutor 的 max_workers 在建池那一刻就固定了，",
+    "运行中改数字只会让面板显示 8、实际并发还是 3，",
+    "这种「改了但没真的改」比不支持热更新更难排查。"
+  ],
+  "worker_pools": {
+    "_comment": [
+      "capacities: 池名 → 同时最多能跑几个任务（= 该池线程池的 worker 数）。",
+      "           留空/不写 = 用代码里的默认值（见 app/runtime/events/types.py 的 Pool.DEFAULT_CAPACITY）。",
+      "           最小 1；写 0 或负数会被拉回 1 —— 「0 个 worker」意味着活永远没人干。",
+      "enabled   : 要建立哪些池。省略 = 全建；写成 [] 也按全建处理（配错成空数组就把系统打死太危险了）。",
+      "           default 是**兜底池**（接 legacy.job 这类没有业务归属的作业），始终存在，",
+      "           没列它也会被补回来 —— 少建它的后果是这类任务没人领、悄悄进死信。",
+      "",
+      "调之前先想清楚每个池为什么是这个数：",
+      "  strategy=1 / trading=1 是**正确性**要求，不是性能取舍 ——",
+      "    两个策略并发改同一个账本，权益曲线就不确定了；",
+      "    两个下单并发遇到网络超时，极易重复报单。这两个加到 2 是在换 bug。",
+      "  market 给多大受**数据源限流**约束：并发上去了，",
+      "    要么被封 IP，要么触发熔断，实际吞吐反而下降。先 3，确认限流有余量再往上加。",
+      "  research 吃 CPU：给多了会把 reactor 拖慢，行情采集跟着变钝。",
+      "  backtest=1：长任务本来就该排队，而且回测绝不能挤占实盘资源。"
+    ],
+    "capacities": {
+      "system": 2,
+      "market": 5,
+      "research": 2,
+      "strategy": 1,
+      "trading": 1,
+      "backtest": 1,
+      "maintenance": 1
+    },
+    "enabled": ["system", "market", "research", "strategy", "trading", "backtest", "maintenance"]
+  }
+}

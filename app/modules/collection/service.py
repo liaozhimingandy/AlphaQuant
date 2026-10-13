@@ -43,6 +43,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 from twisted.internet import defer, task, threads
+# Failure 必须显式引入：errback 送下来的**不是** Exception 实例，
+# 只判 isinstance(x, Exception) 会让线程池里的异常被静默吞掉。
+from twisted.python import failure as _failure
 
 import sys
 
@@ -59,6 +62,14 @@ from app.modules.collection.spec import (
     parse_frequency,
 )
 from app.modules.collection.integrity import DataIntegrityChecker, IntegrityReport, summarize
+from app.modules.collection.watchlist import (
+    WatchlistConfig,
+    collect_due_watchlist,
+    get_watchlist_config,
+    seed_from_config,
+    set_watchlist_config,
+    watchlist_view,
+)
 from app.runtime.event_bus import StandardEvents
 from app.domain.symbol import DataFetchError, normalize_symbol
 from app.common.config import settings
@@ -73,27 +84,36 @@ class CollectionService(ServiceComponent):
       * ``collect.kline``     —— 逐根 K 线，按标的按周期定时抓
       * ``collect.cross``     —— 日频截面：资金流 / 筹码 / 基本面 / 涨停池 / 题材
       * ``collect.integrity`` —— 体检 + 缺口自动补全
+      * ``collect.watchlist`` —— 关注标的：每只票按**各自的**频率自动补数据
 
-    内部三个单元
+    内部四个单元
     ------------
-    ============  =====================  ================================
-    单元          管什么                  节拍
-    ============  =====================  ================================
-    ``_kline``    K 线（量价）           按任务频率，分钟级到日级
-    ``_cross``    资金流/筹码/涨停池等    按市场状态：盘前/盘后各一次
-    ``_guard``    完整性与补全            启动后延后首检，之后周期性
-    ============  =====================  ================================
+    =================  =========================  ===========================
+    单元               管什么                      节拍
+    =================  =========================  ===========================
+    ``_kline``         K 线（量价）               按任务频率，分钟级到日级
+    ``_cross``         资金流/筹码/涨停池等        按市场状态：盘前/盘后各一次
+    ``_guard``         完整性与补全                启动后延后首检，之后周期性
+    ``_watchlist``     关注标的（自选股）          每只票各自到期，到期才采
+    =================  =========================  ===========================
 
-    节拍不同是它们当初被写成三个组件的**唯一正当理由**，
+    节拍不同是它们当初被写成多个组件的**唯一正当理由**，
     所以合并后这个差异被完整保留，只是不再各自占一个引擎槽位。
 
-    三个单元共用一套"上一轮没跑完就跳过本轮"的保护：
+    ``_watchlist`` 的节拍为什么要"每只票各自到期"而不是整批到点一起采：
+    见 :class:`app.data.schema.Watchlist` 的类文档 —— 整批共用一个频率会逼
+    用户在"陪着一起被限流"和"真正要盯的那只永远是旧数据"之间二选一。
+
+    四个单元共用一套"上一轮没跑完就跳过本轮"的保护：
     网络慢的时候堆积请求只会让数据源更慢，最后被限流，
     比漏采一次严重得多。
     """
 
     name = "collection_service"
-    provides = frozenset({Cap.COLLECT_KLINE, Cap.COLLECT_CROSS, Cap.DATA_INTEGRITY})
+    provides = frozenset({
+        Cap.COLLECT_KLINE, Cap.COLLECT_CROSS, Cap.DATA_INTEGRITY,
+        Cap.WATCHLIST_COLLECT,
+    })
     restart_policy = RestartPolicy.ON_ERROR
 
     #: 三个单元各自的进度分区名（与合并时的方法后缀一一对应）
@@ -131,6 +151,12 @@ class CollectionService(ServiceComponent):
         guard_max_symbols: Optional[int] = None,
         guard_max_repair: Optional[int] = None,
         guard_enabled: Optional[bool] = None,
+        # ---- 关注标的单元 ----
+        watchlist_enabled: Optional[bool] = None,
+        watchlist_interval: Any = None,
+        watchlist_sweep_interval: Optional[float] = None,
+        watchlist_max_per_round: Optional[int] = None,
+        watchlist_categories: Optional[List[str]] = None,
         # ---- 服务级 ----
         enabled: Optional[bool] = None,
         disabled_reason: str = "",
@@ -253,6 +279,32 @@ class CollectionService(ServiceComponent):
             "runs": 0, "missing": 0, "repaired": 0, "anomalies": 0, "errors": 0,
         }
 
+        # ---------------- 关注标的单元 ----------------
+        #: 配置来源：config/collector.json 的 watchlist 段 > 环境变量 > 内置默认。
+        #: 构造参数（builder 传进来的component_config 之类）优先级最高，
+        #: 因为那是"这次运行明确指定的"，不该被文件里的默认值盖掉。
+        self._watchlist_cfg: WatchlistConfig = get_watchlist_config()
+        if watchlist_enabled is not None:
+            self._watchlist_cfg.enabled = bool(watchlist_enabled)
+        if watchlist_interval is not None:
+            self._watchlist_cfg.interval = str(watchlist_interval)
+        if watchlist_sweep_interval is not None:
+            self._watchlist_cfg.sweep_interval = float(watchlist_sweep_interval)
+        if watchlist_max_per_round is not None:
+            self._watchlist_cfg.max_per_round = int(watchlist_max_per_round)
+        # categories 用 ``is not None``：``[]`` 是"一个都不要"的显式声明，
+        # 不能用 ``or`` 兜底 —— 那会把它反向变成"全都采"。
+        if watchlist_categories is not None:
+            self._watchlist_cfg.categories = [
+                str(c).strip() for c in watchlist_categories if str(c).strip()
+            ]
+        self._watchlist_loop: Optional[task.LoopingCall] = None
+        self._busy_watchlist = False
+        self.stats_watchlist: Dict[str, Any] = {
+            "runs": 0, "collected": 0, "failed": 0, "errors": 0,
+            "skipped_no_due": 0, "last_run_at": None, "last_symbols": [],
+        }
+
         # ---------------- 服务级 ----------------
         if enabled is not None:
             self.enabled = bool(enabled)
@@ -303,6 +355,7 @@ class CollectionService(ServiceComponent):
         self._init_kline()
         self._init_cross()
         self._init_guard()
+        self._init_watchlist()
 
     @defer.inlineCallbacks
     def on_start(self) -> defer.Deferred:
@@ -312,10 +365,15 @@ class CollectionService(ServiceComponent):
         yield self._start_kline()
         yield self._start_cross()
         yield self._start_guard()
+        # 关注标的放最后：它自己去库里读清单，不依赖另外三个单元，
+        # 但它是唯一会"因为用户在面板上点了一下就改写自身状态"的单元，
+        # 让它晚一步起来，避免和启动期的其它补采抢同一批网络连接。
+        yield self._start_watchlist()
 
     @defer.inlineCallbacks
     def on_stop(self, graceful: bool = True) -> defer.Deferred:
-        # 逆序：先停补全（它可能正在联网），再停截面，最后停 K 线
+        # 逆序：关注标的先停（它最后起），再停补全，再停截面，最后停 K 线
+        yield self._stop_watchlist()
         yield self._stop_guard()
         yield self._stop_cross()
         yield self._stop_kline()
@@ -326,6 +384,7 @@ class CollectionService(ServiceComponent):
             self._is_busy_kline()
             or self._is_busy_cross()
             or self._is_busy_guard()
+            or self._is_busy_watchlist()
         )
 
     # ============================================================
@@ -433,6 +492,10 @@ class CollectionService(ServiceComponent):
             base["guard"] = self._snapshot_guard()
         except Exception as exc:
             base["guard_error"] = str(exc)
+        try:
+            base["watchlist"] = self._snapshot_watchlist()
+        except Exception as exc:
+            base["watchlist_error"] = str(exc)
         base["symbols"] = list(self.symbols)
         base["disabled_reason"] = self.disabled_reason
         return base
@@ -450,6 +513,7 @@ class CollectionService(ServiceComponent):
             ("K线", self._health_check_kline),
             ("截面", self._health_check_cross),
             ("完整性", self._health_check_guard),
+            ("关注标的", self._health_check_watchlist),
         ):
             try:
                 ok, detail = fn()
@@ -1584,6 +1648,258 @@ class CollectionService(ServiceComponent):
                 self._guard_report.started_at if self._guard_report else None
             ),
         }
+
+    # ============================================================
+    # 单元：watchlist（关注标的 / 自选股）
+    # ============================================================
+    # 这个单元和其它三个最不一样的地方：**它的输入是用户在运行时改的**。
+    # K 线/截面/完整性的标的与时间窗来自配置文件，重启不变；
+    # 关注清单来自用户在面板上的增删，随时变。
+    # 所以它不能把任何状态缓存在内存里当权威 ——
+    # 每一轮都重新去库里读一次"现在还有谁、谁到期了"。
+    # 多一次几十行的查询远比"用户在面板点了取消关注，它还在采"便宜。
+
+    # ---------------- 生命周期 ----------------
+    def _init_watchlist(self) -> None:
+        cfg = self.component_config or {}
+        wl = cfg.get("watchlist")
+        if isinstance(wl, dict):
+            if wl.get("enabled") is not None:
+                self._watchlist_cfg.enabled = bool(wl["enabled"])
+            if wl.get("interval") is not None:
+                self._watchlist_cfg.interval = str(wl["interval"])
+            if wl.get("sweep_interval") is not None:
+                self._watchlist_cfg.sweep_interval = float(wl["sweep_interval"])
+            if wl.get("max_per_round") is not None:
+                self._watchlist_cfg.max_per_round = int(wl["max_per_round"])
+            # categories 依旧 ``is not None``：[] = "一个都不要"
+            if wl.get("categories") is not None:
+                self._watchlist_cfg.categories = [
+                    str(c).strip() for c in (wl["categories"] or [])
+                    if str(c).strip()
+                ]
+
+        self._ensure_watchlist_schema()
+        if not self._watchlist_cfg.enabled:
+            logger.info("关注标的自动采集已关闭（watchlist.enabled=false）")
+            return
+
+        seed_from_config(self._watchlist_cfg)
+        try:
+            from app.data.repo.watchlist_repo import (
+                count_watchlist, due_watchlist,
+            )
+
+            total = count_watchlist(enabled_only=False)
+            due = len(due_watchlist(limit=self._watchlist_cfg.max_per_round or 0))
+        except Exception as exc:
+            logger.warning(f"读取关注清单失败（本轮不采）: {exc}")
+            return
+        logger.info(
+            f"关注标的就绪 | 共 {total} 只 | 其中 {due} 只待采 | "
+            f"默认频率 {self._watchlist_cfg.interval} | "
+            f"检查周期 {self._watchlist_cfg.sweep_seconds:.0f}s | "
+            f"单轮上限 {self._watchlist_cfg.max_per_round}"
+        )
+
+    def _ensure_watchlist_schema(self) -> None:
+        """确保 watchlist 表存在。幂等，只在库里没有这张表时才建。
+
+        为什么这里也要建表（而不是只靠 init-db）：关注清单是**运行时产生**的
+        —— 用户今天在面板上点"关注"，从来没人要求他先跑一遍数据库初始化。
+        ``create_all`` 只补缺失表、不动已有表，重复调用是安全的。
+        """
+        try:
+            from app.data.engine import engine as db_engine
+            from app.data.schema import Base
+
+            Base.metadata.create_all(bind=db_engine)
+        except Exception as exc:
+            logger.warning(f"关注标的表初始化失败（后续读写可能报错）: {exc}")
+
+    def _start_watchlist(self) -> defer.Deferred:
+        if not self._watchlist_cfg.enabled:
+            return defer.succeed(None)
+        sweep = self._watchlist_cfg.sweep_seconds
+        self._watchlist_loop = task.LoopingCall(self._tick_watchlist)
+        # now=False：启动那一刻**不马上采一轮**。
+        # 冷启动时 kline/cross 的两轮补采正在打数据源，
+        # 这时候再插一队全类别请求，是最容易把自己送进限流的时刻。
+        self._watchlist_loop.start(sweep, now=False)
+        logger.info(
+            f"关注标的定时器启动 | 每 {sweep:.0f}s 检查一次谁到期 | "
+            f"默认采集频率 {self._watchlist_cfg.interval}"
+        )
+        return defer.succeed(None)
+
+    def _stop_watchlist(self, graceful: bool = True) -> defer.Deferred:
+        if self._watchlist_loop is not None and self._watchlist_loop.running:
+            self._watchlist_loop.stop()
+        self._watchlist_loop = None
+        # 停的时刻若正采着，一并复位忙标志，免得留下永久 busy
+        self._busy_watchlist = False
+        return defer.succeed(None)
+
+    def _is_busy_watchlist(self) -> bool:
+        return self._busy_watchlist
+
+    # ---------------- 执行 ----------------
+    def _tick_watchlist(self):
+        """看一眼有没有标的到点了；没有就什么都不做。
+
+        先用一次**轻量查询**确认有到期标的，再决定是否上线程池。
+        绝大多数轮次（默认 1h 频率 / 60s 检查 = 59/60）走到第一句就返回了，
+        省掉每次都搬运一次线程上下文的开销。
+        """
+        if self._busy_watchlist:
+            return defer.succeed(None)
+        try:
+            from app.data.repo.watchlist_repo import due_watchlist
+
+            due = due_watchlist(limit=1)
+        except Exception as exc:
+            logger.debug(f"关注标的到期查询失败: {exc}")
+            return defer.succeed(None)
+        if not due:
+            self.stats_watchlist["skipped_no_due"] += 1
+            return defer.succeed(None)
+
+        self._busy_watchlist = True
+        d = threads.deferToThread(self._run_watchlist_once)
+        d.addBoth(self._release_watchlist)
+        return d
+
+    def _release_watchlist(self, result: Any) -> Any:
+        self._busy_watchlist = False
+        # errback 送下来的是 ``Failure``，不是 ``Exception`` ——
+        # 只判 Exception 会让"线程池里炸了"这回事被静默吞掉，
+        # 面板上看到的就是"关注标的再也没采过，但统计里没有失败"。
+        if isinstance(result, Exception) or isinstance(result, _failure.Failure):
+            self.stats_watchlist["errors"] += 1
+            getter = getattr(result, "getErrorMessage", None)
+            msg = getter() if callable(getter) else str(result)
+            log_throttled("ERROR", f"关注标的自动采集异常: {msg}",
+                          key="watchlist-error")
+            return None
+        return result
+
+    def _run_watchlist_once(self) -> Dict[str, Any]:
+        """真跑一轮到期标的（在线程池里执行）。"""
+        summary = collect_due_watchlist(config=self._watchlist_cfg)
+        st = self.stats_watchlist
+        st["runs"] += 1
+        st["collected"] += len(summary.get("ok_symbols") or [])
+        st["failed"] += len(summary.get("failed_symbols") or [])
+        st["last_run_at"] = datetime.now().isoformat()
+        st["last_symbols"] = list(summary.get("symbols") or [])
+        syms = summary.get("symbols") or []
+        if syms:
+            ok_n = len(summary.get("ok_symbols") or [])
+            fail_n = len(summary.get("failed_symbols") or [])
+            level = "INFO" if not fail_n else "WARNING"
+            log_throttled(
+                level,
+                f"关注标的采集完成 | 到期 {len(syms)} 只 | 成功 {ok_n} | "
+                f"失败 {fail_n}"
+                + (f" | {summary.get('error') or ''}" if fail_n else ""),
+                key="watchlist-run",
+            )
+        return summary
+
+    def collect_watchlist_now(self, symbols: Optional[Sequence[str]] = None,
+                              ignore_due: bool = True) -> Dict[str, Any]:
+        """**不管到没到点**，立刻采一轮（面板「立即采集」按钮 / API 用）。
+
+        :param symbols: 限定只采这几只；为空 = 采所有启用的关注标的
+        :param ignore_due: True = 连没到期的也一起采。
+            用户点了"立即采集"就是想要**现在**的数据，
+            这时候再去跟他讲"你上次是 20 分钟前采的、还没到期"只会让人恼火。
+        """
+        if not ignore_due:
+            return collect_due_watchlist(config=self._watchlist_cfg)
+
+        from app.data.repo.watchlist_repo import list_watchlist
+
+        want = {str(s).strip() for s in (symbols or []) if str(s).strip()}
+        picked = [
+            i["symbol"] for i in list_watchlist(enabled_only=True)
+            if not want or i["symbol"] in want
+        ]
+        if not picked:
+            # 两种"没得采"要分开说：**明确点名却找不到**是失败（用户点错了），
+            # 而列表本来就是空的不算错误 —— 它只是"没有要做的活"。
+            return {
+                "ok": False if want else True,
+                "due": 0, "symbols": [], "ok_symbols": [],
+                "failed_symbols": [], "groups": [],
+                "error": (f"指定的标的都不在关注列表里: {', '.join(sorted(want))}"
+                          if want else "关注列表为空或都已停用"),
+            }
+        # 把"当前时间"推到足够远，于是每一只都被判成到期 ——
+        # 语义上正是"用户要求现在就采，别管上次什么时候采过"。
+        far = datetime.now() + timedelta(days=36500)
+        return collect_due_watchlist(
+            now=far, config=self._watchlist_cfg,
+            limit=len(picked), symbols=picked,
+        )
+
+    def watchlist_status(self) -> Dict[str, Any]:
+        """关注标的单元的状态快照（面板 / API 用）。
+
+        单独开一个公开入口而不是让面板去读 ``snapshot()["watchlist"]``：
+        后者会把体检报告等重型字段一并算出来，而面板只想每隔几秒
+        问一句"还有几只没采到"。
+        """
+        return self._snapshot_watchlist()
+
+    # ---------------- 可观测 ----------------
+    def _watchlist_due(self, limit: int = 0) -> List[str]:
+        try:
+            from app.data.repo.watchlist_repo import due_watchlist
+
+            return [d["symbol"] for d in due_watchlist(limit=limit or 0)]
+        except Exception:
+            return []
+
+    def _snapshot_watchlist(self) -> Dict[str, Any]:
+        cfg = self._watchlist_cfg
+        due = self._watchlist_due(limit=cfg.max_per_round or 0)
+        total = enabled_n = 0
+        try:
+            from app.data.repo.watchlist_repo import count_watchlist
+
+            total = count_watchlist(enabled_only=False)
+            enabled_n = count_watchlist(enabled_only=True)
+        except Exception:
+            pass
+        return {
+            "enabled": bool(cfg.enabled),
+            "config": cfg.to_dict(),
+            "busy": self._busy_watchlist,
+            "running": bool(getattr(self._watchlist_loop, "running", False)),
+            "total": total,
+            "enabled_count": enabled_n,
+            "due_count": len(due),
+            "due_symbols": due,
+            "stats": dict(self.stats_watchlist),
+        }
+
+    def _health_check_watchlist(self):
+        cfg = self._watchlist_cfg
+        if not cfg.enabled:
+            return True, "disabled"
+        st = self.stats_watchlist
+        # 只看**连续失败且一只都没成过**：偶发几只票失败（退市、接口抽风）
+        # 不该让整个采集服务标红 —— 那是 Day-to-day 的正常噪声。
+        if int(st.get("errors") or 0) >= 5 and not int(st.get("collected") or 0):
+            return False, f"关注标的连续失败 {st['errors']} 次且无成功记录"
+        try:
+            from app.data.repo.watchlist_repo import count_watchlist
+
+            n = count_watchlist(enabled_only=True)
+        except Exception:
+            n = 0
+        return True, f"关注标的 {n} 只在采"
 
 
 # ===== 来自 collector.py 的模块级代码 =====

@@ -151,6 +151,37 @@ def _maintenance_params(event: EngineEvent, ctx: Any) -> Dict[str, Any]:
     return params
 
 
+#: 已经有**专用规则**的运维任务名。
+_BUILTIN_DUE_JOBS: frozenset = frozenset({"log_cleanup", "archive", "validate"})
+
+
+def _due_task_type(event: EngineEvent, ctx: Any) -> str:
+    """自定义定时任务 → 任务类型。
+
+    类型写在**事件**里而不是规则里，这正是"新增定时任务不必改代码"的关键：
+    计划器按 config 发出带 task_type 的事件，这条规则原样取出来用。
+    """
+    return str((event.data or {}).get("task_type") or "").strip()
+
+
+def _is_custom_due(event: EngineEvent, ctx: Any) -> bool:
+    """判断这是"配置里新增的定时任务"到点了。
+
+    要同时排除三种情况，每一种漏掉都会造成真实的故障：
+
+    * **没带 job 名的裸事件** —— 那是"把运维活都跑一遍"，由上面三条
+      专用规则响应；通用规则若也接，会凭空造出一个没有类型的任务；
+    * **内置 job** —— 它们各有专用规则，再接一次就是重复执行；
+    * **没有 task_type 的事件** —— 造出来也只会落进 ``no_handler``，
+      不如在这里就判定为无效。
+    """
+    data = event.data or {}
+    job = str(data.get("job") or "").strip().lower()
+    if not job or job in _BUILTIN_DUE_JOBS:
+        return False
+    return bool(str(data.get("task_type") or "").strip())
+
+
 # =============================================================================
 # 参数 / 幂等键 工具
 # =============================================================================
@@ -548,6 +579,29 @@ def build_default_rules() -> List[Rule]:
             priority=Priority.IDLE,
             timeout_seconds=300.0,
             description="运维窗口到点 → 校验目录与数据库可用性（只读）",
+        ),
+        # 上面三条是"写死的内置活"，这条才是**可配置定时任务**的入口。
+        # 它不认识任何具体任务 —— task_type 从事件里取，
+        # 于是往 config/maintenance.json 里加一条任务就能立即生效，
+        # 不必再回来加一条规则。少了这条，"调度可配置"就是句空话。
+        Rule(
+            name="maintenance_due_generic",
+            event_type=EventType.SYSTEM_MAINTENANCE_DUE,
+            # 故意不给 task_type：它由 task_type_fn 从事件推导。
+            # 加上 @task_type_fn 之后这里的空值是合法的。
+            task_type_fn=_due_task_type,
+            condition=_is_custom_due,
+            params_fn=_maintenance_params,
+            dedup_fn=lambda e, c: normalize_key(
+                dedup_key((e.data or {}).get("task_type") or "unknown",
+                          (e.data or {}).get("job") or "any")
+            ),
+            # 这类任务都带时效性（刷股票池、算因子），不该排在"有空再做"的
+            # IDLE 档里跟日志清理挤在一起。
+            priority=Priority.NORMAL,
+            max_retries=1,
+            timeout_seconds=900.0,
+            description="自定义定时任务到点 → 按配置里的 task_type 建任务（周期在维护计划里配）",
         ),
         Rule(
             name="recovery_requested",

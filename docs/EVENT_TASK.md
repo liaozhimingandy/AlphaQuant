@@ -182,6 +182,14 @@ PENDING → CANCELLED
 `QUEUED` 是"已在队列里等着被领"。少了它，"任务建出来了但没人领"和
 "任务还没建"在监控上长得一样，而前者通常是路由配错了。
 
+**`FAILED` 不是一个会留存的状态** —— 这是查明细时最容易踩的一处：
+`TaskStore.mark_failure` 在同一次调用里就会把任务转成 `RETRYING`（还能重试）
+或 `DEAD_LETTER`（重试耗尽）。所以按 `failed` 精确查询结果永远是空，
+而累计计数 `stats["failed"]` 却在正常增长 —— "失败 12 条"配上一个空列表，
+看起来就像过滤坏了。任务明细里「失败」按钮查的是**状态组**
+`failed = {failed, retrying}`，即"失败过、还在自动重试"的那批；
+最终没做成的会落到「死信」。详见 `TaskStore.STATUS_GROUPS`。
+
 ### 三条硬规则
 
 1. **`trade.execute` 永远不自动重试**（`NON_RETRIABLE_TASK_TYPES` 强制归零）。
@@ -344,7 +352,7 @@ scheduler 定时器 ──每 30s──> system.maintenance.tick
 | `schedule` | 含义 | 字段 | 约束 |
 |---|---|---|---|
 | `startup` | 引擎每次启动跑一次 | — | 不参与 `tick`；`run_startup()` 在 `scheduler.on_start` 触发 |
-| `interval` | 每 N 小时 | `interval_hours` | ≥ 1 小时 |
+| `interval` | 每 N 分钟或 N 小时 | `interval_minutes`（优先）/ `interval_hours` | 下限**按任务类别**：`maintenance.*` ≥ 1 小时，其它 ≥ 1 分钟 |
 | `daily` | 每天 HH:MM | `at` | 5 分钟错过宽限 |
 | `weekly` | 每周某天 HH:MM | `weekday`(1=周一) + `at` | 同上 |
 | `monthly` | 每月某日 HH:MM | `day_of_month` + `at` | 1–28 号（29–31 在小月不存在，封顶） |
@@ -355,10 +363,21 @@ scheduler 定时器 ──每 30s──> system.maintenance.tick
 `_next_monthly()`：从当前基准月推下个月同日。`datetime.replace` 一次
 替换 year/month/day 全部字段，`day_of_month` 封顶 28，构造不出 2 月 30 日。
 
-**为什么间隔的最小粒度是小时**：维护任务是"扫一遍日志目录"这种活，
-做成分钟级只会让引擎一直在做无用功。旧配置的 `interval_sec`（秒）读入时
-按**向上取整**换算成小时 —— 向下取整会把 1.5 小时悄悄缩短成 1 小时，
-维护任务跑太频繁比跑少了更烦人。
+**为什么间隔的下限按任务类别区分**：维护任务是"扫一遍日志目录"这种活，
+做成分钟级只会让引擎一直在做无用功 —— 所以 `maintenance.*` 仍是 1 小时
+（`min_interval_seconds_for()`）。但业务任务的时效性恰恰是它的全部价值，
+"候选池十分钟刷新一次"要求分钟级，因此其它类型放宽到 1 分钟
+（不再放宽到秒：检查节拍是 30 秒，比节拍更密的间隔既做不到也无意义）。
+
+`interval_minutes` **优先于** `interval_hours` —— 后者有默认值 24，
+若让它说话，"配了 10 分钟"会被悄悄改回一天一次。
+旧配置的 `interval_sec`（秒）读入时按**向上取整**换算成小时 ——
+向下取整会把 1.5 小时悄悄缩短成 1 小时，维护任务跑太频繁比跑少了更烦人。
+
+周期任务还可以勾 `trading_hours_only`：只在交易时段（含午休与收盘结算窗口）
+到期。休市期间**不计失败**也不累积欠账 —— 它不是"这轮没做成"，
+而是"这轮不该发生"。这样开盘那一刻刷一轮，而不会把夜里欠的十几次
+一次性补跑出来把数据源打进限流名单。
 
 **为什么 `validate` 是 `startup`**：它的价值就是"这次启动的环境是好的"，
 每小时再校验一遍既不增加信息量，又会在日志里堆一堆"正常"。
@@ -610,9 +629,14 @@ POST /api/preflight/run          {}                       同上
 GET  /api/maintenance            维护计划与运行态（含可用周期 kinds 与下次执行）
 POST /api/maintenance/save       {"jobs": {...}}          保存并生效
 POST /api/maintenance/run        {"name": "log_cleanup"}  立即执行
-GET  /api/ledger                 任务明细：已建任务 + 终态历史
+GET  /api/schedules             内置定时任务总清单：维护计划 + 节拍定时器 + 采集单元
+GET  /api/ledger                任务明细（合并去重后排好序的 rows）
      ?status=success&task_type=factor.calculate&keyword=000001&limit=100
+     ?since=2026-10-13&until=2026-10-13         按创建时间收窄（日期会补全到当天首尾）
+     ?sort=time|elapsed|attempts&order=desc|asc 排序，默认创建时间倒序
+     响应里 status_counts 是**当前筛选范围内**各状态的条数，与 rows 同源
 GET  /api/task?id=<task_id>      单条任务明细（参数 / 结果 / 错误 / 耗时）
+GET  /api/engine_tasks?id=<id>   同上（别名：面板早期用过的路径，保留以免轮询 404）
 GET  /api/events                 事件指标：每种事件发布数/触达/订阅者/异常
 GET  /api/events?type=<name>     该类事件的指标 + 最近 20 条样例
 GET  /api/logging                当前生效的日志配置
@@ -636,8 +660,15 @@ POST /api/logging/level          {"console":"DEBUG","file":"INFO","persist":true
 - **启动预检**：逐项结果与处置建议，可当场重跑
 - 手动投递任务（任务类型下拉直接取已注册处理器）
 - 维护计划（周期/时刻/参数/立即执行）—— 切换周期时只留下该周期用得到的输入框
-- **任务明细**：按状态/类型/关键字查已建任务与终态历史，点「详情」看完整
-  参数、结果与错误原文
+- **内置定时任务**：把散在三处的自动任务汇总成一屏（维护计划 / 节拍定时器 /
+  采集单元），标清周期、下次执行与"从哪里改"，附上 5s 轮询
+- **任务明细**：按状态 / 类型 / 关键字 / **日期范围**查已建任务与终态历史，
+  支持按创建时间（默认倒序）、耗时、尝试次数排序，点「详情」看完整
+  参数、结果与错误原文。
+  改完筛选条件**点「搜索」才查**（关键字框里按回车等价）—— 自动刷新只更新
+  汇总、不重绘表格，否则会把用户展开的详情面板换掉；而用户亲手点的查
+  询一定重绘，哪怕他此刻正按着日期框。结果区会把"这次按什么条件查的"
+  原样打出来，"一条都没查出来"时要能立刻判断是没数据还是条件写错了。
 - **事件指标**：每种事件的发布数、触达订阅者数、订阅者数、处理异常数与最近时间；
   点「样例」只看该类事件的最近 20 条
 
@@ -719,13 +750,45 @@ scheduler.rules.register(Rule(
 `condition` 抛异常按**不跑**处理（记日志 + 跳过），
 不会让同事件的其它规则跟着失效。
 
-### 加一个维护任务
+### 加一个定时任务
 
-维护任务**不需要**新规则 —— 在 `app/runtime/maintenance.py` 的 `DEFAULT_JOBS`
-里加一项即可，规则表已有 `maintenance_due_*` 三条按 job 名分流。
-新任务的 `params` 会原样透传给处理器（`_maintenance_params`）。
+**推荐做法：只写配置，不改代码。** 往 `config/maintenance.json` 里加一条，
+或在面板「运行时 → 维护计划」底部表单新增即可：
 
-前提是它的任务类型已有处理器，否则会进死信（这是刻意的：明确失败好过假成功）。
+```json
+"pool_refresh": {
+  "task_type": "pool.refresh",
+  "label": "候选股票池刷新",
+  "enabled": true,
+  "schedule": "interval",
+  "interval_minutes": 10,
+  "trading_hours_only": true,
+  "params": {"source": "flow", "limit": 30}
+}
+```
+
+这条会由 `MaintenancePlanner._load()` 加载（配置里的非内置条目不再被丢弃），
+并在到点时经 `system.maintenance.due` → 通用规则 `maintenance_due_generic`
+落成任务。**该规则不认识任何具体任务**：`task_type` 从事件里取，
+所以它能服务任意新任务而无需新增规则。
+
+绕不开代码的情况只有两种：
+
+1. **任务是内置的**（`DEFAULT_JOBS`）—— 它们各有 `maintenance_due_*`
+   专用规则按 job 名分流，且都属于引擎自保逻辑，
+   如需新增内置任务，除改 `DEFAULT_JOBS` 还要补一条专用规则
+   （否则会被通用规则接管，通常也够用）；
+2. **任务类型还没有处理器** —— 那就要先写 handler 并注册。
+
+`params` 会原样透传给处理器（`_maintenance_params`）。
+任务类型若最终没有处理器会进死信（这是刻意的：明确失败好过假成功）。
+
+### Rule 的两种写法
+
+静态：构造时给死 `task_type`（绝大多数情况）。
+动态：给 `task_type_fn` —— 从事件内容推导类型，`task_type` 可省略。
+这是"通用规则"的实现基础。两种都给时以回调为准，回调抛错或返回空会
+回落到静态值，不会因为一次推导失败就让整条规则失效。
 
 ---
 

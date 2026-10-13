@@ -10,6 +10,7 @@
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     String,
@@ -694,3 +695,76 @@ class MarketBreadth(Base):
     #: -100 ~ 100，正=偏乐观
     sentiment = Column(Float)
     updated_at = Column(DateTime)
+
+
+class Watchlist(Base):
+    """关注标的（自选股）—— 会被**定时自动采集**的那批票。
+
+    ============================================================
+    它和「股票池 / 候选池」不是一回事
+    ============================================================
+    股票池是**打分选出来**的结果（一屏排名，天天在变）；
+    关注标的是**人（或别的服务）显式指定**的清单 ——
+    "这只票我盯着了，别让我自己去点采集"。
+
+    区别不在于谁是感兴趣的票，而在于**节拍归谁管**：
+      股票池刷新是"到点重算一遍"（维护计划/手动触发驱动）；
+      关注标的是"每只票按各自的频率去补数据"（这里这张表驱动）。
+
+    ============================================================
+    为什么频率要落到**每一只**标的身上
+    ============================================================
+    全清单共用一个频率是最简单的写法，但它逼用户做二选一：
+    - 按最勤的那只设频率 → 几十只票陪着一起每隔几分钟被抓一遍
+      （数据源配额是整台机器共享的，结局是所有源一起进限流名单）；
+    - 按最懒的那只设频率 → 真正要盯的那只数据永远是旧的。
+
+    所以每只票自带一个频率，默认取配置里的 ``watchlist.interval``。
+
+    ``freq`` 与 ``freq_seconds`` 为什么要存两份：
+      ``freq`` 是用户填的原样字符串（"1h"/"30m"），界面回填要它；
+      ``freq_seconds`` 是解析后的秒数，判到期要用它。
+    入库时解析一次写进去，之后每轮扫描只对 float 做比较 ——
+    既避免"每 60 秒把几十条字符串解析一遍"，也让
+    "写错频率（比如 '1x'）"在**添加那一刻**就暴露，
+    而不是变成一个永远不到期的静默失效项。
+
+    ``last_collected_at`` 只在**真的采成功之后**才更新：
+    乐观更新（派活就写时间戳）会让一次失败把这只票
+    整整屏蔽一个频率周期 —— 而这恰恰是最需要立刻重试的时刻。
+    """
+
+    __tablename__ = "watchlist"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), nullable=False)
+    #: 标的名称（冗余缓存，只为界面好读；取不到就空着）
+    name = Column(String(64))
+    added_at = Column(DateTime)
+    #: 这只票还要不要继续自动采。
+    #: 用开关而不是删除：停用一周再开回来，用户不希望重新配一遍频率。
+    enabled = Column(Boolean, default=True, index=True)
+    #: 人写的频率（"30s" / "5m" / "1h" / "1d"），界面回填用
+    freq = Column(String(16), default="1h")
+    #: 解析后的秒数，判到期用。改 freq 时必须同步改它。
+    freq_seconds = Column(Float, default=3600.0)
+    #: 这只票额外要采的类别（JSON 数组字符串）。空 = 跟随服务默认类别。
+    categories = Column(Text)
+    #: 最近一次**成功**采集的时刻
+    last_collected_at = Column(DateTime)
+    #: 最近一次失败后安排的重试时刻（见 :func:`due_watchlist`）。
+    #: 失败不该让用户干等整整一个频率周期，但也没理由立刻重打一轮 ——
+    #: 它是独立的一列，于是"数据有多旧"与"什么时候该重试"互不纠缠。
+    next_retry_at = Column(DateTime)
+    #: 最近一次失败的原因（成功时清空）
+    last_error = Column(Text)
+    #: 累计采集成功次数
+    runs = Column(Integer, default=0)
+    errors = Column(Integer, default=0)
+    note = Column(Text)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", name="uk_watchlist_symbol"),
+        Index("ix_watchlist_due", "enabled", "last_collected_at"),
+    )

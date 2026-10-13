@@ -9,23 +9,21 @@
   "lookback_days": 30,
   "keep_days": 0,
   "holidays": [],
-
   "schedule": {
-    "_comment": [
-      "采集时间窗口（监控看板「因子实验室 → 采集时间窗口」也能改）。",
-      "pre_open_minutes    开盘前多少分钟开始采（默认 30 → 9:00），用来补齐昨日漏采",
-      "post_close_minutes  闭市后延迟多少分钟采**定稿**数据（默认 30 → 15:30）",
-      "                    15:00 整去拉拿到的是未定稿数据，对不上账",
-      "grace_minutes       盘后窗口的宽限时长（超过就认为今天错过了）",
-      "intraday_enabled    盘中是否也采日频截面数据（默认关：一天一条的东西",
-      "                    盘中反复拉是浪费，还会被数据源限流）"
-    ],
     "pre_open_minutes": 30,
     "post_close_minutes": 30,
     "pre_open_enabled": true,
     "trading_day_only": true,
     "intraday_enabled": false,
-    "grace_minutes": 120
+    "grace_minutes": 120,
+    "_comment": [
+      "采集时间窗口（可在监控看板「设置」里改）。",
+      "pre_open_minutes   开盘前多少分钟开始采（默认 30 → 9:00）",
+      "post_close_minutes 收盘后延迟多少分钟采定稿数据（默认 30 → 15:30）",
+      "                   早了拿到的是未定稿数据，晚了白白等待。",
+      "intraday_enabled   盘中是否也采日频截面数据（默认关：一天一条的东西",
+      "                   盘中反复拉是浪费，还会被限流）"
+    ]
   },
   "symbols": [
     "000001",
@@ -40,5 +38,29 @@
       "interval": "5m",
       "keep_days": 30
     }
-  ]
+  ],
+  "watchlist": {
+    "_comment": [
+      "关注标的（自选股）：进了这张清单的标的会被**定时自动采集**相关数据。",
+      "interval        新增关注标的的默认采集频率（30s / 5m / 1h / 1d，裸数字按秒）。",
+      "                单只标的可以在监控看板「关注标的」面板里单独改，",
+      "                那份改动存在库里，**不被这个文件覆盖**。",
+      "sweep_interval  扫描周期（秒）：多久看一眼有没有标的到点了。",
+      "                这是「检查」间隔而不是采集频率 —— 两者别搞混：",
+      "                真正决定多久采一次的是每只标的自己的 freq。",
+      "max_per_round   单轮最多采几只。限流护栏：一次把上百只全拉",
+      "                足以把所有数据源一起送进黑名单，然后连正常采集一起挂。",
+      "categories      额外采集的类别，留空 = 跟随服务默认。",
+      "                K线 / 资金流 / 筹码 / 基本面本来就包含在采集里，",
+      "                这里补的是 lhb / margin / forecast / holders / rating 这类。",
+      "symbols         初始关注清单。**只用于首次灌库**：库里已有的标的",
+      "                不会被这里改写（否则用户在面板改过的频率，重启就没了）。"
+    ],
+    "enabled": true,
+    "interval": "1h",
+    "sweep_interval": 60,
+    "max_per_round": 20,
+    "categories": [],
+    "symbols": []
+  }
 }

@@ -43,6 +43,92 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+#: 面板上一个过滤按钮对应的一组状态。
+#:
+#: ``failed`` 之所以必须把 ``retrying`` 也算进来，是因为
+#: **``failed`` 根本不是一个会留存的状态**：``mark_failure`` 在同一次调用里
+#: 就把任务转成了 ``retrying``（还能重试）或 ``dead_letter``（重试耗尽）。
+#: 于是按 ``failed`` 精确查，结果永远是空 —— 面板上"失败 12 条"和
+#: "点进去一条没有"同时成立，看起来就像过滤功能坏了。
+#: 用户心里"失败"指的是"没做成"，所以它得覆盖"失败过、还在重试"这一类。
+STATUS_GROUPS: "Dict[str, Tuple[str, ...]]" = {
+    "failed": (TaskState.FAILED.value, TaskState.RETRYING.value),
+    #: 失败 + 最终没做成 —— 排障要一眼看全"这条链路上所有没办成的事"
+    "unsuccessful": (
+        TaskState.FAILED.value,
+        TaskState.RETRYING.value,
+        TaskState.DEAD_LETTER.value,
+    ),
+    #: 还在途（未终结）—— 含等待重试，那是"失败后还挂着"的状态
+    "inflight": (
+        TaskState.PENDING.value,
+        TaskState.QUEUED.value,
+        TaskState.RUNNING.value,
+        TaskState.RETRYING.value,
+    ),
+    "terminal": (
+        TaskState.SUCCESS.value,
+        TaskState.DEAD_LETTER.value,
+        TaskState.CANCELLED.value,
+    ),
+}
+
+
+def status_matches(actual: str, wanted: str) -> bool:
+    """状态是否命中。"想要的"可以是精确状态值，也可以是状态组名。
+
+    空串表示不过滤。未知的状态组名按精确匹配处理，
+    这样加新状态时不必先来这里登记。
+    """
+    wanted = str(wanted or "").strip()
+    if not wanted:
+        return True
+    actual = str(actual or "")
+    return actual == wanted or actual in STATUS_GROUPS.get(wanted, ())
+
+
+#: 面板过滤按钮的顺序，也是 :meth:`TaskStore.ledger_rows` 返回计数的键。
+#: ``""`` = 全部。刻意与 UI 上的按钮一一对应，免得两边各维护一份清单。
+LEDGER_STATUS_FILTERS: "Tuple[str, ...]" = (
+    "", "success", "failed", "dead_letter", "running", "queued", "cancelled",
+)
+
+
+def parse_ledger_dt(value: Any, end: bool = False) -> "Optional[datetime]":
+    """把过滤用的时间参数解析成 :class:`datetime`。
+
+    只给日期（``2026-10-13``）时：起点补到当天 00:00、终点补到
+    23:59:59.999999。不补的话"截止到今天"会把今天全天的数据都排除掉 ——
+    那天明明还在过。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+            day = datetime.strptime(raw, "%Y-%m-%d")
+            return day.replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            ) if end else day
+        return datetime.fromisoformat(raw.replace("Z", "+00:00").replace("T", " "))
+    except Exception:
+        logger.warning(f"无法解析时间 {raw!r}，忽略该过滤条件")
+        return None
+
+
+def _row_dt(row: "Any") -> "Optional[datetime]":
+    """取一行明细的创建时间。历史行是字典，在册任务是对象，两种都要认。"""
+    raw = row.get("created_at") if isinstance(row, dict) else getattr(row, "created_at", None)
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    try:
+        return datetime.fromisoformat(str(raw))
+    except Exception:
+        return None
+
+
 class TaskStore:
     """任务存储与状态机。
 
@@ -419,19 +505,25 @@ class TaskStore:
         queue: str = "",
         keyword: str = "",
         limit: int = 50,
+        since: "Optional[datetime]" = None,
+        until: "Optional[datetime]" = None,
     ) -> "List[Dict[str, Any]]":
         """已建任务全量查询（**含在途**），倒序（最新在前）。
 
         与 :meth:`history` 的分工：这里回答"系统现在有哪些活、各自什么状态"，
         那里回答"最近有哪些活做完了、结果是什么"。
         核对数据时两边要能对上，所以筛选条件刻意做成同一套。
+
+        :param status:  精确状态值**或**状态组名（见 :data:`STATUS_GROUPS`）
+        :param since/until: 按创建时间收窄（看 :func:`parse_ledger_dt` 对纯日期的补全）
         """
         limit = max(0, int(limit))
         kw = str(keyword or "").strip().lower()
         with self._lock:
             out: "List[Dict[str, Any]]" = []
             for task in reversed(list(self._tasks.values())):
-                if status and task.status.value != status:
+                row = task.to_dict()
+                if not status_matches(str(row.get("status") or ""), status):
                     continue
                 if task_type and task.task_type != task_type:
                     continue
@@ -442,7 +534,12 @@ class TaskStore:
                         and kw not in str(task.dedup_key or "").lower() \
                         and kw not in str(task.correlation_id or "").lower():
                     continue
-                out.append(task.to_dict())
+                moment = _row_dt(row)
+                if since and (moment is None or moment < since):
+                    continue
+                if until and (moment is None or moment > until):
+                    continue
+                out.append(row)
                 if limit and len(out) >= limit:
                     break
             return out
@@ -452,24 +549,128 @@ class TaskStore:
         status: str = "",
         task_type: str = "",
         limit: int = 50,
+        since: "Optional[datetime]" = None,
+        until: "Optional[datetime]" = None,
     ) -> "List[Dict[str, Any]]":
         """**终态**任务历史，倒序（最新在前）。
 
-        :param status: ``success`` / ``failed`` / ``dead_letter`` / ``cancelled``
+        :param status: ``success`` / ``failed`` / ``dead_letter`` / ``cancelled``，
+                       同样支持状态组名
         :param task_type: 只看某类任务
+        :param since/until: 按创建时间收窄
         """
         limit = max(0, int(limit))
         with self._lock:
             out: "List[Dict[str, Any]]" = []
             for item in reversed(self._history):
-                if status and item.get("status") != status:
+                if not status_matches(str(item.get("status") or ""), status):
                     continue
                 if task_type and item.get("task_type") != task_type:
+                    continue
+                moment = _row_dt(item)
+                if since and (moment is None or moment < since):
+                    continue
+                if until and (moment is None or moment > until):
                     continue
                 out.append(item)
                 if limit and len(out) >= limit:
                     break
             return out
+
+    def ledger_rows(
+        self,
+        status: str = "",
+        task_type: str = "",
+        queue: str = "",
+        keyword: str = "",
+        limit: int = 100,
+        since: "Optional[datetime]" = None,
+        until: "Optional[datetime]" = None,
+        order: str = "desc",
+        sort: str = "time",
+    ) -> "Dict[str, Any]":
+        """任务明细的**唯一**查询入口：合并、去重、过滤、排序、限量一次做完。
+
+        以前这一步在前端做，问题有三：
+
+        1. **拼出来的顺序是错的**。前端把 ``tasks()``（倒序）和
+           ``history()``（倒序）concat 起来，于是"在册的旧任务"永远排在
+           "已淘汰的新任务"前面 —— 看起来像排序失效。
+        2. **计数与明细不同源**。按钮上的数字来自 ``stats``（进程启动以来的
+           累计值），明细来自有界的窗口，两者必然对不上。
+        3. 日期范围只能在前端过滤当前这一页，没能"只看今天"。
+
+        :return: ``{"rows", "status_counts", "total", "scoped", "matched"}``。
+                 ``status_counts`` 统计的是**已经套用了其它筛选条件之后**
+                 的池子 —— 于是选了"今天 + 某类型"，按钮上的数字就是
+                 "今天这个类型里各状态有几条"，而不是全量数字。
+        """
+        limit = max(1, min(int(limit or 100), 500))
+        if until and since and until < since:
+            since, until = until, since   # 填反了就帮他反过来，比返回空更友好
+
+        with self._lock:
+            # 1) 合并两份数据源："现在还看得见的任务" + "已经滚出窗口的终态记录"
+            pool: "List[Dict[str, Any]]" = []
+            seen: "set" = set()
+            for task in self._tasks.values():
+                row = task.to_dict()
+                pool.append(row)
+                seen.add(row.get("task_id"))
+            for item in self._history:
+                if item.get("task_id") in seen:
+                    continue          # 在册任务里已有，历史是同一条的旧快照
+                pool.append(item)
+                seen.add(item.get("task_id"))
+
+            # 2) 除状态以外的筛选（结果就是"计数该在多大范围里算"）
+            kw = str(keyword or "").strip().lower()
+            scoped: "List[Dict[str, Any]]" = []
+            for row in pool:
+                if task_type and row.get("task_type") != task_type:
+                    continue
+                if queue and row.get("queue") != queue:
+                    continue
+                if kw and not any(kw in str(row.get(key) or "").lower()
+                                  for key in ("task_id", "task_type",
+                                              "dedup_key", "correlation_id")):
+                    continue
+                moment = _row_dt(row)
+                if since and (moment is None or moment < since):
+                    continue
+                if until and (moment is None or moment > until):
+                    continue
+                scoped.append(row)
+
+            # 3) 计数（每个过滤按钮点下去能看到几条）
+            status_counts: "Dict[str, int]" = {v: 0 for v in LEDGER_STATUS_FILTERS}
+            for row in scoped:
+                actual = str(row.get("status") or "")
+                for key in status_counts:
+                    if status_matches(actual, key):
+                        status_counts[key] += 1
+
+            # 4) 状态过滤
+            matched = [r for r in scoped if status_matches(str(r.get("status") or ""), status)]
+
+            # 5) 排序。默认**创建时间倒序** —— 排障时先看的永远是最近这条。
+            desc = str(order or "desc").lower() != "asc"
+            if sort == "elapsed":
+                key = lambda r: float(r.get("elapsed") or -1.0)
+            elif sort == "attempts":
+                key = lambda r: int(r.get("attempts") or 0)
+            else:
+                key = lambda r: _row_dt(r) or datetime.min
+            matched.sort(key=key, reverse=desc)
+
+            return {
+                "rows": matched[:limit],
+                "status_counts": status_counts,
+                "total": len(pool),
+                "scoped": len(scoped),
+                "matched": len(matched),
+                "limit": limit,
+            }
 
     def history_summary(self) -> "Dict[str, int]":
         """历史里各状态的条数。
@@ -860,4 +1061,10 @@ class TaskStore:
         return snap
 
 
-__all__ = ["TaskStore"]
+__all__ = [
+    "TaskStore",
+    "STATUS_GROUPS",
+    "LEDGER_STATUS_FILTERS",
+    "parse_ledger_dt",
+    "status_matches",
+]

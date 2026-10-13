@@ -41,6 +41,8 @@ ConditionFn = Callable[[EngineEvent, Any], bool]
 ParamsFn = Callable[[EngineEvent, Any], Dict[str, Any]]
 #: 幂等键构造：``(event, ctx) -> str``
 DedupFn = Callable[[EngineEvent, Any], str]
+#: 任务类型构造：``(event, ctx) -> str``。见 :attr:`Rule.task_type_fn`
+TaskTypeFn = Callable[[EngineEvent, Any], str]
 
 
 @dataclass
@@ -50,6 +52,7 @@ class Rule:
     :param event_type:   触发事件。**不支持通配** —— 规则必须可枚举，
                          一条规则只该对应一种明确的因果关系。
     :param task_type:    要生成的任务类型
+    :param task_type_fn: 从**事件内容**推导任务类型，见下方说明
     :param condition:    额外的前置判断（市场是否开盘、服务是否启用…）
     :param params_fn:    任务参数构造
     :param dedup_fn:     幂等键。不配则**不去重** —— 有些任务天然该每次都跑
@@ -60,12 +63,13 @@ class Rule:
 
     name: str
     event_type: str
-    task_type: str
+    task_type: str = ""
     description: str = ""
 
     condition: Optional[ConditionFn] = None
     params_fn: Optional[ParamsFn] = None
     dedup_fn: Optional[DedupFn] = None
+    task_type_fn: Optional[TaskTypeFn] = None
 
     queue: str = ""
     priority: int = Priority.NORMAL
@@ -79,12 +83,34 @@ class Rule:
             raise ValueError("规则必须有 name")
         if not self.event_type:
             raise ValueError(f"规则 {self.name} 缺少 event_type")
-        if not self.task_type:
-            raise ValueError(f"规则 {self.name} 缺少 task_type")
-        if not self.queue:
+        # 静态任务类型可以没有 —— 只要能从事件里推导出来就行。
+        # 这条口子是"新增定时任务不必再改规则表"的前提：否则每支持
+        # 一类可被调度的任务，都得来这里加一条写死 task_type 的规则。
+        if not self.task_type and self.task_type_fn is None:
+            raise ValueError(
+                f"规则 {self.name} 缺少 task_type，且没有可推导它的 task_type_fn"
+            )
+        if not self.queue and self.task_type:
             self.queue = TASK_QUEUE.get(self.task_type, Queue.DEFAULT)
 
     # ---------------- 判定 ----------------
+    def resolve_task_type(self, event: EngineEvent, ctx: Any = None) -> str:
+        """算出这条规则这次要生成什么任务。
+
+        :attr:`task_type_fn` 抛错时回落到静态 :attr:`task_type`：
+        一次推导失败让整条规则失效（连带同事件的其它规则一起不跑）
+        是不划算的，记日志继续比抛出去好。
+        """
+        if self.task_type_fn is None:
+            return self.task_type
+        try:
+            resolved = str(self.task_type_fn(event, ctx) or "").strip()
+        except Exception as exc:
+            logger.error(f"规则 {self.name} 推导任务类型失败，回落静态类型: {exc}")
+            return self.task_type
+        if not resolved:
+            return self.task_type
+        return resolved
     def should_run(self, event: EngineEvent, ctx: Any = None) -> bool:
         """是否该为这个事件建任务。条件回调抛错按**不跑**处理。
 
@@ -120,10 +146,17 @@ class Rule:
             except Exception as exc:
                 logger.error(f"规则 {self.name} 构造幂等键失败，本次不去重: {exc}")
 
+        # 先定类型再定队列：队列是**按任务类型**登记的（TASK_QUEUE），
+        # 动态类型下构造期填好的 self.queue 可能是错的，必须就地重解析。
+        resolved_type = self.resolve_task_type(event, ctx)
+        queue = self.queue
+        if self.task_type_fn is not None:
+            queue = TASK_QUEUE.get(resolved_type, Queue.DEFAULT)
+
         return EngineTask(
-            task_type=self.task_type,
+            task_type=resolved_type,
             params=params,
-            queue=self.queue,
+            queue=queue,
             priority=self.priority,
             max_retries=self.max_retries,
             retry_interval=self.retry_interval,
@@ -139,8 +172,11 @@ class Rule:
         return {
             "name": self.name,
             "event_type": self.event_type,
-            "task_type": self.task_type,
-            "queue": self.queue,
+            # 面板要看到这条规则"到底会产出什么"。动态规则没有静态类型，
+            # 显示占位符比显示空字符串好 —— 空串会被读成"配置漏了"。
+            "task_type": self.task_type or "<按事件推导>",
+            "queue": self.queue or "<按任务类型推导>",
+            "dynamic_task_type": self.task_type_fn is not None,
             "priority": self.priority,
             "max_retries": self.max_retries,
             "enabled": self.enabled,

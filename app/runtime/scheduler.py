@@ -70,6 +70,7 @@ from app.runtime.tasking.store import TaskStore
 from app.runtime.utils import async_sleep
 from app.runtime.workers import HandlerRegistry, PoolManager
 from app.runtime.workers.handlers import register_default_handlers
+from app.runtime.workers.pools import load_worker_pool_config
 #: 默认节拍事件的间隔（秒）。必须**与事件名一致**：
 #: 事件名叫 TIMER_3MIN 却 5 秒一拍，任何人看到"timer_3min 几秒一次"
 #: 都会怀疑自己看错了，而这种怀疑排查一遍要半小时。
@@ -87,6 +88,12 @@ class SchedulerComponent(SchedulerBase):
     ``BACKTEST`` 下调度器仍然工作，但内置规则里的实盘链
     （如 因子 → 策略）带 ``_mode_not("BACKTEST")`` 条件会自动不生效。
     所以不需要维护"回测专用"的另一套调度逻辑。
+
+    执行池容量从 ``config/runtime.json`` 的 ``worker_pools`` 段读
+    （见 :func:`~app.runtime.workers.pools.load_worker_pool_config`），
+    只在**构造时**读一次 —— 改了要重启引擎才生效。
+    显式传 ``capacities`` / ``pools`` 优先于文件，方便测试里临时要一个
+    8 并发的研究池，而不必去改用户的配置。
     """
 
     name = "scheduler"
@@ -110,6 +117,7 @@ class SchedulerComponent(SchedulerBase):
         with_default_rules: bool = True,
         recover: bool = True,
         journal_path: str = "",
+        pool_config_path: str = "",
     ) -> None:
         super().__init__()
         #: 引擎引用（builder 用 set_engine 注入），规则条件靠它查服务状态
@@ -138,7 +146,24 @@ class SchedulerComponent(SchedulerBase):
         self.maintenance.bind(lambda *a, **kw: self.bus.publish(*a, **kw))
 
         # ---- 执行 ----
-        self.pools = PoolManager(capacities=capacities, enabled=pools)
+        # 线程池 worker 数：显式传参 > config/runtime.json > 代码内置默认。
+        # 显式传了就不去读文件 —— 测试里"我要一个 8 并发的研究池"
+        # 不该被用户的配置悄悄盖掉。
+        if capacities is None and pools is None:
+            cfg = load_worker_pool_config(pool_config_path or None)
+            capacities = cfg.get("capacities") or None
+            pools = cfg.get("enabled") or None
+            _src = cfg.get("source") or ""
+            _warns = list(cfg.get("warnings") or [])
+        else:
+            # 显式传参时不读文件，来源也就不能写文件名 ——
+            # 写了会让人以为"这个文件的配置被采纳了"，而事实是它被跳过了。
+            _src = "代码显式传参"
+            _warns = []
+        for line in _warns:
+            logger.warning(f"[执行池配置] {line}")
+        self.pools = PoolManager(capacities=capacities, enabled=pools,
+                                 source=_src, warnings=_warns)
         self.handlers = HandlerRegistry()
         register_default_handlers(self.handlers)
         # 旧式"函数型任务"的兜底通道：面板/CLI 仍在用它投递一次性作业
@@ -191,6 +216,16 @@ class SchedulerComponent(SchedulerBase):
         处理器就不必知道"我到底被谁驱动"。
         """
         return self.event_bus
+
+    # ---------------- 执行池配置 ----------------
+    def pool_config_info(self) -> "Dict[str, Any]":
+        """面板要答"这个池为什么只有 1 个槽位"时的依据。
+
+        除了各池容量，还必须给出**配置来源**：用户在
+        ``config/runtime.json`` 里改了却没重启，来面板上看还是旧值。
+        没有来源标注时，他只能猜"是不是代码没读配置"。
+        """
+        return self.pools.snapshot()
 
     # ---------------- 延迟回调 ----------------
     def _later(self, delay: float, fn: Callable[..., Any], *args: Any) -> Any:

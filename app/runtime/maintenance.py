@@ -52,18 +52,28 @@
 schedule      含义                                        用到的字段
 ============  ==========================================  ==============
 ``startup``   引擎**每次启动**跑一次（不是周期）            无
-``interval``  每 N **小时**（最小 1 小时）                  ``interval_hours``
+``interval``  每 N **分钟**（``interval_minutes``）或        两者之一
+              N 小时（``interval_hours``）
 ``daily``     每天 ``HH:MM``                               ``at``
 ``weekly``    每周某天 ``HH:MM``                           ``weekday`` + ``at``
+``monthly``   每月某日 ``HH:MM``                           ``day_of_month`` + ``at``
 ``cron``      cron 表达式（分 时 日 月 周）                 ``cron``
 ``once``      在指定时刻跑一次，跑完自动停用                  ``once_at``
 ============  ==========================================  ==============
 
-两点是特意这么定的：
+三点值得说明：
 
-* **间隔的最小粒度是小时**，不是秒。维护任务是"扫一遍日志目录"这种活，
-  做成分钟级只会让引擎一直在做无用功；而秒级输入框会让人填出
-  "每 300 秒清一次日志"这种配置，跑起来才发现没意义。
+* **间隔的下限按任务类别区分**（见 :func:`min_interval_seconds_for`）。
+  原本是全局最小 1 小时，理由是"维护任务是扫日志目录这种活，做成分钟级
+  只会让引擎一直在做无用功" —— 这个理由对维护任务依然成立，所以
+  ``maintenance.*`` 仍是 1 小时。但业务任务（``pool.refresh`` 这类）
+  的时效性恰恰是它的全部价值，"候选池十分钟刷新一次"要求分钟级。
+  一刀切成小时会把业务憋死，一刀切成分钟会把维护放疯，于是分开。
+* **任务清单是可以配的**。内置任务在 :data:`DEFAULT_JOBS`，
+  但 ``config/maintenance.json`` 里写的其它条目同样会被加载 ——
+  想让某件事周期跑，写一条配置即可，不必回来改这个模块。
+  自定义任务经 :mod:`app.runtime.scheduling.defaults` 里那条通用规则
+  落成任务，``task_type`` 就是它的路由依据。
 * **``startup`` 存在的理由**：像"运行校验"这种活，它的价值就是
   "这次启动的环境是好的"，每小时再校验一遍既不增加信息量，
   又会在日志里堆一堆"正常"。它该在启动时跑，且只在启动时跑。
@@ -73,6 +83,8 @@ cron 是自己实现的（见 :mod:`app.runtime.cron`），支持 ``*`` / ``*/n`
 ``0 3 1 * 1`` 是"每月 1 号**或**每周一"，不是"1 号且是周一"。
 
 配置持久化在 ``config/maintenance.json``，改完立刻生效，重启后仍在。
+
+面板「运行时 → 维护计划」可以改周期、增删任务，写在这里与写在UI里等价。
 """
 from __future__ import annotations
 
@@ -126,6 +138,21 @@ SCHEDULE_LABELS: Dict[str, str] = {
 #: 间隔周期的最小粒度（小时）。见模块 docstring「六种周期」。
 MIN_INTERVAL_HOURS: int = 1
 
+#: 业务类任务的最小粒度（分钟）。相比上面的小时级，这里放开到分钟，
+#: 因为"候选股票池十分钟刷新一次"这类需求本身就要求分钟级——
+#: 它刷的是盘中资金流，隔一小时等于没刷。
+#: 不能改成秒级：检查节拍是 30 秒（:data:`TICK_SECONDS`），
+#: 比节拍还密的间隔既做不到也更没有意义。
+MIN_INTERVAL_MINUTES: int = 1
+
+#: 受"小时级"保护的类别前缀。扫日志目录那种活做成十分钟一次，
+#: 除了让引擎一直在做无用功、在限流名单里越陷越深，没有任何收益。
+MAINTENANCE_TASK_PREFIX: str = "maintenance."
+
+#: 维护类任务的下限（秒）。请用统一入口 :func:`min_interval_seconds_for`，
+#: 那里的判断才是完整的（含"非维护类按分钟"这一分支）。
+_MAINTENANCE_FLOOR_SECONDS: float = 3600.0
+
 #: ``day_of_month`` 的取值上限。封顶 28：29/30/31 在小月不存在，
 #: 允许填的话"每月 31 号"会变成"有大月的月份才跑"，行为难以预期。
 MAX_DAY_OF_MONTH: int = 28
@@ -135,6 +162,43 @@ WEEKDAY_NAMES: tuple = ("周一", "周二", "周三", "周四", "周五", "周�
 
 #: ``once_at`` 的书写格式
 ONCE_AT_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def min_interval_seconds_for(task_type: Any) -> float:
+    """按任务类别给出间隔周期的下限（秒）。
+
+    分两档的理由是这两类活的失败模式不同：
+
+    * **维护类**（``maintenance.*``）跑密了只会浪费 CPU 和日志IO，
+      而它对时效性毫无要求 —— 凌晨清理和上午清理没有区别；
+    * **业务类**（如 ``pool.refresh``）的时效性恰恰是它的全部价值，
+      隔一小时再刷，抓到的就是过期资金流。
+
+    一刀切成小时会把业务类憋死，一刀切成分钟会把维护类放疯。
+    """
+    text = str(task_type or "")
+    if text.startswith(MAINTENANCE_TASK_PREFIX):
+        return _MAINTENANCE_FLOOR_SECONDS
+    return float(MIN_INTERVAL_MINUTES * 60)
+
+
+def _in_trading_window(now: Optional[datetime] = None) -> bool:
+    """此刻是否值得为一个「仅交易时段」的任务联网。
+
+    用 :meth:`TradeCalendar.is_open` 的语义（交易中 / 午休 / 收盘结算），
+    而不是严格的连续竞价时段 —— 收盘后那半小时正是数据定稿的时候，
+    恰恰是该刷一次的时候。
+
+    日历本身读不出来时返回 ``True``（照常执行）：一次判断失败就让任务
+    永久停摆是最难排查的故障，宁可多跑一次也不要静默不动。
+    """
+    try:
+        from app.domain.calendar import get_calendar
+
+        return bool(get_calendar().is_open(now))
+    except Exception as exc:
+        logger.debug(f"判断交易时段失败，按“值得执行”处理: {exc}")
+        return True
 
 
 def _norm_schedule(value: Any, default: str = SCHEDULE_DAILY) -> str:
@@ -183,6 +247,11 @@ class MaintenanceJob:
     面板据此做联动显示：选"每 N 小时"就只显示小时框。
 
     :param interval_hours: ``interval`` 用的小时数，最小 :data:`MIN_INTERVAL_HOURS`
+    :param interval_minutes: ``interval`` 用的分钟数。**优先于** ``interval_hours``。
+                             业务任务（刷股票池这类）真正需要的是它，
+                             下限见 :func:`min_interval_seconds_for`
+    :param trading_hours_only: 只在交易时段到期。休市期间不触发也**不记失败** ——
+                             它不是"这轮没做成"，是"这轮根本不该发生"
     :param at: ``daily`` / ``weekly`` 用的 ``HH:MM``（24 小时制）
     :param weekday: ``weekly`` 用的星期（1=周一 … 7=周日）
     :param cron: ``cron`` 用的 5 段表达式
@@ -202,6 +271,9 @@ class MaintenanceJob:
     interval_hours: int = 24
     cron: str = ""
     once_at: str = ""
+    #: 0 = 未设置，回落到 :attr:`interval_hours`
+    interval_minutes: int = 0
+    trading_hours_only: bool = False
     params: Dict[str, Any] = field(default_factory=dict)
     description: str = ""
     # 早期配置用的是秒。留着它只为兼容读旧文件，新写出的配置不再有它。
@@ -255,6 +327,23 @@ class MaintenanceJob:
         """:data:`MIN_INTERVAL_HOURS` 兜底的小时数。"""
         return max(MIN_INTERVAL_HOURS, int(self.interval_hours or MIN_INTERVAL_HOURS))
 
+    def min_interval_seconds(self) -> float:
+        """本任务允许的最密间隔（秒）。"""
+        return min_interval_seconds_for(self.task_type)
+
+    def interval_seconds_value(self) -> float:
+        """``interval`` 周期的实际秒数。
+
+        分钟优先于小时：``interval_minutes`` 是用户在面板上为**这个任务**
+        显式填的粒度，而 ``interval_hours`` 有默认值 24，只有在没填分钟时
+        才该轮到它说话。反过来会让"配了 10 分钟"被默认 24 小时盖掉。
+        """
+        floor = self.min_interval_seconds()
+        minutes = int(self.interval_minutes or 0)
+        if minutes > 0:
+            return max(float(minutes * 60), floor)
+        return max(float(self.interval_hours_value() * 3600), floor)
+
     def next_run_at(self, now: Optional[datetime] = None) -> Optional[datetime]:
         """下次执行时刻。
 
@@ -274,8 +363,10 @@ class MaintenanceJob:
 
         if kind == SCHEDULE_INTERVAL:
             if self.last_run_at:
+                # 用秒而不是小时：这是"十分钟刷新一次"能落地的地方。
+                # 换成 timedelta(hours=...) 会把任何亚小时粒度抹成 0。
                 return (datetime.fromtimestamp(self.last_run_at)
-                        + timedelta(hours=self.interval_hours_value()))
+                        + timedelta(seconds=self.interval_seconds_value()))
             # 没跑过 → 下一次检查就跑（而不是等满一个周期，
             # 否则刚启用的任务要干等 N 小时才第一次执行）
             return base
@@ -350,8 +441,16 @@ class MaintenanceJob:
         # 时不会触发，但返回 base 就会），语义必须在这里截断。
         if self.is_startup:
             return False
-        nxt = self.next_run_at(now)
-        return nxt is not None and nxt <= (now or datetime.now())
+        base = now or datetime.now()
+        # 「仅交易时段」的任务在休市时不到期。
+        # 跳过不会累积欠账 —— interval 的下次时刻是 last_run_at + 间隔，
+        # 固定只会算出一次，所以开盘那一刻刷一轮（正是想要的），
+        # 而不会把夜里欠的十几次一次性补跑出来把数据源打进限流名单。
+        # 另外休市跳过不计入 errors：它不是"这轮没做成"，是"这轮不该发生"。
+        if self.trading_hours_only and not _in_trading_window(base):
+            return False
+        nxt = self.next_run_at(base)
+        return nxt is not None and nxt <= base
 
     # ---------------- 序列化 ----------------
     def to_dict(self, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -376,6 +475,10 @@ class MaintenanceJob:
             "weekday_label": WEEKDAY_NAMES[self.weekday_value() - 1],
             "day_of_month": self.day_of_month_value(),
             "interval_hours": self.interval_hours_value(),
+            "interval_minutes": int(self.interval_minutes or 0),
+            "trading_hours_only": bool(self.trading_hours_only),
+            "interval_seconds": self.interval_seconds_value(),
+            "min_interval_seconds": self.min_interval_seconds(),
             "cron": self.cron,
             "cron_text": self.cron_expr().describe() if self.cron_expr() else "",
             "once_at": self.once_at,
@@ -394,6 +497,13 @@ class MaintenanceJob:
             "next_run_text": (
                 nxt.isoformat(timespec="seconds") if nxt
                 else ("引擎启动时" if kind == SCHEDULE_STARTUP else "—")
+            ),
+            # 「仅交易时段」的任务在休市期间"看起来已到期却不执行"，
+            # 不把原因摆出来，面板上就是一个永远卡住的"待执行"。
+            "waiting_market": bool(
+                self.enabled and not self.is_startup
+                and self.trading_hours_only
+                and not _in_trading_window(now or datetime.now())
             ),
             "last_result": self.last_result,
         }
@@ -425,6 +535,8 @@ class MaintenanceJob:
             interval_hours=int(hours or MIN_INTERVAL_HOURS),
             cron=str(raw.get("cron") or default.cron),
             once_at=str(raw.get("once_at") or default.once_at),
+            interval_minutes=int(raw.get("interval_minutes") or default.interval_minutes or 0),
+            trading_hours_only=bool(raw.get("trading_hours_only", default.trading_hours_only)),
             params=dict(raw.get("params") or default.params),
             description=str(raw.get("description") or default.description),
         )
@@ -453,6 +565,62 @@ def _legacy_adjust(name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     migrated = dict(cfg)
     migrated["schedule"] = SCHEDULE_STARTUP
     return migrated
+
+
+def known_task_types() -> List[str]:
+    """可被周期调度的任务类型清单。
+
+    来源是 :class:`TaskType` 枚举本身而不是某份手工白名单 ——
+    手工清单必然滞后于代码（新加一种任务忘了补，面板上就永远选不到），
+    而枚举是"系统里存在哪些任务"的唯一事实来源。
+    """
+    try:
+        from app.runtime.events.types import TaskType
+    except Exception:
+        return []
+    out: List[str] = []
+    for attr in dir(TaskType):
+        if attr.startswith("_"):
+            continue
+        value = getattr(TaskType, attr, None)
+        if isinstance(value, str) and value and "." in value and value not in out:
+            out.append(value)
+    return sorted(out)
+
+
+def _job_from_config(name: str, cfg: Dict[str, Any]) -> Optional[MaintenanceJob]:
+    """把配置里的一条自定义任务读成 :class:`MaintenanceJob`。
+
+    缺 ``task_type`` 的条目直接跳过：它是唯一决定"这条配置要干什么"的
+    字段，缺了它后面无论怎么兜底都是在猜用户的意图。
+
+    未知 ``task_type`` **不拦**。处理器有可能在别处动态注册（插件、
+    面板），在这里拦死等于把"配置先落盘、处理器后注册"这种完全正常的
+    顺序判成非法。没有处理器的任务会在调度器里落成 ``no_handler`` 并被
+    计数 —— 那是有据可查的失败，比静默丢弃强得多。
+    """
+    if not isinstance(cfg, dict):
+        return None
+    task_type = str(cfg.get("task_type") or "").strip()
+    if not task_type:
+        logger.warning(f"自定义定时任务 {name} 缺少 task_type，已跳过")
+        return None
+    known = known_task_types()
+    if known and task_type not in known:
+        logger.warning(
+            f"自定义定时任务 {name} 的 task_type={task_type!r} 不在已知类型里；"
+            f"仍会加载，但若最终没有对应处理器，执行时会记为 no_handler"
+        )
+    default = MaintenanceJob(
+        name=name,
+        task_type=task_type,
+        label=str(cfg.get("label") or name),
+        enabled=False,
+        # 自定义任务的默认周期：既然是用户主动配的定时任务，
+        # 「间隔」比「每天凌晨」更像他想要的表达。
+        schedule=SCHEDULE_INTERVAL,
+    )
+    return MaintenanceJob.from_dict(name, cfg, default)
 
 
 #: 内置维护任务。**全部默认不删东西**，只报告。
@@ -555,11 +723,15 @@ class MaintenancePlanner:
                 )
                 for name, default in DEFAULT_JOBS.items()
             }
-            # 配置文件里出现未知 job 名：记下来但不加载。
-            # 静默丢弃会让"我明明配了却不跑"变成无法排查的问题。
-            unknown = [k for k in raw if k not in DEFAULT_JOBS]
+            unknown = [k for k in raw if k not in DEFAULT_JOBS and isinstance(raw[k], dict)]
             if unknown:
-                logger.warning(f"维护配置里有未知的任务名，已忽略: {unknown}")
+                logger.info(f"维护配置里读到 {len(unknown)} 个自定义任务: {unknown}")
+                loaded: Dict[str, MaintenanceJob] = {}
+                for name in unknown:
+                    job = _job_from_config(name, raw[name])
+                    if job is not None:
+                        loaded[name] = job
+                self._jobs.update(loaded)
 
     def save(self) -> None:
         with self._lock:
@@ -575,10 +747,15 @@ class MaintenancePlanner:
                         "weekday": j.weekday_value(),
                         "day_of_month": j.day_of_month_value(),
                         "interval_hours": j.interval_hours_value(),
+                        "interval_minutes": int(j.interval_minutes or 0),
+                        "trading_hours_only": bool(j.trading_hours_only),
                         "cron": j.cron,
                         "once_at": j.once_at,
                         "params": dict(j.params),
                         "description": j.description,
+                        # 标记"这条不是内置任务"，便于将来区分对待；
+                        # 删掉不影响加载，但有了它，排障时能一眼看出来源。
+                        "custom": name not in DEFAULT_JOBS,
                     }
                     for name, j in self._jobs.items()
                 },
@@ -603,23 +780,36 @@ class MaintenancePlanner:
         if not isinstance(raw, dict):
             raw = dict(payload or {})
         changed: List[str] = []
+        created: List[str] = []
         with self._lock:
             for name, cfg in raw.items():
-                if name not in self._jobs or not isinstance(cfg, dict):
+                if not isinstance(cfg, dict):
                     continue
-                cur = self._jobs[name]
-                new = MaintenanceJob.from_dict(name, cfg, cur)
-                # 运行态要留着 —— 改一下周期不该把"上次什么时候跑的"清空，
-                # 否则每次保存完立刻就会补跑一轮。
-                new.last_run_at = cur.last_run_at
-                new.last_result = cur.last_result
-                new.runs = cur.runs
-                new.errors = cur.errors
-                self._jobs[name] = new
-                changed.append(name)
+                if name in self._jobs:
+                    cur = self._jobs[name]
+                    new = MaintenanceJob.from_dict(name, cfg, cur)
+                    # 运行态要留着 —— 改一下周期不该把"上次什么时候跑的"清空，
+                    # 否则每次保存完立刻就会补跑一轮。
+                    new.last_run_at = cur.last_run_at
+                    new.last_result = cur.last_result
+                    new.runs = cur.runs
+                    new.errors = cur.errors
+                    self._jobs[name] = new
+                    changed.append(name)
+                    continue
+                # 走到这里说明是**新增**：面板提交了库里还没有的任务名。
+                # 以前这里直接 continue —— 于是"新增定时任务"永远无法通过表
+                # 单落地，只能手改配置文件再重启，这正是要让配置可配的意义。
+                born = _job_from_config(name, cfg)
+                if born is None:
+                    continue
+                self._jobs[name] = born
+                created.append(name)
         self.save()
         if changed:
             logger.info(f"维护计划已更新: {changed}")
+        if created:
+            logger.info(f"维护计划新增任务: {created}")
         return self.snapshot()
 
     def set_enabled(self, name: str, enabled: bool) -> bool:
@@ -630,6 +820,50 @@ class MaintenancePlanner:
             job.enabled = bool(enabled)
         self.save()
         return True
+
+    # ---------------- 增删任务 ----------------
+    def add_job(self, name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """新增一条定时任务。
+
+        :param name: 任务名（配置里的 key，也是日志里的标识）
+        :param cfg:  任务定义，至少要有 ``task_type``
+        :return:     ``{"ok": bool, "error": str, "job": {...}}``
+
+        内置任务不能同名覆盖：它们的行为有一部分写死在代码里
+        （比如"归档"默认不启用是有意为之），让同名配置悄悄改掉语义，
+        排障时会变成一个无法解释的谜。
+        """
+        name = str(name or "").strip()
+        if not name:
+            return {"ok": False, "error": "任务名不能为空"}
+        if not isinstance(cfg, dict):
+            return {"ok": False, "error": "任务定义必须是对象"}
+        with self._lock:
+            if name in DEFAULT_JOBS:
+                return {"ok": False, "error": f"{name} 是内置任务，不能新建同名任务"}
+            job = _job_from_config(name, cfg)
+            if job is None:
+                return {"ok": False, "error": "缺少 task_type（它决定这条配置要做什么）"}
+            self._jobs[name] = job
+        self.save()
+        logger.info(f"新增定时任务 {name}（{job.task_type}）")
+        return {"ok": True, "job": job.to_dict()}
+
+    def remove_job(self, name: str) -> Dict[str, Any]:
+        """删除一条自定义定时任务。
+
+        内置任务删不掉：它们是引擎自保的一部分（日志清理、死信回收），
+        真不需要可以停用，但让它从表里消失会导致"谁在清理日志"失去答案。
+        """
+        name = str(name or "").strip()
+        with self._lock:
+            if name in DEFAULT_JOBS:
+                return {"ok": False, "error": f"{name} 是内置任务，只能停用不能删除"}
+            if self._jobs.pop(name, None) is None:
+                return {"ok": False, "error": f"没有这个任务: {name}"}
+        self.save()
+        logger.info(f"已删除定时任务 {name}")
+        return {"ok": True, "removed": name}
 
     # ---------------- 触发 ----------------
     def bind(self, publish: Callable[..., Any]) -> None:
@@ -765,8 +999,16 @@ class MaintenancePlanner:
             ],
             "weekday_names": list(WEEKDAY_NAMES),
             "min_interval_hours": MIN_INTERVAL_HOURS,
+            "min_interval_minutes": MIN_INTERVAL_MINUTES,
+            # 前端靠它判断某个任务能配多密。维护类仍受小时保护，
+            # 所以这个值**按任务而异**，不是一个全局常量。
+            "maintenance_floor_seconds": _MAINTENANCE_FLOOR_SECONDS,
             "once_at_format": ONCE_AT_FORMAT,
             "startup_jobs": [j.name for j in self._jobs.values() if j.is_startup],
+            # 新增任务时的可选类型。从这里取而不是前端硬编码 ——
+            # 否则后台新增一种任务类型，面板的下拉框里永远选不到。
+            "task_types": known_task_types(),
+            "builtin_jobs": sorted(DEFAULT_JOBS),
         }
 
 
@@ -786,6 +1028,9 @@ __all__ = [
     "SCHEDULE_CRON",
     "SCHEDULE_ONCE",
     "MIN_INTERVAL_HOURS",
+    "MIN_INTERVAL_MINUTES",
+    "MAINTENANCE_TASK_PREFIX",
+    "min_interval_seconds_for",
     "MAX_DAY_OF_MONTH",
     "WEEKDAY_NAMES",
 ]

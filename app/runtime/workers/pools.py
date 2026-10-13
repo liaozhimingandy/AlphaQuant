@@ -44,9 +44,11 @@ maintenance  1     慢活，不该抢任何人的资源
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from twisted.internet import defer, reactor
@@ -60,6 +62,92 @@ def _reactor_running() -> bool:
         return bool(reactor.running)
     except Exception:  # pragma: no cover - reactor 未安装
         return False
+
+
+#: ``config/runtime.json`` 里管线程池的那一段叫什么。
+POOL_CONFIG_KEY: str = "worker_pools"
+
+
+def load_worker_pool_config(
+    path: Optional[str] = None,
+) -> "Dict[str, Any]":
+    """读 ``config/runtime.json`` 的 ``worker_pools`` 段。
+
+    为什么是**文件**而不是环境变量：池容量是一组七个互相关联的数字
+    （"strategy 只能 1"得和"market 给到 4"放在一起看才说得通），
+    散在七个环境变量里没法评论、没法版本化，也没法一眼看出
+    "trading 变成 2 了是谁改的"。
+
+    为什么**不支持热更新**：见 :func:`WorkerPool` —— 线程池容量的语义是
+    "在建池那一刻把槽位焊死"。这里读到的值只在进程启动时被消费一次。
+
+    :return: ``{"capacities", "enabled", "source", "warnings"}``。
+             文件缺失/写坏 → 全部取默认并给出告警，**绝不让配置问题挡住启动**。
+    """
+    from app.common.config import settings
+
+    file = Path(path or getattr(settings, "RUNTIME_CONFIG", "")
+                or (settings.CONFIG_DIR / "runtime.json"))
+    out: "Dict[str, Any]" = {
+        "capacities": None, "enabled": None, "source": str(file), "warnings": [],
+    }
+    if not file.exists():
+        return out
+    try:
+        raw = json.loads(file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        out["warnings"].append(f"{file.name} 解析失败（用默认容量）: {exc}")
+        logger.warning(f"运行时配置解析失败，执行池用默认容量: {exc}")
+        return out
+    section = (raw or {}).get(POOL_CONFIG_KEY) if isinstance(raw, dict) else None
+    if not isinstance(section, dict):
+        return out
+
+    caps: "Dict[str, int]" = {}
+    for name, value in (section.get("capacities") or {}).items():
+        key = str(name).strip()
+        if key.startswith("_"):
+            continue
+        if key not in Pool.ALL:
+            out["warnings"].append(
+                f"未知执行池 {key!r}（可用: {'、'.join(Pool.ALL)}），已忽略"
+            )
+            continue
+        try:
+            want = int(value)
+        except Exception:
+            out["warnings"].append(f"执行池 {key} 容量 {value!r} 不是整数，已忽略")
+            continue
+        if want < 1:
+            out["warnings"].append(
+                f"执行池 {key} 容量 {want} < 1（0 个 worker = 活永远没人干），按 1 处理"
+            )
+            want = 1
+        caps[key] = want
+    if caps:
+        out["capacities"] = caps
+
+    enabled = section.get("enabled")
+    if isinstance(enabled, (list, tuple)):
+        picked = [str(x).strip() for x in enabled if str(x).strip()]
+        # 空数组按"没配"处理：配错成 ``[]`` 就把所有池 disable 掉，
+        # 引擎起来之后一个任务都跑不了，而报错信息还跟池容量完全无关。
+        if picked:
+            unknown = [x for x in picked if x not in Pool.ALL]
+            if unknown:
+                out["warnings"].append(
+                    f"enabled 里有未知执行池 {unknown}，已忽略"
+                )
+            picked = [x for x in picked if x in Pool.ALL]
+            if picked:
+                # ``default`` 是**兜底池**：路由判断不出业务归属的任务
+                # （典型是 ``legacy.job``）都落在它上面。少建它不报错，
+                # 只是这类任务没人领、悄悄进死信 —— 是那种最后才看得见的失败。
+                # 所以这里补回来，而不是尊重用户"我没启用 default"的意思。
+                if Pool.DEFAULT not in picked:
+                    picked.append(Pool.DEFAULT)
+                out["enabled"] = picked
+    return out
 
 
 class WorkerPool:
@@ -118,7 +206,7 @@ class WorkerPool:
         with self._lock:
             if self._closed:
                 return None
-            if self.capacity > 0 and len(self._inflight) >= self.capacity:
+            if 0 < self.capacity <= len(self._inflight):
                 self.stats["rejected"] += 1
                 return None
             self._inflight[task_id] = time.monotonic()
@@ -245,10 +333,14 @@ class PoolManager:
         self,
         capacities: Optional[Dict[str, int]] = None,
         enabled: Optional[List[str]] = None,
+        source: str = "",
+        warnings: Optional[List[str]] = None,
     ) -> None:
         caps = dict(Pool.DEFAULT_CAPACITY)
         caps.update({k: int(v) for k, v in (capacities or {}).items()})
         wanted = list(enabled) if enabled else list(Pool.ALL)
+        self.source = str(source or "内置默认")
+        self.warnings: "List[str]" = list(warnings or [])
         self._pools: "Dict[str, WorkerPool]" = {}
         for name in wanted:
             self._pools[name] = WorkerPool(
@@ -327,7 +419,12 @@ class PoolManager:
         return {
             "pools": [p.snapshot() for p in self._pools.values()],
             "total_inflight": self.inflight(),
+            # 「这个数是哪来的」比数字本身更容易被问到。
+            # 用户在 config/runtime.json 里改了却没重启，来面板上看还是旧值 ——
+            # 有个来源标注，他至少知道该往哪儿查，而不是怀疑代码不读配置。
+            "config_source": self.source,
+            "config_warnings": list(self.warnings),
         }
 
 
-__all__ = ["WorkerPool", "PoolManager"]
+__all__ = ["POOL_CONFIG_KEY", "WorkerPool", "PoolManager", "load_worker_pool_config"]

@@ -165,6 +165,14 @@ class Settings:
         "TASK_CONFIG", (BASE_DIR / "config" / "tasks.json").as_posix()
     )
 
+    # ---------------- 运行时（进程级）配置 ----------------
+    # 执行池 worker 数这类**建池时就固定**的参数放在这里。
+    # 注意它 TASK_CONFIG 的分工：tasks.json 管"跑哪些策略"，
+    # runtime.json 管"这台机器拿多少资源跑"。
+    RUNTIME_CONFIG: str = os.getenv(
+        "RUNTIME_CONFIG", (BASE_DIR / "config" / "runtime.json").as_posix()
+    )
+
     # ---------------- 行情采集服务（常驻自动采集，替代手动执行）----------------
     # 采集编排配置：每个标的的数据粒度与采集频率都在这里改，不用动代码
     COLLECTOR_CONFIG: str = os.getenv(
@@ -266,6 +274,28 @@ class Settings:
     #: 是否采集基本面（估值/财务）。季频数据，一天一次就够。
     EXT_DATA_FUNDAMENTAL: bool = _env_bool("EXT_DATA_FUNDAMENTAL", True)
 
+    # ---------------- 关注标的（自选股的定时自动采集）----------------
+    # 它和「股票池」不是一回事：股票池是**打分选出来**的结果（天天在变），
+    # 关注标的是**人显式指定**的清单 —— 盯上了，就按各自的频率持续补数据。
+    # 区别不在谁更重要，而在节拍归谁管：股票池是"到点重算一遍"，
+    # 关注标的是"每只票各自到各自的点"。
+    WATCHLIST_ENABLED: bool = _env_bool("WATCHLIST_ENABLED", True)
+    #: 关注标的的**默认**采集频率（"1h" / "30m" / "1d"，裸数字按秒）。
+    #: 单只标的可以在监控看板或 /api/watchlist/freq 里单独覆盖。
+    WATCHLIST_INTERVAL: str = os.getenv("WATCHLIST_INTERVAL", "1h")
+    #: 关注标的默认额外采集的类别（逗号分隔）。留空 = 跟随 cross 单元的默认类别。
+    #: 注意 K 线与日频截面（资金流/筹码/基本面）**本来就包含在采集里**，
+    #: 这里只是补充 lhb / margin / forecast / holders / rating / news 这类别。
+    WATCHLIST_CATEGORIES: str = os.getenv("WATCHLIST_CATEGORIES", "")
+    #: 扫描周期（秒）：多久**看一眼**有没有标的到点了。
+    #: 这是"检查"间隔而不是采集频率 —— 别把它当成每只票的重采周期，
+    #: 真正决定多久采一次的是单只标的自己的 freq（默认 = WATCHLIST_INTERVAL）。
+    WATCHLIST_SWEEP_INTERVAL: float = _env_float("WATCHLIST_SWEEP_INTERVAL", 60.0)
+    #: 单轮最多采多少只关注标的。这是**限流护栏**：
+    #: 一次拉 200 只走全类别采集，足够把所有数据源一起送进黑名单，
+    #: 然后连正常定时采集一起拖下水。没采到的下一轮自然补上。
+    WATCHLIST_MAX_PER_ROUND: int = _env_int("WATCHLIST_MAX_PER_ROUND", 20)
+
     # ---------------- 扩展行情特征（资金流 / 筹码 / 题材 / 评分）----------------
     # 是否把这类日频截面数据注入因子上下文。关掉就是纯量价策略。
     # 离线回放（库里没有这些数据时）建议关掉，省掉每根K线一次装配尝试。
@@ -331,6 +361,11 @@ class Settings:
     @classmethod
     def collector_symbol_list(cls) -> list[str]:
         return [s.strip() for s in cls.COLLECTOR_SYMBOLS.split(",") if s.strip()]
+
+    @classmethod
+    def watchlist_category_list(cls) -> list[str]:
+        """``WATCHLIST_CATEGORIES`` → 类别列表。留空返回 ``[]``（=跟随服务默认）。"""
+        return [s.strip() for s in cls.WATCHLIST_CATEGORIES.split(",") if s.strip()]
 
     @classmethod
     def priority_list(cls) -> list[str]:

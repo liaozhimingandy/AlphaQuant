@@ -11,7 +11,8 @@
 
 * 字段必须与周期联动 —— 六种周期共用一套字段，选错了框就等于配上了一个
   永远不会生效的参数（用户看到的正是这个现象）；
-* 间隔的最小粒度是**小时**，不是秒；
+* 间隔的最小粒度**按任务类别区分**：维护类仍是 1 小时，业务类可以
+  到分钟（"十分钟刷一次候选池"这类需求靠它落地）；
 * ``startup`` 不能被周期节拍反复触发。
 
 核对那部分的重点是"明细要真的看得见"：汇总数字对不上时，
@@ -683,6 +684,308 @@ class TestEventMetrics:
         bus = EventBus()
         bus.publish("a.b")
         assert bus.snapshot()["types"][0]["event_type"] == "a.b"
+
+
+# ============================================================
+# 分钟级粒度
+# ============================================================
+class TestIntervalGranularity:
+    """「十分钟刷一次」这类需求以前配不出来 —— 间隔字段是 int 小时，
+    最小 1 小时。这组用例守住放开到分钟之后的正确性。"""
+
+    # 注意这里用**业务类**任务：维护类（maintenance.*）被有意兜底到 1 小时，
+    # 那是 TestIntervalGranularity 里另一条用例要守的事，别混在一起。
+    @staticmethod
+    def _biz(**kw):
+        return _job(task_type="pool.refresh", **kw)
+
+    def test_ten_minutes_is_ten_minutes(self):
+        j = self._biz(schedule=SCHEDULE_INTERVAL, interval_minutes=10)
+        assert j.interval_seconds_value() == 600.0
+
+    def test_next_run_uses_seconds_not_hours(self):
+        """换成 timedelta(hours=...) 会把任何亚小时粒度抹成 0。"""
+        base = datetime(2026, 10, 13, 10, 0)
+        j = self._biz(schedule=SCHEDULE_INTERVAL, interval_minutes=10)
+        j.last_run_at = base.timestamp()
+        assert j.next_run_at(base) == datetime(2026, 10, 13, 10, 10)
+
+    def test_minutes_win_over_hours(self):
+        """:attr:`interval_hours` 有默认值 24 —— 必须让显式的分钟优先，
+        否则"配了 10 分钟"会被这个默认值悄悄改回一天一次。"""
+        j = self._biz(schedule=SCHEDULE_INTERVAL, interval_hours=24,
+                      interval_minutes=10)
+        assert j.interval_seconds_value() == 600.0
+
+    def test_falls_back_to_hours_when_minutes_unset(self):
+        j = _job(schedule=SCHEDULE_INTERVAL, interval_hours=2)
+        assert j.interval_seconds_value() == 7200.0
+
+    def test_maintenance_tasks_stay_hourly(self):
+        """放开分钟不该波及维护类：扫日志做成十分钟一次纯属浪费。"""
+        j = _job(schedule=SCHEDULE_INTERVAL, interval_minutes=5)
+        assert j.task_type.startswith("maintenance.")
+        assert j.interval_seconds_value() == 3600.0
+
+    def test_business_tasks_may_go_sub_hourly(self):
+        j = _job(task_type="pool.refresh", schedule=SCHEDULE_INTERVAL,
+                 interval_minutes=10)
+        assert j.interval_seconds_value() == 600.0
+
+    def test_floor_is_per_task_class(self):
+        from app.runtime.maintenance import min_interval_seconds_for
+
+        assert min_interval_seconds_for("maintenance.log_cleanup") == 3600.0
+        assert min_interval_seconds_for("pool.refresh") == 60.0
+
+
+# ============================================================
+# 仅交易时段
+# ============================================================
+class TestTradingHoursOnly:
+    SATURDAY = datetime(2026, 10, 17, 10, 0)     # 周六
+    WED_MIDDAY = datetime(2026, 10, 14, 10, 0)   # 周三盘中
+
+    def _due(self, *, trading_only: bool, when: datetime) -> bool:
+        j = _job(task_type="pool.refresh", schedule=SCHEDULE_INTERVAL,
+                 interval_minutes=10, trading_hours_only=trading_only)
+        j.last_run_at = (when - timedelta(minutes=30)).timestamp()
+        return j.is_due(when)
+
+    def test_skipped_on_weekend(self):
+        assert self._due(trading_only=True, when=self.SATURDAY) is False
+
+    def test_fires_during_session(self):
+        assert self._due(trading_only=True, when=self.WED_MIDDAY) is True
+
+    def test_without_flag_fires_anytime(self):
+        assert self._due(trading_only=False, when=self.SATURDAY) is True
+
+    def test_waiting_market_is_reported_to_panel(self):
+        """"看起来已到期却不执行"必须在界面上有说法，否则像个卡死的 BUG。"""
+        j = _job(task_type="pool.refresh", schedule=SCHEDULE_INTERVAL,
+                 interval_minutes=10, trading_hours_only=True)
+        assert j.to_dict(self.SATURDAY)["waiting_market"] is True
+        assert j.to_dict(self.WED_MIDDAY)["waiting_market"] is False
+
+    def test_calendar_failure_does_not_pause_the_job(self, monkeypatch):
+        """日历读不出来时宁可多跑一次，也不要让任务静默停摆 —— 后者
+        是最难排查的故障形态。"""
+        import app.domain.calendar as cal
+
+        monkeypatch.setattr(
+            cal, "get_calendar",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("日历挂了")),
+        )
+        assert self._due(trading_only=True, when=self.SATURDAY) is True
+
+
+# ============================================================
+# 可配置的定时任务（不再只有写死的四条）
+# ============================================================
+class TestConfigurableJobs:
+    """任务清单以前是 ``DEFAULT_JOBS`` 的枚举：配置文件里写别的名字会被
+    告警并丢弃。这组用例守住"往配置里加一条就能跑"。"""
+
+    def _planner(self, tmp_path, *, jobs=None):
+        path = os.path.join(str(tmp_path), "maintenance.json")
+        if jobs is not None:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"jobs": jobs}, fh, ensure_ascii=False)
+        return MaintenancePlanner(publish=lambda *a, **kw: None, path=path)
+
+    def test_custom_job_from_config_is_loaded(self, tmp_path):
+        pl = self._planner(tmp_path, jobs={"pool_refresh": {
+            "task_type": "pool.refresh", "label": "候选池刷新", "enabled": True,
+            "schedule": "interval", "interval_minutes": 10,
+            "trading_hours_only": True,
+        }})
+        names = {j.name for j in pl.jobs()}
+        assert "pool_refresh" in names
+        job = {j.name: j for j in pl.jobs()}["pool_refresh"]
+        assert job.task_type == "pool.refresh"
+        assert job.interval_seconds_value() == 600.0
+        assert job.trading_hours_only is True
+
+    def test_custom_job_survives_reload(self, tmp_path):
+        pl = self._planner(tmp_path, jobs={"pool_refresh": {
+            "task_type": "pool.refresh", "enabled": True,
+            "schedule": "interval", "interval_minutes": 10,
+            "trading_hours_only": True,
+        }})
+        pl.save()
+        again = MaintenancePlanner(
+            publish=lambda *a, **kw: None,
+            path=os.path.join(str(tmp_path), "maintenance.json"))
+        job = {j.name: j for j in again.jobs()}.get("pool_refresh")
+        assert job is not None
+        assert job.interval_seconds_value() == 600.0
+        assert job.trading_hours_only is True
+
+    def test_job_without_task_type_is_skipped_not_crashed(self, tmp_path):
+        pl = self._planner(tmp_path, jobs={"broken": {"enabled": True}})
+        assert "broken" not in {j.name for j in pl.jobs()}
+
+    def test_builtin_jobs_are_still_there(self, tmp_path):
+        pl = self._planner(tmp_path)
+        assert DEFAULT_JOBS.keys() <= {j.name for j in pl.jobs()}
+
+    def test_add_job(self, tmp_path):
+        pl = self._planner(tmp_path)
+        out = pl.add_job("hot10", {"task_type": "pool.refresh",
+                                   "interval_minutes": 10, "enabled": True})
+        assert out["ok"] is True
+        assert "hot10" in {j.name for j in pl.jobs()}
+
+    def test_add_job_rejects_builtin_name(self, tmp_path):
+        pl = self._planner(tmp_path)
+        out = pl.add_job("validate", {"task_type": "x"})
+        assert out["ok"] is False
+        assert "内置" in out["error"]
+
+    def test_add_job_requires_task_type(self, tmp_path):
+        pl = self._planner(tmp_path)
+        assert pl.add_job("nope", {"enabled": True})["ok"] is False
+
+    def test_remove_refuses_builtin(self, tmp_path):
+        pl = self._planner(tmp_path)
+        out = pl.remove_job("log_cleanup")
+        assert out["ok"] is False
+        assert "log_cleanup" in {j.name for j in pl.jobs()}
+
+    def test_remove_custom(self, tmp_path):
+        pl = self._planner(tmp_path)
+        pl.add_job("tmp10", {"task_type": "pool.refresh"})
+        assert pl.remove_job("tmp10")["ok"] is True
+        assert "tmp10" not in {j.name for j in pl.jobs()}
+
+    def test_remove_unknown(self, tmp_path):
+        assert self._planner(tmp_path).remove_job("ghost")["ok"] is False
+
+    def test_snapshot_exposes_task_types_and_builtins(self, tmp_path):
+        snap = self._planner(tmp_path).snapshot()
+        assert "pool.refresh" in snap["task_types"]
+        assert snap["builtin_jobs"] == sorted(DEFAULT_JOBS)
+
+
+# ============================================================
+# 通用规则：动态 task_type
+# ============================================================
+class TestGenericMaintenanceRule:
+    """新增定时任务不该要求改规则表——这条规则从事件里取 task_type。"""
+
+    @staticmethod
+    def _due_events(job: str, task_type: str, **extra):
+        from app.runtime.events.schema import EngineEvent
+        from app.runtime.events.types import EventType
+        from app.runtime.scheduling.defaults import build_default_rules
+        from app.runtime.scheduling.rules import RuleRegistry
+
+        reg = RuleRegistry()
+        reg.register_all(build_default_rules())
+        ev = EngineEvent(
+            event_type=EventType.SYSTEM_MAINTENANCE_DUE,
+            data=dict(job=job, task_type=task_type, **extra),
+            source="test",
+        )
+        return [(r.name, r.build_task(ev, None))
+                for r in reg.match(EventType.SYSTEM_MAINTENANCE_DUE)
+                if r.should_run(ev, None)]
+
+    def test_custom_job_routes_to_its_own_task_type(self):
+        built = self._due_events("pool_refresh", "pool.refresh")
+        assert [name for name, _ in built] == ["maintenance_due_generic"]
+        task = built[0][1]
+        assert task.task_type == "pool.refresh"
+        # 队列按 task_type 登记，动态类型必须在建任务时就地重解析
+        assert task.queue == "research"
+
+    def test_builtin_jobs_not_duplicated(self):
+        """同一个事件不能被专用规则和通用规则各建一次任务。"""
+        for job, expect in (("log_cleanup", "maintenance.log_cleanup"),
+                            ("archive", "maintenance.archive"),
+                            ("validate", "maintenance.validate")):
+            built = self._due_events(job, expect)
+            assert len(built) == 1
+            assert built[0][1].task_type == expect
+
+    def test_dead_history_is_no_longer_orphaned(self):
+        """``dead_history`` 有默认配置但过去没有规则响应它，等于从不执行。"""
+        built = self._due_events("dead_history", "maintenance.dead_history")
+        assert [name for name, _ in built] == ["maintenance_due_generic"]
+        assert built[0][1].task_type == "maintenance.dead_history"
+
+    def test_bare_event_keeps_original_broadcast_semantics(self):
+        """没带 job 名的裸事件 = "把运维活都跑一遍"，通用规则不该插手。"""
+        from app.runtime.events.schema import EngineEvent
+        from app.runtime.events.types import EventType
+        from app.runtime.scheduling.defaults import build_default_rules
+        from app.runtime.scheduling.rules import RuleRegistry
+
+        reg = RuleRegistry()
+        reg.register_all(build_default_rules())
+        ev = EngineEvent(event_type=EventType.SYSTEM_MAINTENANCE_DUE,
+                         data={"task_type": "x"}, source="test")
+        hit = [r.name for r in reg.match(EventType.SYSTEM_MAINTENANCE_DUE)
+               if r.should_run(ev, None)]
+        assert "maintenance_due_generic" not in hit
+        assert len(hit) == 3
+
+    def test_missing_task_type_produces_nothing(self):
+        assert self._due_events("weird", "") == []
+
+    def test_rule_allows_empty_static_type_when_dynamic(self):
+        from app.runtime.scheduling.rules import Rule
+
+        with pytest.raises(ValueError):
+            Rule(name="bad", event_type="e", task_type="")
+        rule = Rule(name="ok", event_type="e",
+                    task_type_fn=lambda e, c: "pool.refresh")
+        assert rule.to_dict()["dynamic_task_type"] is True
+
+    def test_task_type_fn_failure_falls_back(self):
+        from app.runtime.events.schema import EngineEvent
+        from app.runtime.scheduling.rules import Rule
+
+        def boom(event, ctx):
+            raise RuntimeError("推导失败")
+
+        rule = Rule(name="r", event_type="e", task_type="static.fallback",
+                    task_type_fn=boom)
+        task = rule.build_task(EngineEvent(event_type="e", data={}, source="t"))
+        assert task.task_type == "static.fallback"
+
+
+# ============================================================
+# 保存护栏（不得误拦周期性任务）
+# ============================================================
+class TestDestructiveGuard:
+    @staticmethod
+    def _guard(payload):
+        from app.control.control_plane import ControlCenter
+
+        return ControlCenter._guard_destructive(payload)
+
+    def test_minute_schedule_is_not_blocked(self):
+        """回归点：``cfg.get("interval_sec") or 0`` 会让任何没写旧字段的
+        周期配置被判为 0 秒而拒绝保存，"十分钟刷新"根本配不进去。"""
+        out = self._guard({"jobs": {"pool_refresh": {
+            "schedule": "interval", "interval_minutes": 10, "params": {}}}})
+        assert out is None, out
+
+    def test_old_field_still_enforced(self):
+        out = self._guard({"jobs": {"x": {
+            "schedule": "interval", "interval_sec": 100, "params": {}}}})
+        assert out is not None and out["ok"] is False
+
+    def test_retention_floor_intact(self):
+        out = self._guard({"jobs": {"x": {
+            "schedule": "daily", "params": {"retention_days": 0}}}})
+        assert out is not None and ">= 1 天" in out["error"]
+
+    def test_harmless_config_passes(self):
+        assert self._guard({"jobs": {"x": {
+            "schedule": "interval", "interval_sec": 3600, "params": {}}}}) is None
 
 
 if __name__ == "__main__":

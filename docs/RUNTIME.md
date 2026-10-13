@@ -225,6 +225,37 @@ start_timer(interval, event_name, timer_id)     scheduler.py:661
 > 定时器只负责**发事件**，发完就完事；事件变成什么任务由规则表决定。
 > 所以改"某个定时该干什么"请改 `scheduling/defaults.py` 的规则，不要改定时器。
 
+#### 执行池 worker 数怎么调（`config/runtime.json`）
+
+七个池各自一个线程池，**槽位 = 该池线程池的 worker 数**，写在：
+
+```jsonc
+// config/runtime.json
+{
+  "worker_pools": {
+    "capacities": {"market": 3, "research": 2, "strategy": 1, "trading": 1},
+    "enabled": ["system","market","research","strategy","trading","backtest","maintenance"]
+  }
+}
+```
+
+| 写法 | 含义 |
+|---|---|
+| 不写某个池 | 用 `Pool.DEFAULT_CAPACITY` 里的内置值 |
+| `capacities` 里给了值 | 覆盖内置值（最小 1，写 0 / 负数会被拉回 1 并告警） |
+| `enabled` 省略或 `[]` | 全建（`[]` 按"没配"处理 —— 配错就把系统打死太危险了） |
+| 池名写错 / 值不是整数 | 忽略该项 + 告警，**不让坏配置挡住启动** |
+
+读配置的入口是 `workers/pools.py:load_worker_pool_config`，由 `SchedulerComponent`
+在**构造时**调一次。所以：
+
+> **改完必须重启引擎。** `ThreadPoolExecutor` 的 `max_workers` 在建池那一刻就固定，
+> 运行中改数字只会得到"面板显示 8、实际并发还是 3"—— 这种"改了但没真的改"
+> 比不支持热更新难排查得多，所以这里刻意不提供热更新。
+
+面板「运行时 → 执行池」会显示 **worker 数来源**（文件路径 / 内置默认 /
+代码显式传参）和配置告警，用来确认这次到底读的是哪份配置。
+
 #### 运维节拍：为什么是 tick + due 两个事件
 
 维护任务（日志清理 / 快照归档 / 定期校验）曾有一个安静的缺陷：
@@ -277,6 +308,13 @@ cron 支持 `*`、`*/n`、`a-b`、`a,b`、`a-b/n`。**「日」与「周」是 O
 配置在 `config/maintenance.json`，面板「运行时 → 维护计划」改完即生效。
 切换周期时面板只显示该周期用得到的输入框 —— 七种周期共用一套字段，
 选错了框就等于配上了一个永远不生效的参数。
+
+**任务清单本身是可配的**。内置任务写在 `maintenance.py` 的 `DEFAULT_JOBS`，
+但配置里（或面板新增表单里）写的其它条目同样会被加载，无需改动代码。
+`interval` 的下限按任务类别区分：`maintenance.*` 仍 ≥ 1 小时，
+其它业务任务可以到分钟级（例如 `pool.refresh` 每 10 分钟一次）；
+周期任务建议勾 `trading_hours_only` 以免休市空跑。
+详见 [EVENT_TASK.md](EVENT_TASK.md) §七。
 保留期参数支持**小时/天切换**（`retention_hours` / `before_hours` 优先，
 `*_days` 兼容），详见 [EVENT_TASK.md](EVENT_TASK.md) §七。
 
@@ -467,7 +505,7 @@ Twisted 是**单线程事件循环**。reactor 线程里任何一次阻塞，都
 | `COMPONENT_ERROR` | `engine.py` 初始化 / 启动流程 | `TradingService` → 落库 |
 | `TIMER_3MIN` | `SchedulerComponent.on_start` | 暂无订阅者 |
 | `system.maintenance.tick` | `SchedulerComponent.on_start` | `SchedulerComponent._on_maintenance_tick` → `MaintenancePlanner.tick()` |
-| `system.maintenance.due` | `MaintenancePlanner` | 规则表（按 `job` 名分流成清理/归档/校验任务） |
+| `system.maintenance.due` | `MaintenancePlanner` | 规则表：内置任务按 `job` 名分流成清理/归档/校验；其余走通用规则 `maintenance_due_generic`，按事件里的 `task_type` 建任务 |
 
 **新增的引擎事件**（事件驱动改造引入，驱动任务调度）：
 `engine.started` / `engine.ready` / `engine.stopping` / `engine.stopped` /

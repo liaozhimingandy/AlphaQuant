@@ -22,7 +22,7 @@
     "600519"
   ],
   "exclude_st": true,
-  "exclude_cyb": false,
-  "exclude_kcb": false,
+  "exclude_cyb": true,
+  "exclude_kcb": true,
   "exclude_bj": false
 }
