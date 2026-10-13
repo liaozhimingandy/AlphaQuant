@@ -154,10 +154,26 @@ class ScheduledPools(unittest.TestCase):
         sch = self._scheduler()
         info = sch.pool_config_info()
         self.assertTrue(info["config_source"].endswith("runtime.json"))
-        by_name = {p["pool"]: p["capacity"] for p in info["pools"]}
-        self.assertEqual(by_name["market"], 3)
-        self.assertEqual(by_name["strategy"], 1)
         self.assertEqual(info["config_warnings"], [])
+
+        # 为什么容量值不在这里钉死一个常数
+        # ------------------------------------------------------------
+        # 这个数字住在 config/runtime.json 里，而它**本来就该随限流实测调整**。
+        # 在测试里写 assertEqual(by_name["market"], 3) 的实际效果是：
+        # 有人合理地调了一次并发 → 测试红 → 在赶时间时被随手改成
+        # assertEqual(..., 5)，于是这条用例从此什么都不再保证。
+        # （它已经这样发生过一次：文件里写的是 5、注释写的是"先 3"、
+        #   测试钉的是 3 —— 三方各说各话。）
+        # 所以这里改成"读文件 → 比对调度器实际用上的值"，钉的是**接线**
+        # （配置有没有真的被读进去），而不是某个具体数字。
+        cfg = load_worker_pool_config(info["config_source"])
+        by_name = {p["pool"]: p["capacity"] for p in info["pools"]}
+        for name, want in (cfg["capacities"] or {}).items():
+            self.assertEqual(by_name[name], want, f"执行池 {name} 没用上配置值")
+
+        # 真正不会随性能调优变化的不变量只有一条：策略池必须串行。
+        # 两个策略并发改同一本账本，权益曲线就不确定了 —— 这是正确性要求。
+        self.assertEqual(by_name["strategy"], 1)
 
     def test_file_capacity_overrides_builtin_default(self):
         path = _write(self.tmp, {POOL_CONFIG_KEY: {"capacities": {"market": 6}}})

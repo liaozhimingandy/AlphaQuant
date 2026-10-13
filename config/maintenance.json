@@ -79,6 +79,106 @@
       "description": "清理已处置超过保留期的死信处置历史（未处置的不动）；对照 Rhapsody 的通知事件历史清理",
       "custom": false
     },
+    "kline_intraday": {
+      "task_type": "market.kline.intraday",
+      "label": "盘中K线刷新",
+      "enabled": true,
+      "schedule": "interval",
+      "at": "03:10",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "interval_minutes": 15,
+      "trading_hours_only": true,
+      "cron": "",
+      "once_at": "",
+      "params": {
+        "source": "flow",
+        "limit": 30,
+        "lookback_days": 10
+      },
+      "description": "交易时段每 15 分钟刷新一次候选池标的的日线近况，让策略看到的价格不至于停留在开盘那一根",
+      "custom": false
+    },
+    "kline_post_close": {
+      "task_type": "market.kline.post_close",
+      "label": "盘后K线同步",
+      "enabled": true,
+      "schedule": "daily",
+      "at": "17:30",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
+      "cron": "",
+      "once_at": "",
+      "params": {
+        "limit": 0,
+        "lookback_days": 30
+      },
+      "description": "收盘后补齐当天K线：先查谁还缺当天的数据，只补缺的那些",
+      "custom": false
+    },
+    "kline_gap_scan": {
+      "task_type": "market.kline.gap_scan",
+      "label": "K线缺口体检",
+      "enabled": true,
+      "schedule": "daily",
+      "at": "05:30",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
+      "cron": "",
+      "once_at": "",
+      "params": {
+        "use_pool": false,
+        "lookback_days": 120,
+        "auto_repair": true,
+        "max_symbols": 200,
+        "max_repair": 30
+      },
+      "description": "扫描“应有却没有”的交易日数据并自动补全；刻意排在清晨，不与盘中任务抢网络额度",
+      "custom": false
+    },
+    "stock_profile": {
+      "task_type": "stock.profile.sync",
+      "label": "标的主表同步",
+      "enabled": true,
+      "schedule": "daily",
+      "at": "08:30",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
+      "cron": "",
+      "once_at": "",
+      "params": {
+        "individual_limit": 50
+      },
+      "description": "同步全市场股票列表与上市日期，它是K线任务跳过未上市/已退市标的的唯一依据",
+      "custom": false
+    },
+    "account_settle": {
+      "task_type": "account.settle",
+      "label": "账户收盘清算",
+      "enabled": true,
+      "schedule": "daily",
+      "at": "18:00",
+      "weekday": 1,
+      "day_of_month": 1,
+      "interval_hours": 24,
+      "interval_minutes": 0,
+      "trading_hours_only": false,
+      "cron": "",
+      "once_at": "",
+      "params": {},
+      "description": "收盘后把资金/持仓市值/峰值权益固化进账户表（回撤类风控规则跨进程依赖它）",
+      "custom": false
+    },
     "pool_refresh": {
       "task_type": "pool.refresh",
       "label": "候选股票池刷新",

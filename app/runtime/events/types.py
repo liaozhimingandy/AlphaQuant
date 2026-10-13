@@ -61,6 +61,13 @@ class EventType:
     MARKET_KLINE_UPDATED = "market.kline.updated"
     MARKET_KLINE_GAP_DETECTED = "market.kline.gap_detected"
     MARKET_DATA_VALIDATED = "market.data.validated"
+    #: 标的主表（代码/名称/**上市日期**/板块）被同步过了一次。
+    #: 单独发一个事件，是因为主表是**很多判断的共同前提**：
+    #: K线任务靠它跳过未上市标的、股票池靠它做板块剔除、
+    #: 面板靠它显示"这票哪天上市"。它们不该各自去轮询数据库 ——
+    #: 而一旦有人要轮询，就意味着"主表什么时候更新的"这个问题的答案
+    #: 只能靠猜。
+    STOCK_PROFILE_UPDATED = "stock.profile.updated"
     NEWS_ARTICLE_COLLECTED = "news.article.collected"
     NEWS_SENTIMENT_UPDATED = "news.sentiment.updated"
     FUNDAMENTAL_DATA_UPDATED = "fundamental.data.updated"
@@ -99,6 +106,28 @@ class EventType:
     TRADE_POSITION_UPDATED = "trade.position.updated"
     TRADE_ACCOUNT_UPDATED = "trade.account.updated"
     RISK_LIMIT_BREACHED = "risk.limit.breached"
+    # —— 交易时段 ——
+    #: 这两个事件补上的正是 ``system.market.session.changed`` **不管**的那一层：
+    #: 后者说的是"现在是盘前/盘中/收盘结算中"（客观时间），
+    #: 这两个说的是"**我们的交易因此开始了/结束了**"（系统的主观动作）。
+    #: 分开的必要性在于，两者之间还存在第三种状态 ——
+    #: 市场开盘了，但我们的网关还没连上、虚拟账户还没就绪，
+    #: 此刻"可以交易"是假的。把"能不能下单"表达成时间判断，
+    #: 最终一定会有一天下单被拒却查不出为什么。
+    TRADE_SESSION_OPENED = "trade.session.opened"
+    TRADE_SESSION_CLOSED = "trade.session.closed"
+    # —— 账户（库里的钱） ——
+    #: ``trade.account.updated`` 是"券商回给我的账户又刷新了一次"；
+    #: 这两个事件说的是**本地账户表**本身被改动（建账户 / 余额变了）。
+    #: 这两件事在粒度上完全不同：前者一天能来几十次且只是"又刷新了一次"，
+    #: 后者必须少而准 —— 它是资金去向的唯一本地审计线索。
+    ACCOUNT_CREATED = "account.created"
+    ACCOUNT_UPDATED = "account.updated"
+    #: 熔断：一键停掉所有新的开仓。与 :attr:`RISK_CHECK_REJECTED` 的区别是
+    #: 粒度 —— 后者是"这一单不许做的判决"，前者是"闸刀拉下来了"的状态变化，
+    #: 后者每天可能几十次，前者一次就够了，且必须被人看见。
+    RISK_HALTED = "risk.halted"
+    RISK_RESUMED = "risk.resumed"
 
     # ---------------- 5. 任务与执行器 ----------------
     TASK_CREATED = "task.created"
@@ -163,7 +192,7 @@ EVENT_CATEGORIES: Dict[str, Tuple[str, ...]] = {
         EventType.MARKET_TICK_RECEIVED, EventType.MARKET_KLINE_UPDATED,
         EventType.MARKET_KLINE_GAP_DETECTED, EventType.MARKET_DATA_VALIDATED,
         EventType.NEWS_ARTICLE_COLLECTED, EventType.NEWS_SENTIMENT_UPDATED,
-        EventType.FUNDAMENTAL_DATA_UPDATED,
+        EventType.FUNDAMENTAL_DATA_UPDATED, EventType.STOCK_PROFILE_UPDATED,
     ),
     "因子与策略": (
         EventType.FACTOR_CALCULATION_REQUESTED, EventType.FACTOR_SNAPSHOT_UPDATED,
@@ -177,6 +206,9 @@ EVENT_CATEGORIES: Dict[str, Tuple[str, ...]] = {
         EventType.TRADE_ORDER_FILLED, EventType.TRADE_ORDER_FAILED,
         EventType.TRADE_ORDER_CANCELLED, EventType.TRADE_POSITION_UPDATED,
         EventType.TRADE_ACCOUNT_UPDATED, EventType.RISK_LIMIT_BREACHED,
+        EventType.TRADE_SESSION_OPENED, EventType.TRADE_SESSION_CLOSED,
+        EventType.ACCOUNT_CREATED, EventType.ACCOUNT_UPDATED,
+        EventType.RISK_HALTED, EventType.RISK_RESUMED,
     ),
     "任务与执行（引擎任务）": (
         EventType.TASK_CREATED, EventType.TASK_QUEUED,
@@ -300,6 +332,13 @@ class TaskType:
     MARKET_KLINE_BACKFILL = "market.kline.backfill"
     MARKET_QUOTE_SNAPSHOT = "market.quote.snapshot"
     DATA_INTEGRITY_CHECK = "data.integrity.check"
+    # —— K 线的三班定时（见 app/modules/collection/pool_kline.py）——
+    #: 盘中：刷候选池近况（每轮都采，数据在盘中只会越来越准）
+    MARKET_KLINE_INTRADAY = "market.kline.intraday"
+    #: 盘后：把当天那根 K 线补齐（先查再采，已有的一律不动）
+    MARKET_KLINE_POST_CLOSE = "market.kline.post_close"
+    #: 定期体检：查"该有数据的交易日为什么没有"，能补的当场补
+    MARKET_KLINE_GAP_SCAN = "market.kline.gap_scan"
 
     # —— 研究域 ——
     NEWS_COLLECT = "news.collect"
@@ -307,6 +346,8 @@ class TaskType:
     FUNDAMENTAL_COLLECT = "fundamental.collect"
     FACTOR_CALCULATE = "factor.calculate"
     POOL_REFRESH = "pool.refresh"   # 股票池刷新：候选池来源＋资金流/筹码/基本面同步＋打分
+    #: 标的主表同步：全市场股票列表 + **上市日期** + 板块分类
+    STOCK_PROFILE_SYNC = "stock.profile.sync"
 
     # —— 采集域（手动触发，经调度器统一分配）——
     COLLECT_NOW = "collect.now"      # 全类别立即采集（指定标的）
@@ -320,6 +361,10 @@ class TaskType:
     # —— 交易域 ——
     RISK_EVALUATE = "risk.evaluate"
     TRADE_EXECUTE = "trade.execute"
+    #: 收盘清算：把"这一天的钱和票"固化到账户表（资金/市值/峰值权益）。
+    #: 为什么是任务：它在写资金事实，失败必须能重跑、且必须幂等
+    #: （同一天跑三次的结果必须和跑一次一样）。
+    ACCOUNT_SETTLE = "account.settle"
 
     # —— 回测域 ——
     BACKTEST_RUN = "backtest.run"
@@ -425,17 +470,20 @@ class Pool:
         TaskType.MARKET_KLINE_COLLECT, TaskType.MARKET_KLINE_BACKFILL,
         TaskType.MARKET_QUOTE_SNAPSHOT, TaskType.DATA_INTEGRITY_CHECK,
         TaskType.COLLECT_NOW, TaskType.COLLECT_CROSS, TaskType.COLLECT_KLINE,
+        TaskType.MARKET_KLINE_INTRADAY, TaskType.MARKET_KLINE_POST_CLOSE,
+        TaskType.MARKET_KLINE_GAP_SCAN,
     }),
         RESEARCH: frozenset({
             TaskType.NEWS_COLLECT, TaskType.SENTIMENT_ANALYZE,
             TaskType.FUNDAMENTAL_COLLECT, TaskType.FACTOR_CALCULATE,
-            TaskType.POOL_REFRESH,
+            TaskType.POOL_REFRESH, TaskType.STOCK_PROFILE_SYNC,
         }),
         STRATEGY: frozenset({
             TaskType.STRATEGY_RUN, TaskType.UNIVERSE_RANK,
         }),
         TRADING: frozenset({
             TaskType.RISK_EVALUATE, TaskType.TRADE_EXECUTE,
+            TaskType.ACCOUNT_SETTLE,
         }),
         BACKTEST: frozenset({
             TaskType.BACKTEST_RUN, TaskType.BACKTEST_SWEEP,
@@ -469,11 +517,15 @@ TASK_QUEUE: Dict[str, str] = {
     TaskType.MARKET_KLINE_BACKFILL: Queue.MARKET,
     TaskType.MARKET_QUOTE_SNAPSHOT: Queue.MARKET,
     TaskType.DATA_INTEGRITY_CHECK: Queue.MARKET,
+    TaskType.MARKET_KLINE_INTRADAY: Queue.MARKET,
+    TaskType.MARKET_KLINE_POST_CLOSE: Queue.MARKET,
+    TaskType.MARKET_KLINE_GAP_SCAN: Queue.MARKET,
     TaskType.NEWS_COLLECT: Queue.RESEARCH,
     TaskType.SENTIMENT_ANALYZE: Queue.RESEARCH,
     TaskType.FUNDAMENTAL_COLLECT: Queue.RESEARCH,
     TaskType.FACTOR_CALCULATE: Queue.RESEARCH,
     TaskType.POOL_REFRESH: Queue.RESEARCH,
+    TaskType.STOCK_PROFILE_SYNC: Queue.RESEARCH,
     TaskType.COLLECT_NOW: Queue.MARKET,
     TaskType.COLLECT_CROSS: Queue.MARKET,
     TaskType.COLLECT_KLINE: Queue.MARKET,
@@ -481,6 +533,7 @@ TASK_QUEUE: Dict[str, str] = {
     TaskType.UNIVERSE_RANK: Queue.STRATEGY,
     TaskType.RISK_EVALUATE: Queue.TRADING,
     TaskType.TRADE_EXECUTE: Queue.TRADING,
+    TaskType.ACCOUNT_SETTLE: Queue.TRADING,
     TaskType.BACKTEST_RUN: Queue.BACKTEST,
     TaskType.BACKTEST_SWEEP: Queue.BACKTEST,
     TaskType.MAINTENANCE_LOG_CLEANUP: Queue.MAINTENANCE,

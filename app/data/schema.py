@@ -9,6 +9,8 @@
 # @Project     : AlphaQuant
 # @Copyright   : Copyright (c) 2026 Administrator, All Rights Reserved.
 # -------------------------------------------------------------------------------
+from typing import Any, Dict
+
 from sqlalchemy import (
     Boolean,
     Column,
@@ -552,18 +554,68 @@ class StockFlowRank(Base):
 
 
 class StockInfo(Base):
-    """标的名称对照表（symbol -> name）。
+    """**标的主表**（``symbol`` → 这只票是谁）。
 
-    评分结果只存代码不存名称，"600042 是哪只票"根本看不出来。
-    这里集中维护一份代码↔名称对照：全市场快照（``stock_zh_a_spot_em``）
-    一次就能把全部 A 股名称灌进来，候选池同步时顺手也补。读取评分时
-    按代码查名称回填，查不到就是"未知"（多半是脏数据/退市/幻想代码）。
+    ============================================================
+    它不是"名称对照表"，它是标的事实来源
+    ============================================================
+    最初这张表只有三列（代码/名称/更新时间），作用是把评分结果里的
+    ``600042`` 翻译成人能读的名字。但很快就会发现同一个问题反复出现：
+
+      * 候选池刷出来一只 3 开头的票，它是不是还没上市的新股？
+      * 某只票连续 20 个交易日没有 K 线 —— 是**漏采**还是**退市**？
+      * 周日的K线任务要不要跑？（未上市/已退市根本跑不出数据）
+
+    这三个问题的答案全在"这只票的上市日期与状态"里，而它们在别的地方
+    查不到。所以这张表升级为**标的主表**：除了名称，还维护
+    所属市场/板块/行业/**上市日期**/是否退市/股本规模/数据来源。
+
+    ============================================================
+    为什么上市日期必须由这张表负责
+    ============================================================
+    有人会说"上市日期 = 库里第一根 K 线那天"。这是错的，而且错得很隐蔽：
+    库里的第一根 K 线是**我们第一次去采它的那天**，它取决于
+    这只票什么时候进池子、什么时候被补采 —— 跟它哪天上市毫无关系。
+    一只 2007 年上市的老票，2026 年才被纳入候选池的话，
+    按这个算法它的"上市日期"会变成 2026 年。
+
+    所以它必须是**来自交易所的外部事实**（本表 + :mod:`universe.profile`
+    负责同步），而不是从本地数据里推导出来的东西。
+
+    ============================================================
+    列的来源是两类，别混为一谈
+    ============================================================
+      * ``market`` / ``board`` 由**代码规则**推导（见
+        ``app.modules.universe.pool.pool.classify_board``）—— 永远可靠、无需联网；
+      * ``list_date`` / ``delisted`` / ``total_share`` 只能**联网同步**，
+        取不到就留空。空的 ``list_date`` 语义是"还不知道"，
+        **不是**"已上市"：所有依赖上市日期的判断都必须容忍它为 None
+        （详见 :func:`app.data.repo.stock_info_repo.filter_listed`）。
+
+    .. note::
+       老库升级：本表新增的列由 :func:`app.data.migrate.ensure_columns`
+       在运行时自动 ``ALTER TABLE ... ADD COLUMN`` 补上，**不需要重建库**。
     """
 
     __tablename__ = "stock_info"
 
     symbol = Column(String(20), primary_key=True)
     name = Column(String(64))
+    #: 所属市场：sh / sz / bj / other（由代码推导，永远有值）
+    market = Column(String(8))
+    #: 板块：main（主板）/ cyb（创业板）/ kcb（科创板）/ bj（北交所）/ other
+    board = Column(String(16))
+    #: 所属行业。取不到就空 —— 行业会变，拿它做硬过滤要谨慎。
+    industry = Column(String(64))
+    #: **上市日期**（交易所口径）。None = 尚未同步到，不代表今天已上市。
+    list_date = Column(Date)
+    #: 是否已退市。与 :attr:`list_date` 一起决定"这只票今天该有K线吗"。
+    delisted = Column(Boolean, default=False)
+    #: 总股本 / 流通股本（股）。来源不同的话单位可能不一致，只在展示用。
+    total_share = Column(Float)
+    float_share = Column(Float)
+    #: 这条记录的来源（如 "sse" / "szse" / "akshare"），排障时回答"谁写的"
+    source = Column(String(32))
     updated_at = Column(DateTime)
 
 
@@ -767,4 +819,152 @@ class Watchlist(Base):
     __table_args__ = (
         UniqueConstraint("symbol", name="uk_watchlist_symbol"),
         Index("ix_watchlist_due", "enabled", "last_collected_at"),
+    )
+
+
+class BrokerAccount(Base):
+    """**账户** —— 交易到底发生在谁的钱上。
+
+    ============================================================
+    为什么账户必须是一张表，而不是内存里的一个对象
+    ============================================================
+    重构前 ``Portfolio`` / ``Account`` 都是**进程内的对象**，每个跑起来
+    的量化任务自己持有一本账（见 :class:`app.account.portfolio.Portfolio`
+    的 "per-task 一本账"）。这在回测里没问题 —— 回测跑完进程就结束，
+    账本跟着结果一起存档。
+
+    实盘不是这样：
+      1. **进程会重启**。重启之后"这个券商账户昨天收盘时多少钱"如果
+         只能从券商重查，那么盘中对账、隔夜持仓、昨收现金全部丢失，
+         而"我昨天到底赚了多少"这类问题必须由本地记得；
+      2. **多个策略抢一个账户**。per-task 账本里每个任务都以为自己有
+         十万块，实盘却是共享同一个资金池里剩下的钱 ——
+         两个任务同时下单会把可用资金花超一倍；
+      3. **风控要读历史**。最大回撤规则要知道账户的历史峰值权益，
+         而这个峰值必须跨进程存活，否则每次重启风控都"从头看到 fool"。
+
+    所以账户是一张表：**这里是唯一的资金事实来源**，内存对象只是它的快照。
+
+    ============================================================
+    virtual 账户（虚拟账户）
+    ============================================================
+    :attr:`mode` 为 ``virtual`` 的行是系统自带的**模拟盘账户**：
+    它接模拟网关（永不下真单），但走**完全相同的**下单 → 成交流水 →
+    资金扣减 → 风控校验链路。
+
+    为什么必须内置一个而不是等用户配：
+      真券商账户需要对接、需要额度、也需要胆量。在此之前若没有一条能
+      端到端跑通的链路，那么"上线"这件事永远发生在第一次真下单的时候
+      —— 那是学习成本最贵的时刻。虚拟账户让整条链路先在假钱上跑顺。
+
+    .. warning::
+       ``virtual`` 账户走的是模拟网关，**它永远不会把单子发到交易所**。
+       要真实交易必须显式 ``mode='live'`` 且运行时 ``RunMode.LIVE``。
+       这条约定由 :class:`app.modules.account.service.AccountService`
+       在启动日志里明确打印出来。
+    """
+
+    __tablename__ = "broker_account"
+
+    id = Column(Integer, primary_key=True)
+    #: 账户代号（人类可读的唯一标识，如 "virtual-default"）
+    account_id = Column(String(64), nullable=False)
+    name = Column(String(64))
+    #: 走的网关名（ ``simulated`` / ``http`` …），对应 config/brokers.json
+    gateway = Column(String(32), default="simulated")
+    #: 网关下面的接入点
+    endpoint_id = Column(String(64))
+    #: 券商侧的资金账号（虚拟账户为空）
+    broker_no = Column(String(64))
+    #: virtual（模拟盘，永不真单） / live（实盘）
+    mode = Column(String(16), default="virtual")
+    #: 初始资金。它是"收益率"的分母，一旦产生成交就不允许再改
+    #: —— 中途改初始资金等于篡改历史收益率。
+    initial_cash = Column(Float, default=0.0)
+    #: 当前可用资金
+    cash = Column(Float, default=0.0)
+    #: 冻结资金（挂单未成交占用的部分）
+    frozen = Column(Float, default=0.0)
+    #: 当前持仓市值
+    market_value = Column(Float, default=0.0)
+    #: 历史最高权益，供回撤类的风控规则跨进程使用
+    peak_equity = Column(Float, default=0.0)
+    #: active / disabled / readonly（只读=允许查不允许下单）
+    status = Column(String(16), default="active")
+    #: 累计已实现盈亏
+    realized_pnl = Column(Float, default=0.0)
+    #: 是否系统内置（内置账户不允许在面板上删除）
+    builtin = Column(Boolean, default=False)
+    note = Column(Text)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", name="uk_account_id"),
+        Index("ix_account_mode_status", "mode", "status"),
+    )
+
+    def snapshot(self) -> Dict[str, Any]:
+        """给面板/事件用的视图（不含内部字段）。"""
+        equity = (self.cash or 0.0) + (self.market_value or 0.0)
+        init = self.initial_cash or 0.0
+        return {
+            "account_id": self.account_id,
+            "name": self.name or self.account_id,
+            "gateway": self.gateway,
+            "endpoint_id": self.endpoint_id or "",
+            "broker_no": self.broker_no or "",
+            "mode": self.mode,
+            "initial_cash": init,
+            "cash": self.cash or 0.0,
+            "frozen": self.frozen or 0.0,
+            "market_value": self.market_value or 0.0,
+            "equity": equity,
+            "pnl": equity - init,
+            #: 分母为 0 时返回 None 而不是 0 —— "没配初始资金"和
+            #: "收益恰好为零"是两件完全不同的事。
+            "pnl_pct": ((equity - init) / init) if init else None,
+            "peak_equity": self.peak_equity or max(init, equity),
+            "realized_pnl": self.realized_pnl or 0.0,
+            "status": self.status,
+            "builtin": bool(self.builtin),
+            "note": self.note or "",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class AccountPosition(Base):
+    """账户持仓**快照**（每个账户一行/一只票）。
+
+    为什么是快照而不是流水：
+      策略要问的是"我现在有多少股"，不是"我历史上发生过什么"。
+      后者在 ``trade_record`` 里已经有了（append-only）；
+      这张表存的是前者 —— 可被覆盖的**当前状态**，服务于
+      "进程重启后还能立刻知道手上有多少票可以卖"。
+
+    ``sellable`` 单独存一列是因为 A 股 T+1：当日买入的部分**不可卖**，
+    而 ``size`` 是全部持有量。这条规则若藏在计算里，
+    每次改卖出逻辑都要重新推导一遍 T+1 —— 详见
+    :class:`app.modules.risk.builtin.TPlusOneRisk`。
+    """
+
+    __tablename__ = "account_position"
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String(64), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    #: 持有数量（股）
+    size = Column(Integer, default=0)
+    #: 今日可卖数量（股）。T+1 之下它 ≤ size。
+    sellable = Column(Integer, default=0)
+    avg_price = Column(Float, default=0.0)
+    last_price = Column(Float, default=0.0)
+    #: 市值（= size × last_price）
+    market_value = Column(Float, default=0.0)
+    updated_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "symbol", name="uk_position_account_symbol"),
+        Index("ix_position_account", "account_id"),
     )

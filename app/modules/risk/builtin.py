@@ -460,3 +460,67 @@ class SellablePositionRisk(IBaseRiskRule):
                 f"无可卖数量（持仓 {held}，冻结 {frozen}）"
             )
         return self._pass(f"可卖 {sellable}/{held} 股")
+
+
+@register_risk
+class TradingSessionRisk(IBaseRiskRule):
+    """只在交易时段内下单。
+
+    ============================================================
+    为什么这条要存在（"系统知道几点开盘"不是常识，是要建设的）
+    ============================================================
+    没有它的时候，"什么时候能下单"散落在各个地方：
+    有的是"反正行情来了才触发"（但盘后照样会触发 —— 收盘那根 bar
+    也会走一遍策略），有的是"网关连不上就自动算了"（而模拟网关
+    **永远连得上**，于是模拟盘在凌晨三点也在愉快地下单）。
+
+    后果倒不会亏钱 —— 而是**污染**：半夜的单排到次日的开盘竞价里、
+    回测与实盘在时间口径上再也对不上、审计日志里混着一堆非交易时段的单，
+    出事之后根本分不清哪笔是"系统自己跑的"。
+
+    ============================================================
+    为什么它是"风控规则"而不是"调度上的一个开关"
+    ============================================================
+    开关是**建议性的**：漏配一处就漏一道检查，而且它管不到
+    "策略是在另一个地方被调用的"那些入口（重放、手动触发、事件旁路）。
+    风控规则则是**收缩性**的、在同一个闸门上：
+    不管信号从哪里来，只要它想变成订单，就得过这一关。
+    对于"不该发生的事"，收缩比建议可靠。
+
+    ============================================================
+    读不到日历时**放行**，而不是拒单
+    ============================================================
+    :class:`app.domain.calendar.TradeCalendar` 拿不到节假日表时不该
+    变成"禁止一切交易"（那会让人以为策略坏了），所以这里对齐基类纪律
+    **拿不到数据就放行**，但会在 reason 里写清楚"日历不可用"。
+    """
+
+    name = "trading_session"
+    description = "仅在交易时段内进行交易（非交易时段禁止下单）"
+
+    #: 允许哪些状态。``lunch`` 午休虽然撮合停了，
+    #: 但下单是允许的（委托进队列，13:00 开盘后参与竞价），
+    #: 所以它必须在白名单里 —— 少了它，"中午发的单全部被拒"会显得
+    #: 非常像 bug 而不是配置。
+    _OPEN_STATES = ("open", "lunch", "post_close")
+
+    def __init__(self, allow_outside_hours: bool = False, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.allow_outside_hours = bool(allow_outside_hours)
+
+    def check(self, signal, state, ctx=None, account=None) -> RiskVerdict:
+        if self.allow_outside_hours:
+            return self._pass("允许非交易时段交易")
+        try:
+            from app.domain.calendar import get_calendar
+
+            state_name = get_calendar().state()
+        except Exception as exc:
+            # 日历模块本身出故障：**放行**。
+            # 风控挂掉比"多下了一单"更难察觉，也更难恢复。
+            return self._pass(f"交易日历不可用（放行）: {str(exc)[:60]}")
+        if state_name in self._OPEN_STATES:
+            return self._pass(f"交易时段内（{state_name}）")
+        return self._block(
+            f"非交易时段（当前: {state_name}），禁止下单"
+        )

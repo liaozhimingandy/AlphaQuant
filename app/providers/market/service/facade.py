@@ -1747,9 +1747,25 @@ import app.providers.market.compat.local_source  # noqa: F401  触发 local_hot 
 _bootstrap()
 
 
+def call_akshare(name: str, *args: Any, limit_key: str = "marketx",
+                 retry: Optional[int] = None, **kwargs: Any) -> Any:
+    """``_call`` 的公开版本：给"业务需要但不是行情"的取数用。
+
+    标的主表同步要拉交易所的股票列表（``stock_info_sh_name_code`` 等），
+    这些接口在结构上和行情接口毫无区别 —— 一样限流、一样会抽风、
+    一样需要指数退避。所以复用同一个限速器与重试策略，
+    而不是在各业务模块里各自写一遍 ``import akshare; getattr(ak, name)``：
+    那样会绕开限速器，结局是"某个没人记得住限流的模块把 IP 封了"。
+
+    :raises MarketXError: 接口不存在或调用失败
+    """
+    return _call(name, *args, limit_key=limit_key, retry=retry, **kwargs)
+
+
 __all__ = [
     "CATEGORIES",
     "MarketXError",
+    "call_akshare",
     "fetch_board_fund_flow",
     "fetch_boards",
     "fetch_chip",

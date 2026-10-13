@@ -234,10 +234,27 @@ class MarketDataService:
 
 
 def init_db() -> None:
-    """建表。"""
+    """建表 + 给老库补列。
+
+    两步缺一不可，而且**顺序不能反**：``create_all`` 只会建设缺失的表，
+    对已经存在的表一列都不动。所以给模型加过列之后，老库必须先建齐表、
+    再由 :func:`~app.data.migrate.ensure_columns` 把新列 ALTER 上去，
+    否则会出现"代码里有这个字段、一查就 no such column"。
+    """
     from app.data.engine import engine
     from app.data.schema import Base
 
     settings.ensure_dirs()
     Base.metadata.create_all(bind=engine)
+
+    # 后加的列：逐个模型补齐。单个失败不影响其它模型 ——
+    # 少一列是"这个功能用不了"，整体崩是"引擎起不来"。
+    try:
+        from app.data.migrate import ensure_schema_of
+        from app.data.schema import BrokerAccount, StockInfo
+
+        for _m in (StockInfo, BrokerAccount):
+            ensure_schema_of(_m, engine)
+    except Exception as exc:  # pragma: no cover - 迁移失败不该阻断启动
+        logger.warning(f"补列失败（老库缺 columns，功能可能受限）: {exc}")
     logger.info(f"数据库初始化完成 | {settings.DATABASE_URL}")

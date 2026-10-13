@@ -669,6 +669,69 @@ DEFAULT_JOBS: Dict[str, MaintenanceJob] = {
         params={"retention_days": 30, "keep": 200, "apply": True},
         description="清理已处置超过保留期的死信处置历史（未处置的不动）；对照 Rhapsody 的通知事件历史清理",
     ),
+    # ------------------------------------------------------------------
+    # 行情：K 线的三班定时
+    #
+    # 这三个任务回答的是同一件事 —— **库里的 K 线是不是完整且及时**，
+    # 只是分别从"盘中/盘后/历史"三个时间切面上回答。
+    # 放在一处定义而不是散在三个脚本里，是为了让"这三件事在同一套配置里、
+    # 用同一套维护计划器 Observable 起来"这件事看得见：
+    # 面板的「内置定时任务」要能一眼看出今天的三份班表各自有没有跑。
+    # ------------------------------------------------------------------
+    "kline_intraday": MaintenanceJob(
+        name="kline_intraday",
+        task_type=TaskType.MARKET_KLINE_INTRADAY,
+        label="盘中K线刷新",
+        enabled=True,
+        schedule=SCHEDULE_INTERVAL,
+        interval_minutes=15,
+        # 只在交易时段运行。休市刷新等于每小时往数据源扔几十个
+        # "今天没有数据"的请求 —— 没信息量，还占额度。
+        trading_hours_only=True,
+        params={"source": "flow", "limit": 30, "lookback_days": 10},
+        description="交易时段每 15 分钟刷新一次候选池标的的日线近况（让策略看到的价格不至于太旧）",
+    ),
+    "kline_post_close": MaintenanceJob(
+        name="kline_post_close",
+        task_type=TaskType.MARKET_KLINE_POST_CLOSE,
+        label="盘后K线同步",
+        enabled=True,
+        schedule="daily",
+        at="17:30",
+        params={"limit": 0, "lookback_days": 30},
+        description="收盘后补齐当天 K 线：先查谁还缺当天数据，只补缺的那些",
+    ),
+    "kline_gap_scan": MaintenanceJob(
+        name="kline_gap_scan",
+        task_type=TaskType.MARKET_KLINE_GAP_SCAN,
+        label="K线缺口体检",
+        enabled=True,
+        schedule="daily",
+        at="05:30",
+        params={"use_pool": False, "lookback_days": 120,
+                "auto_repair": True, "max_symbols": 200, "max_repair": 30},
+        description="扫描应有却没有的交易日数据并自动补全（停在清晨跑，避免占用盘中的网络额度）",
+    ),
+    "stock_profile": MaintenanceJob(
+        name="stock_profile",
+        task_type=TaskType.STOCK_PROFILE_SYNC,
+        label="标的主表同步",
+        enabled=True,
+        schedule="daily",
+        at="08:30",
+        params={"individual_limit": 50},
+        description="同步全市场股票列表与**上市日期**；它是K线 tasks 跳过未上市/已退市标的的依据",
+    ),
+    "account_settle": MaintenanceJob(
+        name="account_settle",
+        task_type=TaskType.ACCOUNT_SETTLE,
+        label="账户收盘清算",
+        enabled=True,
+        schedule="daily",
+        at="18:00",
+        params={},
+        description="收盘后把资金/持仓市值/峰值权益固化进账户表（回撤类风控规则跨进程依赖它）",
+    ),
 }
 
 

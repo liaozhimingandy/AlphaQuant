@@ -34,6 +34,7 @@ from app.data.schema import (
     MarketNews,
     StockFactorValue,
     StockFlowRank,
+    StockDaily,
     StockFundamental,
     StockHotRank,
     StockInfo,
@@ -644,6 +645,12 @@ _POOL_MODELS = {
     "limitup": LimitUpPool,
 }
 _DAILY_MODELS = {
+    # "daily" 是日线本体。它最该出现在这张表里却一度缺失 —— 结果是
+    # latest_dates("daily", ...) 静默返回 {}，调用方据此认为"全部标的都缺
+    # 这一天"，于是**每次盘后同步都把全池重采一遍**。
+    # 这类"映射表里少一项"的故障不会抛异常、不会进死信，只会让系统一直
+    # 做无用功，所以这里把理由写死在注释里。
+    "daily": StockDaily,
     "fund_flow": FundFlow,
     "chip": ChipDistribution,
 }

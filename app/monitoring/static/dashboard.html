@@ -284,6 +284,34 @@
     </div>
   </section>
 
+  <section class="panel" id="acct-panel">
+    <h2>账户与交易时段 <span class="muted" id="acct-hint"></span></h2>
+    <div class="body">
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+        <span class="pill" id="acct-session">时段未知</span>
+        <span class="hint" id="acct-session-note"></span>
+        <span style="flex:1"></span>
+        <button id="btn-acct-refresh" class="mini">刷新</button>
+      </div>
+      <div class="table-wrap" style="margin-top:10px">
+        <table>
+          <thead><tr>
+            <th>账户</th><th>类型</th><th>网关</th>
+            <th class="num">本金</th><th class="num">可用</th>
+            <th class="num">持仓市值</th><th class="num">权益</th>
+            <th class="num">收益</th><th class="num">收益率</th>
+            <th>状态</th>
+          </tr></thead>
+          <tbody id="acct-rows"><tr><td colspan="10" class="muted">尚未读到账户</td></tr></tbody>
+        </table>
+      </div>
+      <p class="hint">这里的钱是<b>跨任务共享</b>的账本：策略各自那本账（任务级
+      <code>Portfolio</code>）用于计算自己的仓位，而这一栏是"这个账户到底还剩多少"。
+      内置虚拟账户走模拟网关，<b>永远不会把单子发到交易所</b>；
+      要真实交易需要显式配置 <code>mode=live</code> 的账户并以 LIVE 模式启动。</p>
+    </div>
+  </section>
+
   <section class="panel">
     <h2>组件 <span class="muted" id="comp-hint"></span></h2>
     <div class="body"><div id="components" class="comp-grid"></div></div>
@@ -1773,7 +1801,7 @@
       // 列表类只在没有交互时重绘
       if(!uiBusy()){
         renderTasks(o); renderAudit(o);
-        if(PAGE === 'live') loadLive();
+        if(PAGE === 'live'){ loadLive(); loadAccounts(); }
       }
       // 抽屉只在**它没被打开时**静默预热；打开了就别碰，
       // 用户正在读，重绘会把它拽回顶部并丢掉滚动位置
@@ -1927,6 +1955,9 @@
     if(mdel){ doDeleteMaintJob(mdel); return; }
 
     if(b.id === 'btn-rt-maint-add'){ doAddMaintJob(); return; }
+
+    // ---- 账户 ----
+    if(b.id === 'btn-acct-refresh'){ loadAccounts(); return; }
 
     // ---- 实盘操作 ----
     if(b.id === 'btn-reconcile'){
@@ -2206,6 +2237,70 @@
       toast(REFRESH>0 ? ('刷新间隔 ' + (REFRESH/1000) + 's') : '已暂停自动刷新');
     }
   });
+
+
+  // ==================== 账户面板 ====================
+  // 与「实盘账户」那块刻意分开：那一栏是**券商回给我的**（外部事实，
+  // 可能读不到、可能滞后），这一栏是**本地记的**（我们自己写的资金账本）。
+  // 两者不一致是常态且必须看得见 —— 把它们混在一张表里的结果是
+  // "到底哪个数字才是真的"永远没有答案。
+  function renderAccounts(d){
+    var ok = !!(d && d.ok);
+    var rows = (d && d.accounts) || [];
+    var ses = (d && d.session) || {};
+    var labelMap = {
+      pre_open: '盘前', open: '交易中', lunch: '午休',
+      post_close: '收盘结算中', closed: '已闭市', holiday: '非交易日',
+    };
+    var stateName = labelMap[ses.state] || (ses.state || '未知');
+    var pill = $('acct-session');
+    pill.textContent = '时段: ' + stateName + (ses.tradable ? ' · 可交易' : ' · 不可交易');
+    pill.className = 'pill ' + (ses.tradable ? 'ok' : (ses.state ? '' : 'warn'));
+    $('acct-session-note').textContent = ses.tradable
+      ? '此刻允许下单'
+      : (ses.state ? '此刻风控会拒绝新开仓（trading_session 规则）' : '尚未读到时段');
+
+    if(!ok){
+      $('acct-hint').textContent = (d && d.reason) ? ('读取失败: ' + d.reason) : '(不可用)';
+      $('acct-rows').innerHTML = '<tr><td colspan="10" class="muted">' +
+        esc((d && d.reason) || '账户服务不在场') + '</td></tr>';
+      return;
+    }
+    $('acct-hint').textContent = rows.length + ' 个账户 · 权益 ' +
+      money((d && d.total_equity) || 0) +
+      ((d && d.default_account_id) ? (' · 默认 ' + d.default_account_id) : '');
+    if(!rows.length){
+      $('acct-rows').innerHTML = '<tr><td colspan="10" class="muted">' +
+        '库里还没有账户（内置虚拟账户会在账户服务启动时自动创建）</td></tr>';
+      return;
+    }
+    $('acct-rows').innerHTML = rows.map(function(a){
+      var pct = a.pnl_pct;
+      return '<tr>' +
+        '<td>' + esc(a.account_id) + (a.builtin ? ' <span class="pill">内置</span>' : '') +
+          '<div class="hint">' + esc(a.name || '') + '</div></td>' +
+        '<td>' + (a.mode === 'live'
+            ? '<span class="pill err">实盘</span>'
+            : '<span class="pill">虚拟</span>') + '</td>' +
+        '<td>' + esc(a.gateway || '-') + '</td>' +
+        '<td class="num">' + money(a.initial_cash) + '</td>' +
+        '<td class="num">' + money(a.cash) + '</td>' +
+        '<td class="num">' + money(a.market_value) + '</td>' +
+        '<td class="num">' + money(a.equity) + '</td>' +
+        '<td class="num ' + (((a.pnl)||0) >= 0 ? 'up' : 'down') + '">' + money(a.pnl) + '</td>' +
+        '<td class="num ' + (((a.pnl)||0) >= 0 ? 'up' : 'down') + '">' +
+          (pct === null || pct === undefined ? '—' : (pct*100).toFixed(2) + '%') + '</td>' +
+        '<td>' + esc(a.status || '-') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function loadAccounts(){
+    return api('/api/accounts').then(renderAccounts).catch(function(e){
+      var el = $('acct-hint');
+      if(el) el.textContent = '读取失败: ' + e.message;
+    });
+  }
 
   // ==================== 实盘账户面板 ====================
   function renderLive(d){
@@ -4760,6 +4855,7 @@
       // 回测页 3 秒刷一次足够：作业是分钟级的
       btTimer = setInterval(loadBacktest, 3000);
     }
+    if(page === 'live'){ loadAccounts(); }
     if(page === 'pool'){ loadPool(); loadCalendar(); loadWatchlist(); }
     if(page === 'factor'){ loadFactors(); loadSchedule(); }
     if(page === 'strategy'){

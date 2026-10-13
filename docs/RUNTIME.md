@@ -153,6 +153,46 @@ main.py:20  cli()
 **关键点**：被风控否决的信号**不会消失**——`_reject`（`task.py:387-404`）仍然
 造一条 `REJECTED` 订单并发出事件，所以事后能查到"当时为什么没成交"。
 
+#### 账户账本：`AccountService`（`app/modules/account/service.py`）
+
+上面第 ⑥ 步"入账"过去只发生在**内存里的任务级 `Portfolio`** 上 ——
+进程一重启，账户余额就跟着没了。`AccountService` 把这一侧落到
+`broker_account` / `account_position` 两张表，并内置一个虚拟账户
+（`virtual-default`，初始 10 万），让"能下单"和"有钱可下"分成两件事。
+
+```
+AccountService.on_initialize
+  ├─ ensure_virtual_account()             # 幂等建/读虚拟账户
+  ├─ subscribe(trade.order.filled)  → _on_filled   # 按 side/price/size 增量记账
+  └─ subscribe(system.market.session.changed)
+        └─ _refresh_session()  → trade.session.opened / closed
+```
+
+三条记账纪律（都在 `app/account/store.py` 文件头）：
+
+1. `initial_cash` **只在新建时写一次**。运行中被改成"当前现金"，
+   历史收益率就全成了谎言 —— 分母变了。
+2. 改经费走**加法** `apply_fill(...)`，不要 `set_cash(...)`。
+   两笔成交几乎同时回来时，赋值写法会让后到的那笔覆盖前一笔。
+3. 读失败**宁可抛错**，也不要默默按 0 处理。余额显示成 0 会让人以为
+   "没钱了所以没下单"，而真相是"读不到"。
+
+**已知边界（本轮有意未打通）**：任务级 `Portfolio`（`strategy` 池内每个任务
+一本账）与 `broker_account`（库里这一本）目前**互不约束** ——
+下单额度仍由任务链自己管，钱包只是先把"钱在哪、现在多少"这一侧如实记下来。
+把两者接成同一个额度来源需要改 `QuantTask._process_signal` 的 quota 环节，
+属于下一步，在 `service.py` 文件头已写明。
+
+#### 交易时段风控：`trading_session`
+
+`config/tasks.json` 的全局 `risk` 链默认启用 `trading_session`：
+白名单 `open / lunch / post_close`，其余状态（含 `holiday`）一律否决。
+日历读不到时**放行** —— 一个"因为日历接口挂了所以全天禁止交易"的风控
+比没有风控更糟。离线回放时给该规则加 `allow_outside_hours: true` 即可关掉。
+
+熔断（`RiskService.halt/resume`）现在会发 `risk.halted` / `risk.resumed`：
+熔断是**全场状态变化**，只打日志的话别的组件只能靠轮询去发现它。
+
 ### 2.2 历史采集链路（`CollectionService`，三单元合一）
 
 服务入口 `collection.py:284-287` 初始化三个单元，`:290-296` 按

@@ -26,7 +26,7 @@
     ],
     "capacities": {
       "system": 2,
-      "market": 5,
+      "market": 3,
       "research": 2,
       "strategy": 1,
       "trading": 1,

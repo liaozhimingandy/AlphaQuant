@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 
 from app.common.config import settings
 from app.engine.engine import BaseQuantEngine
+from app.modules.account.service import AccountService
 from app.domain.types import RunMode
 from app.modules.collection.service import CollectionService
 from app.modules.market.service import MarketService
@@ -172,6 +173,10 @@ def build_engine(
     with_worker: Optional[bool] = None,
     worker_capacity: Optional[int] = None,
     risk_rules: Optional[List[Dict[str, Any]]] = None,
+    enable_risk: Optional[bool] = None,
+    enable_trading: Optional[bool] = None,
+    enable_account: Optional[bool] = None,
+    account_initial_cash: Optional[float] = None,
     **engine_kwargs: Any,
 ) -> BaseQuantEngine:
     """按配置装配一台引擎。
@@ -183,7 +188,8 @@ def build_engine(
     ========  ============================================
     调度      ``SchedulerComponent``
     服务      ``RiskService`` / ``CollectionService`` /
-              ``MarketService`` / ``TradingService`` / ``NewsService``
+              ``MarketService`` / ``TradingService`` /
+              ``AccountService`` / ``NewsService``
     策略      ``StrategyComponent``
     工作单元  ``WorkerComponent``
     观测      ``MonitorWebComponent``
@@ -235,7 +241,14 @@ def build_engine(
     # 服务层
     # ============================================================
     # 1) 风控服务（要在策略组件之前就绪：策略初始化时就把闸门发给任务运行时）
-    risk_service = RiskService(rules=risk_rules or cfg.get("risk") or [])
+    #
+    #    默认开启，且它**不是"配了规则才有用"**：即使一条规则都没配，
+    #    熔断（halt）依然生效 —— 没配规则只代表"没有自动判断的闸门"，
+    #    不代表"不需要一键停手的能力"。
+    risk_service = RiskService(
+        rules=risk_rules or cfg.get("risk") or [],
+        enabled=(settings.RISK_ENABLED if enable_risk is None else bool(enable_risk)),
+    )
     engine.register_component(risk_service)
 
     # 2) 组合服务：账户级聚合视图 + 跨任务额度预留。
@@ -350,9 +363,35 @@ def build_engine(
         endpoint_id=broker_endpoint or "",
         gateway_enabled=(run_mode == RunMode.LIVE),
         store_enabled=enable_store,
+        enabled=(settings.TRADING_ENABLED if enable_trading is None
+                 else bool(enable_trading)),
         engine=engine,
     )
     engine.register_component(trade)
+
+    # 5.5) 账户服务：钱记在哪儿。
+    #
+    #    它独立于交易服务存在，是因为两者的"事实"不是一回事：
+    #    交易服务管**订单**（这一笔有没有发出去、有没有成交），
+    #    账户服务管**钱**（这个账户还剩多少、峰值到过多少）。
+    #    订单可以查、可以补；钱的数字一旦写错，没有任何日志能还原它。
+    #
+    #    内置虚拟账户在这里被确保存在 —— 于是"下单 → 成交 → 扣钱 → 风控"
+    #    这条链路从第一分钟起就是完整的、每天被真实走一遍的，
+    #    而不需要先去接券商。
+    want_account = (settings.ACCOUNT_ENABLED if enable_account is None
+                    else bool(enable_account))
+    if want_account:
+        engine.register_component(
+            AccountService(
+                initial_cash=(settings.ACCOUNT_INITIAL_CASH
+                              if account_initial_cash is None
+                              else float(account_initial_cash)),
+                session_poll_seconds=settings.ACCOUNT_SESSION_POLL,
+                gateway=settings.ACCOUNT_GATEWAY,
+                endpoint_id=settings.ACCOUNT_ENDPOINT,
+            )
+        )
 
     # 6) 资讯服务（可选）
     enable_news = settings.NEWS_ENABLED if with_news is None else with_news

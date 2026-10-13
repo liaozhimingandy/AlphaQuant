@@ -303,6 +303,31 @@ class Settings:
     #: 特征缓存时间（秒）。打分要遍历候选池，不缓存会打爆数据库。
     EXT_FEATURE_TTL: float = _env_float("EXT_FEATURE_TTL", 300.0)
 
+    # ---------------- 账户（资金账本 + 内置虚拟账户）----------------
+    # 账户服务负责"钱记在哪儿"这件事：确保存在一个内置虚拟账户、
+    # 维护它的余额与持仓快照、在收盘后固化当天的资金事实。
+    ACCOUNT_ENABLED: bool = _env_bool("ACCOUNT_ENABLED", True)
+    #: 虚拟账户的本金。**只在账户首次创建时生效**（之后改它不会改变已跑的钱），
+    #: 否则"把本金改大"就变成了一种篡改历史收益率的手法。
+    ACCOUNT_INITIAL_CASH: float = _env_float("ACCOUNT_INITIAL_CASH", 100_000.0)
+    #: 交易时段轮询间隔（秒）。决定"的服务要花多久才发现开盘了"；
+    #: 30 秒是个平衡点 —— 1 秒会白白空转，5 分钟则迟到半天。
+    ACCOUNT_SESSION_POLL: float = _env_float("ACCOUNT_SESSION_POLL", 30.0)
+    #: 虚拟账户走的网关/接入点。保持 simulated 是**刻意的**：
+    #: 它保证这条链路永远不会把单子发到交易所。
+    ACCOUNT_GATEWAY: str = os.getenv("ACCOUNT_GATEWAY", "simulated")
+    ACCOUNT_ENDPOINT: str = os.getenv("ACCOUNT_ENDPOINT", "")
+
+    # ---------------- 风控服务 ----------------
+    # 关掉 = 所有信号直接放行且熔断失效。默认必须开：
+    # 一个没有闸门的系统，"它最多会亏多少"是没有答案的。
+    RISK_ENABLED: bool = _env_bool("RISK_ENABLED", True)
+
+    # ---------------- 交易服务 ----------------
+    # 交易服务**独立于实盘模式**：关模式下它只落库不连网关，
+    # 所以"能不能订下令可追溯"与"敢不敢真下单"是两件事，各自有开关。
+    TRADING_ENABLED: bool = _env_bool("TRADING_ENABLED", True)
+
     # ---------------- 实盘 ----------------
     # 默认撮合模式：simulated（本地模拟）/ live（真实券商网关）
     EXECUTION_MODE: str = os.getenv("EXECUTION_MODE", "simulated").lower()

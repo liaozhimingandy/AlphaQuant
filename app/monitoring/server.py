@@ -37,6 +37,7 @@ from app.monitoring.api.backtest import get_backtest_service
 from app.monitoring.snapshot import SnapshotStore, content_fingerprint
 
 from app.monitoring.api.overview import OverviewViewsMixin
+from app.monitoring.api.accounts import AccountViewsMixin
 from app.monitoring.api.live import LiveViewsMixin
 from app.monitoring.api.brokers import BrokerViewsMixin
 from app.monitoring.api.factors import FactorViewsMixin
@@ -47,7 +48,7 @@ from app.monitoring.api.backtest import BacktestViewsMixin
 from app.monitoring.resource import MonitorResource  # noqa: F401  对外再导出
 
 # MonitorWebComponent 里方法被调用的顺序（MRO）：先各视图 mixin，最后 IBaseComponent。
-class MonitorWebComponent(OverviewViewsMixin, LiveViewsMixin, BrokerViewsMixin, FactorViewsMixin, PoolViewsMixin, CollectViewsMixin, StrategyViewsMixin, BacktestViewsMixin, IBaseComponent):
+class MonitorWebComponent(OverviewViewsMixin, AccountViewsMixin, LiveViewsMixin, BrokerViewsMixin, FactorViewsMixin, PoolViewsMixin, CollectViewsMixin, StrategyViewsMixin, BacktestViewsMixin, IBaseComponent):
     name = "monitor"
 
     # ============================================================

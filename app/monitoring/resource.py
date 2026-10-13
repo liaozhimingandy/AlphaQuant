@@ -88,7 +88,8 @@ class MonitorResource(Resource):
                 "/api/logs", "/api/snapshots", "/api/audit", "/api/health",
                 "/api/collector", "/api/dataguard", "/api/providers",
                 "/api/runtime", "/api/maintenance", "/api/schedules", "/api/logging",
-                "/api/journal", "/api/preflight",
+                "/api/journal", "/api/preflight", "/api/accounts", "/api/session",
+                "/api/profile",
                 "/api/ledger", "/api/task?id=", "/api/engine_tasks?id=", "/api/events",
                 "/api/watchlist",
             ]})
@@ -183,6 +184,15 @@ class MonitorResource(Resource):
             return self._json(request, c.control.preflight_view())
         if head == "collector":
             return self._json(request, c.control.collector_status())
+        if head == "accounts":
+            # 账户：钱记在哪儿、还剩多少、现在能不能下单
+            return self._json(request, c.accounts_view())
+        if head == "session":
+            # 交易时段：现在能不能下单，以及"为什么"
+            return self._json(request, c.session_view())
+        if head == "profile":
+            # 标的主表：覆盖了多少只票、多少只还缺上市日期
+            return self._json(request, c.profile_view())
         if head == "watchlist":
             # 关注标的：清单 + 默认频率配置 + 服务运行状态。
             # 这张清单**不依赖采集服务有没有装配** —— 它在库里，
@@ -560,6 +570,47 @@ class MonitorResource(Resource):
                 body.get("sync"),
                 body.get("symbols") or None,
                 body.get("exclusions") or None,
+            ))
+
+        # POST /api/profile/sync —— 标的主表同步（联网，经调度器分配）
+        if seg[1] == "profile" and len(seg) >= 3 and seg[2] == "sync":
+            return self._json(request, c.control.dispatch_task(
+                "stock.profile.sync",
+                {"force": bool(body.get("force")),
+                 "individual_limit": int(body.get("individual_limit") or 0)},
+                dedup_key="stock.profile.sync",
+            ))
+
+        # POST /api/kline/(intraday|post_close|gap_scan) —— 手动触发三班 K 线任务。
+        # 与定时任务走**同一条**代码路径（同一个 task_type、同一批处理器），
+        # 于是"手动点一下"和"定时器到点"的行为完全一致 ——
+        # 若手动另起一条路，就会出现"定时跑有问题、手动跑却是好的"这种
+        # 完全无法解释的现象。
+        if seg[1] == "kline" and len(seg) >= 3:
+            op = seg[2]
+            mapping = {
+                "intraday": "market.kline.intraday",
+                "post_close": "market.kline.post_close",
+                "gap_scan": "market.kline.gap_scan",
+            }
+            if op not in mapping:
+                return self._json(request, {"ok": False,
+                                            "error": f"未知操作: {op}"}, 400)
+            params = {
+                "source": str(body.get("source") or ""),
+                "limit": int(body.get("limit") or 0),
+                "lookback_days": int(body.get("lookback_days") or 0),
+                "symbols": list(body.get("symbols") or []),
+            }
+            if op == "gap_scan":
+                params.update({
+                    "auto_repair": bool(body.get("auto_repair", True)),
+                    "use_pool": bool(body.get("use_pool", True)),
+                    "max_symbols": int(body.get("max_symbols") or 0),
+                    "max_repair": int(body.get("max_repair") or 0),
+                })
+            return self._json(request, c.control.dispatch_task(
+                mapping[op], {k: v for k, v in params.items() if v not in ("", 0, [])},
             ))
 
         # POST /api/collector/(now|interval|add|remove|reload)

@@ -115,6 +115,12 @@ class Cap:
     # —— 风控 ——
     RISK_GATE = "risk.gate"             # 下单前拦截/放行/改量
 
+    # —— 账户 ——
+    #: **账户账本**（跨任务共享的"这个账户有多少钱"）。
+    #: 与 :attr:`ACCOUNT_VIEW` 的区别必须记住：后者是 "把各任务的账本聚合
+    #: 出来看看"，是**只读聚合**；这里是"钱真正记在哪儿"，是**可写的事实来源**。
+    ACCOUNT_LEDGER = "account.ledger"
+
     # —— 组合 ——
     ACCOUNT_VIEW = "portfolio.view"     # 账户级聚合视图（全账户资金/持仓/回撤）
     QUOTA_RESERVE = "portfolio.quota"   # 跨任务下单额度预留（治并发超限）

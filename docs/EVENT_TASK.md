@@ -98,9 +98,9 @@ app/runtime/
 | 分类 | 事件 |
 |---|---|
 | **生命周期** | `engine.started` `engine.ready` `engine.stopping` `engine.stopped` `engine.recovery.requested` |
-| **数据与质量** | `data.collection.requested` `market.bar.received` `market.tick.received` `market.kline.updated` `market.kline.gap_detected` `market.data.validated` `news.article.collected` `news.sentiment.updated` `fundamental.data.updated` |
+| **数据与质量** | `data.collection.requested` `market.bar.received` `market.tick.received` `market.kline.updated` `market.kline.gap_detected` `market.data.validated` `news.article.collected` `news.sentiment.updated` `fundamental.data.updated` `stock.profile.updated` |
 | **因子与策略** | `factor.calculation.requested` `factor.snapshot.updated` `strategy.run.requested` `strategy.run.completed` `strategy.signal.generated` `universe.updated` |
-| **交易与风控** | `risk.check.requested` `risk.check.approved` `risk.check.rejected` `trade.order.requested` `trade.order.created` `trade.order.submitted` `trade.order.filled` `trade.order.failed` `trade.order.cancelled` `trade.position.updated` `trade.account.updated` `risk.limit.breached` |
+| **交易与风控** | `risk.check.requested` `risk.check.approved` `risk.check.rejected` `trade.order.requested` `trade.order.created` `trade.order.submitted` `trade.order.filled` `trade.order.failed` `trade.order.cancelled` `trade.position.updated` `trade.account.updated` `trade.session.opened` `trade.session.closed` `account.created` `account.updated` `risk.halted` `risk.resumed` `risk.limit.breached` |
 | **任务与执行** | `task.created` `task.queued` `task.started` `task.completed` `task.failed` `task.retry.scheduled` `task.dead_lettered` `executor.registered` `executor.heartbeat.missed` `executor.capacity.changed` |
 | **异常与运维** | `system.dependency.unavailable` `system.engine.error` `system.database.degraded` `system.event.publish.failed` `system.market.session.changed` `system.data.staleness.detected` `system.maintenance.due` |
 
@@ -334,6 +334,23 @@ scheduler 定时器 ──每 30s──> system.maintenance.tick
 | `archive` 快照归档 | **停用** | 每天 03:40 | `before_hours=720`（30 天）、`apply=false` |
 | `validate` 运行校验 | 启用 | **引擎启动时** | — |
 | `dead_history` 死信历史清理 | 启用 | 每天 04:10 | `retention_days=30`、`keep=200`、`apply=true` |
+| `kline_intraday` 盘中 K 线刷新 | 启用 | 每 15 分钟（**仅交易时段**） | `source=flow`、`limit=30`、`lookback_days=10` |
+| `kline_post_close` 盘后 K 线同步 | 启用 | 每天 17:30 | `lookback_days=30`（`limit=0` = 主表全量兜底） |
+| `kline_gap_scan` K 线缺口体检 | 启用 | 每天 05:30 | `use_pool=false`、`lookback_days=120`、`max_symbols=200`、`max_repair=30` |
+| `stock_profile` 标的主表同步 | 启用 | 每天 08:30 | `individual_limit=50` |
+| `account_settle` 账户收盘清算 | 启用 | 每天 18:00 | — |
+| `pool_refresh` 候选池刷新 | 启用 | 每 10 分钟（仅交易时段） | `source=flow`、`limit=30` |
+
+后五条是**业务运维**，和前面四条" housekeeping"的分界线在于：它们**会联网、
+会产生数据**，所以周期一旦配错，代价不是"多清了几个文件"，而是
+"被数据源限流"或"整天的 K 线都缺"。两个约束因此是硬性的：
+
+1. 会联网的任务**必须**带 `trading_hours_only`（`kline_intraday` 就是这样），
+   否则休市日每个整点都会朝数据源打一批请求，换回一堆"今天没有数据"；
+2. 盘后类任务反而**不能**开 `trading_hours_only` ——
+   盘后同步恰恰是在闭市之后跑的，套用"必须在交易时段"的检查会让它
+   **永远跑不起来**。这两个默认值相反是刻意的，理由写在
+   `app/modules/collection/pool_kline.py` 的 docstring 里。
 
 `dead_history` 是唯一默认 `apply=true` 的清理：它清的**只是已处置**的死信
 处置记录（数据库行，未处置的一条不动，最新 `keep` 条永远保留），
@@ -403,6 +420,57 @@ cron 由 `app/runtime/cron.py` 自己实现（零依赖，不为 5 段表达式�
   直接拒绝保存，不让危险配置有机会落到执行器里。
 - 保留天数用 `params.get(k); 7 if v is None else int(v)` 取值 ——
   不能写 `or 7`，否则配错的"保留 0 天"会被悄悄换成保留 7 天。
+
+#### K 线三班定时：同一个问题的三个时间切面
+
+`app/modules/collection/pool_kline.py` 用一个编排层覆盖了三条定时线：
+
+| 任务 | 目标 | 标的 | 窗口 | 联网策略 |
+|---|---|---|---|---|
+| 盘中刷新 `market.kline.intraday` | 让策略看到近况 | 候选池（少量） | 最近 10 个交易日 | **每轮都采** |
+| 盘后同步 `market.kline.post_close` | 当天收盘价定稿 | 主表全量兜底 | 缺的那一天 | **只补缺的** |
+| 缺口体检 `market.kline.gap_scan` | 历史别漏 | 主表全部 | 回溯 120 天 | 有缺口才连 |
+
+三者**共用一个 `_run_batch`**：调限速、改去重逻辑、改要不要跳过退市票都只有一处，
+不存在"三个定时任务的行为逐渐分叉"的风险。盘中与盘后的行为差异
+（每轮重采 vs 先查再采）不是疏漏 —— 盘中的那根 K 线在收盘前每几分钟就变一次，
+"查有没有"没有意义；盘后则相反，重采一遍等于把请求配额浪费在已有数据上。
+
+三条共有的纪律：
+
+1. **先查再采**。请求次数比 CPU 稀缺得多；
+2. **跳过不该有数据的票**。未上市 / 已退市的判断统一由
+   `stock_info_repo.filter_listed` 负责，绝不写第二套规则；
+3. **"无事可做"不算失败**。休市、候选池为空、全是最新 —— 这些都返回成功
+   并把理由写进报告。否则每个休市日都会有一批任务进死信队列，
+   而它们其实什么都没做错。
+
+#### 标的主表：上市日期为什么必须联网同步
+
+`stock_info` 表从"代码↔名称对照"升级成了标的主表（板块/行业/上市日期/是否退市/
+股本/来源）。新增列靠 `app/data/migrate.py` 在线 `ALTER TABLE ADD COLUMN` ——
+项目没有迁移框架，只改模型不补老库的话，表现是"测试全绿，一上老库就
+`no such column`"。
+
+上市日期**不能**用"库里第一根 K 线的日期"推导：一只 2007 年上市的老票
+2026 年才被纳入候选池，按那个算法它的上市日期会变成 2026 年，
+"上市首日至今"的所有统计全部错位。
+
+同步器 `app/modules/universe/profile.py` 是三条腿降级：
+
+```
+1. 全市场快照 stock_zh_a_spot_em   —— 铺面：拿到"有哪些票"，不带上市日期
+2. 逐交易所列表 sh/sz/bj           —— 补质：带上市日期，只覆盖自家交易所
+3. 个股资料 stock_individual_info_em —— 补漏：什么都有，但一次只能查一只票
+```
+
+每一步失败只损失那一步的信息，**前面的成果不回滚**（"部分可用"优于"全有或全无"）。
+同理，`save_profiles` 里 **None 不覆盖已有值** —— 分批到达的数据源不该互相擦除。
+
+板块一律由**代码前缀**推导（`classify_board`），交易所返回的板块标签只作兜底：
+上证接口按"主板A股 / 科创板"分两次调用，一旦某次改版让两次返回同一张清单，
+后一次就会把 600000 的板块从 `sh` 覆盖成 `kcb`。代码前缀是交易所的固定编码，
+永远不会变，所以让它当权威。
 
 ### 日志级别：运行中可切换
 

@@ -197,12 +197,29 @@ class RiskService(ServiceComponent):
         self._halt_at = self._now()
         self.stats["halts"] += 1
         logger.warning(f"🛑 风控熔断已触发 | {self._halt_reason}")
+        # 熔断是"全场状态变了"，必须进事件流。
+        # 只打日志的后果很具体：别的组件（面板、账户服务、告警）
+        # 想知道"现在是不是停手状态"只能去翻日志，或者去轮询一个内部字段 ——
+        # 而轮询出来的"状态"永远滞后于真实状态一步。
+        self._publish_halt("risk.halted", reason=self._halt_reason,
+                           at=self._halt_at)
 
     def resume(self, reason: str = "") -> None:
         self._halted = False
         self._halt_reason = ""
         self._halt_at = ""
         logger.warning(f"✅ 风控熔断已解除{(' | ' + reason) if reason else ''}")
+        self._publish_halt("risk.resumed", reason=str(reason or "手动解除"),
+                           at=self._now())
+
+    def _publish_halt(self, event_name: str, **payload: Any) -> None:
+        bus = getattr(self, "event_bus", None)
+        if bus is None:
+            return
+        try:
+            bus.publish(event_name, source="risk_service", **payload)
+        except Exception as exc:  # pragma: no cover - 事件失败不该影响熔断本身
+            logger.debug(f"发布熔断事件失败 {event_name}: {exc}")
 
     # ============================================================
     # 可观测

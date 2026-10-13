@@ -184,6 +184,99 @@ def handle_integrity_check(task: EngineTask, ctx: Any) -> Any:
     return svc.check_now(symbols)
 
 
+def _raise_if_all_failed(rep: Dict[str, Any], what: str) -> None:
+    """**全部**失败才判任务失败；一只都没轮到过时什么都不做。
+
+    区分三种"产出为零"，它们的处理必须不同：
+      * 无事可做（候选池空 / 休市 / 全都已是最新）→ 成功返回并把理由写进
+        报告。**这是常态**，休市的每一天都会遇到，若判失败则死信队列
+        会被噪声占满，真正需要处理的失败再也看不见；
+      * 采了十只、挂了一只 → 成功返回，失败明细留在 ``failed`` 里。
+        一颗老鼠屎不该坏一锅汤；
+      * 挂的那一批**全挂了** → 这基本等于"网络断了/数据源限流了"，
+        必须失败，让它进错误队列、可被人工重投。
+    """
+    failed = list(rep.get("failed") or [])
+    if failed and not int(rep.get("collected") or 0):
+        raise RuntimeError(
+            f"{what}整批失败：目标 {rep.get('requested')} 只，"
+            f"零成功 / {len(failed)} 只失败（如 "
+            f"{failed[0].get('symbol')}: {(failed[0].get('error') or '')[:60]}）"
+        )
+
+
+def handle_kline_intraday(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """盘中：定时刷新候选池标的的 K 线。
+
+    刻意**不要求** collection_service 在场：这三个 K 线编排是独立的函数
+    而不是服务的方法 —— 它们要能被 CLI 直接调用，也要能在"引擎没装配采集
+    服务"的最小部署里跑（比如只想先起个看板 + 定时任务）。
+    硬依赖某个组件只会把"能不能干活"和"装配了什么"绑在一起。
+    """
+    from app.modules.collection.pool_kline import refresh_intraday
+
+    params = dict(task.params or {})
+    bus = getattr(ctx, "bus", None) or getattr(_engine(ctx), "event_bus", None)
+    rep = refresh_intraday(
+        source=str(params.get("source") or ""),
+        limit=int(params.get("limit") or 0),
+        symbols=_symbols(task) or None,
+        lookback_days=int(params.get("lookback_days") or 0),
+        adjust=str(params.get("adjust") or "qfq"),
+        bus=bus,
+    )
+    # 业务性跳过 ≠ 失败。它是"此刻不该干活"，冒泡成异常只会让
+    # 定时任务在休市日一次次进死信，把真正该看的故障淹没掉。
+    if rep.get("skipped_reason"):
+        rep["ok"] = True
+    _raise_if_all_failed(rep, "盘中K线刷新")
+    return rep
+
+
+def handle_kline_post_close(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """盘后：同步当天 K 线（缺哪只补哪只）。"""
+    from app.modules.collection.pool_kline import sync_post_close
+
+    params = dict(task.params or {})
+    bus = getattr(ctx, "bus", None) or getattr(_engine(ctx), "event_bus", None)
+    rep = sync_post_close(
+        source=str(params.get("source") or ""),
+        limit=int(params.get("limit") or 0),
+        symbols=_symbols(task) or None,
+        lookback_days=int(params.get("lookback_days") or 0),
+        day=params.get("day") or "",
+        bus=bus,
+    )
+    if rep.get("skipped_reason"):
+        rep["ok"] = True
+    _raise_if_all_failed(rep, "盘后K线同步")
+    return rep
+
+
+def handle_kline_gap_scan(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """定期体检 K 线缺口（有缺口才联网补）。"""
+    from app.modules.collection.pool_kline import scan_gaps
+
+    params = dict(task.params or {})
+    bus = getattr(ctx, "bus", None) or getattr(_engine(ctx), "event_bus", None)
+    rep = scan_gaps(
+        source=str(params.get("source") or ""),
+        limit=int(params.get("limit") or 0),
+        symbols=_symbols(task) or None,
+        lookback_days=int(params.get("lookback_days") or 0),
+        auto_repair=bool(params.get("auto_repair", True)),
+        max_symbols=int(params.get("max_symbols") or 0),
+        max_repair=int(params.get("max_repair") or 0),
+        use_pool=bool(params.get("use_pool", True)),
+        bus=bus,
+    )
+    if not rep.get("ok"):
+        raise RuntimeError(
+            f"K线缺口体检失败：{rep.get('failed')}"
+        )
+    return rep
+
+
 # =============================================================================
 # 研究域
 # =============================================================================
@@ -317,6 +410,58 @@ def handle_pool_refresh(task: EngineTask, ctx: Any) -> Dict[str, Any]:
         # 候选池为空等"无结果"态：任务标记成功，结论写进 result 供面板读取
         return {"ok": False, "error": report["error"], "report": report}
     return {"ok": True, "report": report}
+
+
+def handle_stock_profile_sync(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """同步标的主表：全市场股票列表 + **上市日期** + 板块分类。
+
+    这份数据是后面所有 K 线任务的**前提**：不知道哪只票上市了，
+    "缺了几根 K 线"就分不清是漏采还是压根没上市。
+    所以它必须有自己的定时任务，而不是"等用到的时候再说"。
+    """
+    from app.modules.universe.profile import StockProfileSync
+
+    params = dict(task.params or {})
+    bus = getattr(ctx, "bus", None) or getattr(_engine(ctx), "event_bus", None)
+    try:
+        rep = StockProfileSync(
+            individual_limit=int(params.get("individual_limit") or 0) or 50,
+        ).sync(force=bool(params.get("force")))
+    except Exception as exc:  # 真实同步异常 → 失败 → 可重投
+        raise RuntimeError(f"标的主表同步失败: {exc}") from exc
+
+    if int(rep.get("written") or 0) == 0 and int(rep.get("rows") or 0) == 0:
+        # 一个交易所也没拿回来 —— 这基本等于"数据源整个不可用"。
+        # 与"全部已是最新所以跳过"不同（那种情况 rows 为 0 但 skipped=True），
+        # 这里必须判失败，否则主表永久空着而任务一直报成功。
+        if not rep.get("skipped"):
+            raise RuntimeError(
+                "标的主表同步未取回任何数据："
+                f"{[f.get('source') for f in (rep.get('failed') or [])]}"
+            )
+    # 让"主表更新了"这件事进入事件流：K线任务、股票池剔除、面板展示
+    # 都可能需要据此重算缓存，而不是各自轮询数据库。
+    if bus is not None and int(rep.get("written") or 0) > 0:
+        _publish(ctx, "stock.profile.updated", written=rep.get("written"),
+                 total=(rep.get("coverage") or {}).get("total", 0),
+                 sources=[s.get("source") for s in (rep.get("sources") or [])])
+    return rep
+
+
+def handle_account_settle(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """收盘清算：把账户的钱和票固化到表里。
+
+    为什么账户需要一个专门的任务来做这件事：
+      盘中最应该追求的是"下单快"，任何额外的写库都是延迟来源；
+      而收盘后最应该追求的是"账清楚"。两件事对延迟的容忍度相反，
+      就不该在同一个调用栈里争取同一个时间预算。
+    """
+    svc = _component(ctx, "account_service")
+    settle = getattr(svc, "settle", None)
+    if not callable(settle):
+        return {"ok": False, "settled": 0, "reason": "账户服务不在场"}
+    params = dict(task.params or {})
+    return settle(day=params.get("day") or "", note=str(params.get("note") or ""))
 
 
 def handle_collect_now(task: EngineTask, ctx: Any) -> Dict[str, Any]:
@@ -887,6 +1032,18 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
         "fn": handle_integrity_check,
         "description": "数据完整性体检",
     },
+    "market.kline.intraday": {
+        "fn": handle_kline_intraday,
+        "description": "盘中定时刷新候选池标的的 K 线",
+    },
+    "market.kline.post_close": {
+        "fn": handle_kline_post_close,
+        "description": "盘后同步当天 K 线（先查再补）",
+    },
+    "market.kline.gap_scan": {
+        "fn": handle_kline_gap_scan,
+        "description": "定期体检 K 线缺口并补采",
+    },
     "news.collect": {
         "fn": handle_news_collect,
         "description": "新闻采集",
@@ -906,6 +1063,10 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
     "pool.refresh": {
         "fn": handle_pool_refresh,
         "description": "刷新股票池（候选池来源＋资金流/筹码/基本面同步＋多维度打分）",
+    },
+    "stock.profile.sync": {
+        "fn": handle_stock_profile_sync,
+        "description": "同步标的主表（全市场代码/名称/上市日期/板块）",
     },
     "collect.now": {
         "fn": handle_collect_now,
@@ -930,6 +1091,10 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
     "trade.execute": {
         "fn": handle_trade_execute,
         "description": "风控放行后下单（不自动重试）",
+    },
+    "account.settle": {
+        "fn": handle_account_settle,
+        "description": "收盘清算：把资金/持仓/权益固化进账户表",
     },
     "maintenance.validate": {
         "fn": handle_maintenance_validate,
