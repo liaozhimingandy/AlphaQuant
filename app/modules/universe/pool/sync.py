@@ -25,7 +25,8 @@ import pandas as pd
 from app.providers.market.service import facade as MX
 from app.domain.symbol import normalize_symbol
 from app.data.repo import kline_repo as R
-from app.common.logging import log_throttled, logger
+from app.common.errors import StorageError
+from app.common.logging import log_throttled, logger, log_error, log_warning
 
 
 def _result(ok: int, failed: List[Tuple[str, str]],
@@ -51,15 +52,40 @@ def _flush(what: str, frames: List[Any], save_one: Any,
     失败退回逐条：批量写失败最常见的成因是其中某一行数据有问题，
     退回逐条至少保住"一只坏票不拖垮整批"这个原有语义，
     不会比改造前更差。
+
+    系统性存储故障要**上浮**：批量写挂、退回逐条也一行都写不进，
+    说明"写库这条路断了"（磁盘满 / 库锁 / 权限 / 连接断开），不是数据
+    问题。这种必须冒泡成 :class:`StorageError`，让上层任务处理器把它
+    判失败、进**错误队列**、可人工重放——否则会被静默吞掉，事后才发现
+    "昨天根本没存进数据"。
     """
     if not frames:
         return 0
+    ncols = len(frames[0].columns) if hasattr(frames[0], "columns") else 0
+    nframes = len(frames)
+    sample_syms = []
     try:
-        df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+        sample_syms = [str(f["symbol"].iloc[0]) for f in frames[:3]
+                       if hasattr(f, "columns") and "symbol" in f.columns]
+    except Exception:
+        pass
+    try:
+        df = frames[0] if nframes == 1 else pd.concat(frames, ignore_index=True)
         save_one(df)
-        return len(frames)
+        return nframes
     except Exception as exc:
-        logger.warning(f"{what} 批量落库失败，退回逐条写入: {exc}")
+        # 批量失败：记详细上下文（行数/列数/占位符数/样本标的/异常类型），
+        # 方便线上复现，而不是一句"落库失败"。
+        est_vars = ncols * nframes
+        log_error(
+            "storage",
+            f"{what} 批量落库失败，退回逐条写入",
+            exc=exc,
+            frames=nframes,
+            columns=ncols,
+            est_sql_vars=est_vars,
+            sample_symbols=sample_syms[:3],
+        )
         n = 0
         for one in frames:
             try:
@@ -72,6 +98,19 @@ def _flush(what: str, frames: List[Any], save_one: Any,
                 except Exception:
                     pass
                 failed.append((sym, f"落库失败: {exc2}"))
+        if n == 0 and nframes > 0:
+            # 批量 + 逐条都写不进 → 存储后端故障，上浮让任务进错误队列
+            raise StorageError(
+                f"{what} 落库全部失败（{nframes} 批 / 约 {est_vars} 变量），"
+                f"疑似存储后端故障: {type(exc).__name__}: {exc}"
+            ) from exc
+        if n < nframes:
+            log_warning(
+                "storage",
+                f"{what} 逐条落库部分成功",
+                saved=n, total=nframes,
+                failed_sample=[s for s, _ in failed[:3]],
+            )
         return n
 
 
@@ -136,7 +175,7 @@ def sync_fund_flow(symbols: Sequence[str], days: int = 60,
         sample = "; ".join(f"{s}→{r[:55]}" for s, r in failed[:5])
         more = f" 等{len(failed)}只" if len(failed) > 5 else ""
         log_throttled("WARNING",
-                      f"资金流同步有 {len(failed)} 只失败（已跳过）。样例: {sample}{more}",
+                      f"[fund_flow] 同步有 {len(failed)} 只失败（已跳过）。样例: {sample}{more}",
                       key="sync-fundflow-failed")
     return _result(ok, failed, skipped, f"库内已有 {target} 数据")
 

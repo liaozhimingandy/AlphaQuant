@@ -272,6 +272,103 @@ def handle_factor_calculate(task: EngineTask, ctx: Any) -> Dict[str, Any]:
     return {"invalidated": count, "day": day, "reason": params.get("reason") or ""}
 
 
+def handle_pool_refresh(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """刷新股票池：拉候选 → 同步资金流/筹码/基本面 → 多维度打分 → 落库。
+
+    为什么是"任务"而不是面板直接调
+    --------------------------------
+    之前股票池刷新是面板直接 ``StockPool().refresh()`` 在一个线程里跑，
+    只写了 control audit 一条内存记录 —— 既不进任务明细、也不进死信、
+    引擎重启也无从恢复。这与回测曾经的问题一致，现已对齐修法：
+    经调度器分配为 ``pool.refresh`` 任务，面板「任务明细」看得见、
+    失败可人工重投、崩溃可恢复。
+
+    处理器约定
+    ----------
+    同步跑（已站在研究池工作线程上，不要再开线程）。
+    候选池为空/剔除后为空属于"跑完了但没结果"，**返回结果**而非抛异常，
+    否则一个常态会无谓地进死信；真正的网络异常在 ``refresh`` 内被记录、
+    这里重新抛出让任务失败并进入错误队列。
+    """
+    from app.modules.universe.pool import StockPool
+
+    params = dict(task.params or {})
+    source = str(params.get("source") or "") or None
+    limit = params.get("limit")
+    do_sync = params.get("sync")
+    symbols = list(params.get("symbols") or []) or None
+    exclusions = params.get("exclusions")
+    force = params.get("force")
+
+    pool = StockPool()
+    try:
+        report = pool.refresh(
+            source=source,
+            limit=int(limit) if limit else None,
+            do_sync=None if do_sync is None else bool(do_sync),
+            symbols=symbols,
+            exclusions=exclusions if isinstance(exclusions, dict) else None,
+            force=bool(force),
+        )
+    except Exception as exc:  # 真实采集/打分异常 → 任务失败 → 死信
+        raise RuntimeError(f"股票池刷新失败: {exc}") from exc
+
+    if report.get("error"):
+        # 候选池为空等"无结果"态：任务标记成功，结论写进 result 供面板读取
+        return {"ok": False, "error": report["error"], "report": report}
+    return {"ok": True, "report": report}
+
+
+def handle_collect_now(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """全类别立即采集（指定标的）：量价 K 线 + 日频截面 + 舆情/宏观。
+
+    与 :func:`handle_pool_refresh` 同样的"走任务"理由：之前面板直接
+    ``deferToThread(collect_now)``，既不进任务明细、也不进错误队列。
+    现经调度器分配为 ``collect.now`` 任务，面板看得见、失败可重投。
+
+    存储后端故障（``StorageError``）来自 ``run_full_collection`` 内部、
+    不被这里捕获 → 任务判失败 → 进死信 → 可重放。
+    """
+    from app.modules.collection.service import run_full_collection
+
+    params = dict(task.params or {})
+    syms = list(params.get("symbols") or []) or None
+    cats = list(params.get("categories") or []) or None
+    return run_full_collection(syms, cats)
+
+
+def handle_collect_cross(task: EngineTask, ctx: Any) -> Any:
+    """定向采集：指定标的 × 指定类别（基本面/资金流/筹码/龙虎榜…）。
+
+    委托给采集服务的 ``collect_categories``（它自带并发护栏与进度上报），
+    返回 Deferred —— 处理器返回 Deferred 时，执行池会等它落地再判完成，
+    不会"函数返回了就当成成功"。存储故障已被服务内 ``StorageError`` 上浮，
+    这里不再吞，任务会进错误队列。
+    """
+    svc = _require(ctx, "collection_service", "定向采集")
+    syms = _symbols(task)
+    cats = list((task.params or {}).get("categories") or ["fundamental"])
+    return svc.collect_categories(syms, cats)
+
+
+def handle_collect_kline(task: EngineTask, ctx: Any) -> Dict[str, Any]:
+    """立即补采 K 线（指定标的，空 = 跟随采集服务配置）。
+
+    复用采集服务既有的 ``_run_kline_forced``，不另写一遍联网逻辑。
+    """
+    from app.domain.symbol import normalize_symbol
+
+    svc = _require(ctx, "collection_service", "K线补采")
+    symbol = str((task.params or {}).get("symbol") or "")
+    jobs = [
+        j for j in getattr(svc, "kline_spec", None).jobs or []
+        if j.enabled and (not symbol or j.symbol == normalize_symbol(symbol))
+    ]
+    if not jobs:
+        raise RuntimeError(f"没有匹配的采集任务: {symbol or '*'}")
+    return svc._run_kline_forced(jobs)
+
+
 # =============================================================================
 # 策略域
 # =============================================================================
@@ -805,6 +902,22 @@ DEFAULT_HANDLERS: Dict[str, Dict[str, Any]] = {
     "factor.calculate": {
         "fn": handle_factor_calculate,
         "description": "因子重算（失效缓存 + 推送快照事件）",
+    },
+    "pool.refresh": {
+        "fn": handle_pool_refresh,
+        "description": "刷新股票池（候选池来源＋资金流/筹码/基本面同步＋多维度打分）",
+    },
+    "collect.now": {
+        "fn": handle_collect_now,
+        "description": "全类别立即采集（指定标的）",
+    },
+    "collect.cross": {
+        "fn": handle_collect_cross,
+        "description": "定向采集（指定标的 × 指定类别）",
+    },
+    "collect.kline": {
+        "fn": handle_collect_kline,
+        "description": "立即补采 K 线",
     },
     "strategy.run": {
         "fn": handle_strategy_run,

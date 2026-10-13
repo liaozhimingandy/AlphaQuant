@@ -20,9 +20,12 @@ class CollectViewsMixin:
 
         用户选了一只新票，最想的是"马上看看它的因子长什么样"，
         而不是等下一个采集窗口。所以这里把所有类别都跑一遍。
+
+        实际逻辑抽到 ``collection.service.run_full_collection``，
+        面板任务处理器 ``handle_collect_now`` 也走同一份，避免两份实现漂移。
         """
         try:
-            from app.modules.universe.pool import sync_category
+            from app.modules.collection.service import run_full_collection
 
             syms = self._factor_symbols(symbols)
             if not syms:
@@ -30,62 +33,7 @@ class CollectViewsMixin:
             cats = [str(c) for c in (categories or [])] or [
                 "lhb", "margin", "forecast", "holders", "rating", "news",
             ]
-            report: Dict[str, Any] = {"ok": True, "symbols": syms, "detail": {}}
-
-            # 先采量价类（有行情才能算技术/表达式因子）
-            try:
-                from app.data.service import MarketDataService
-
-                rows = 0
-                for s in syms:
-                    info = MarketDataService.collect_incremental(
-                        s, lookback_days=365, adjust="qfq")
-                    rows += int(info.get("rows") or 0)
-                report["detail"]["daily"] = {"ok": len(syms), "rows": rows}
-            except Exception as exc:
-                report["detail"]["daily"] = {"ok": 0, "error": str(exc)[:120]}
-
-            # 再采日频截面
-            from app.modules.universe.pool import sync_chip, sync_fund_flow, sync_fundamentals
-
-            for label, fn in (("fundflow", lambda: sync_fund_flow(syms)),
-                              ("chip", lambda: sync_chip(syms)),
-                              ("fundamental", lambda: sync_fundamentals(syms))):
-                try:
-                    r = fn()
-                    report["detail"][label] = {
-                        "ok": r.get("ok", 0),
-                        "failed": (r.get("failed") or [])[:5],
-                    }
-                except Exception as exc:
-                    report["detail"][label] = {"ok": 0, "error": str(exc)[:120]}
-
-            for cat in cats:
-                try:
-                    r = sync_category(cat, syms)
-                    report["detail"][cat] = {
-                        "ok": r.get("ok", 0),
-                        "failed": (r.get("failed") or [])[:5],
-                    }
-                except Exception as exc:
-                    report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
-
-            # 市场级
-            for cat in ("macro", "breadth"):
-                try:
-                    r = sync_category(cat)
-                    report["detail"][cat] = {"ok": r.get("ok", 0)}
-                except Exception as exc:
-                    report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
-
-            # 采完必须失效特征缓存，否则界面上看到的还是旧值
-            try:
-                from app.modules.factor.features import get_provider
-
-                get_provider().invalidate()
-            except Exception:
-                pass
-            return report
+            return run_full_collection(syms, cats)
         except Exception as exc:
             logger.error(f"即时采集失败: {exc}", exc_info=True)
             return {"ok": False, "error": str(exc)}

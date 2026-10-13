@@ -62,6 +62,7 @@ from app.modules.collection.integrity import DataIntegrityChecker, IntegrityRepo
 from app.runtime.event_bus import StandardEvents
 from app.domain.symbol import DataFetchError, normalize_symbol
 from app.common.config import settings
+from app.common.errors import StorageError
 from app.common.logging import log_throttled, logger
 
 
@@ -575,6 +576,11 @@ class CollectionService(ServiceComponent):
                         r = sync_fundamentals(symbols)
                     else:
                         r = sync_category(cat, symbols)
+                except StorageError:
+                    # 存储后端故障（磁盘满/库锁/权限）必须上浮：
+                    # 这一轮定向采集已无意义，且应让调度器把任务判失败、
+                    # 进错误队列、可人工重放，而不是每条都静默记"error"。
+                    raise
                 except Exception as exc:
                     # 一个类别挂了不该让整轮中断：想看基本面，
                     # 龙虎榜没数据不影响结论。
@@ -1594,4 +1600,86 @@ def parse_interval(value: Any, min_interval: float = 15.0) -> float:
     return max(parse_frequency(value, floor), floor)
 
 
-__all__ = ["CollectionService", "parse_interval"]
+def run_full_collection(symbols: Optional[Sequence[str]] = None,
+                        categories: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """全类别立即采集（指定标的）：量价 K 线 + 日频截面 + 舆情/宏观。
+
+    抽成模块级函数，让「任务处理器 ``handle_collect_now``」与「API 混合类
+    ``CollectViewsMixin.collect_now``」共用同一份逻辑，避免两份实现漂移。
+
+    约定：**数据问题**（某只票退市、接口抽风）就地记进 ``report["detail"]``，
+    不中断整轮；但**存储后端故障**（:class:`StorageError`）必须上浮 ——
+    由调用方（任务处理器）判失败、进错误队列、可重放。
+    """
+    syms = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+    cats = [str(c).strip() for c in (categories or [])] or [
+        "lhb", "margin", "forecast", "holders", "rating", "news",
+    ]
+    report: Dict[str, Any] = {"ok": True, "symbols": syms, "detail": {}}
+
+    # 先采量价类（有行情才能算技术/表达式因子）
+    try:
+        from app.data.service import MarketDataService
+        from app.domain.symbol import normalize_symbol
+
+        rows = 0
+        for s in syms:
+            info = MarketDataService.collect_incremental(
+                normalize_symbol(s), lookback_days=365, adjust="qfq")
+            rows += int(info.get("rows") or 0)
+        report["detail"]["daily"] = {"ok": len(syms), "rows": rows}
+    except StorageError:
+        raise
+    except Exception as exc:
+        report["detail"]["daily"] = {"ok": 0, "error": str(exc)[:120]}
+
+    # 再采日频截面
+    from app.modules.universe.pool import (
+        sync_category, sync_chip, sync_fund_flow, sync_fundamentals,
+    )
+    for label, fn in (("fundflow", lambda: sync_fund_flow(syms)),
+                      ("chip", lambda: sync_chip(syms)),
+                      ("fundamental", lambda: sync_fundamentals(syms))):
+        try:
+            r = fn()
+            report["detail"][label] = {
+                "ok": r.get("ok", 0),
+                "failed": (r.get("failed") or [])[:5],
+            }
+        except StorageError:
+            raise
+        except Exception as exc:
+            report["detail"][label] = {"ok": 0, "error": str(exc)[:120]}
+
+    for cat in cats:
+        try:
+            r = sync_category(cat, syms)
+            report["detail"][cat] = {
+                "ok": r.get("ok", 0),
+                "failed": (r.get("failed") or [])[:5],
+            }
+        except StorageError:
+            raise
+        except Exception as exc:
+            report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
+
+    # 市场级
+    for cat in ("macro", "breadth"):
+        try:
+            r = sync_category(cat)
+            report["detail"][cat] = {"ok": r.get("ok", 0)}
+        except StorageError:
+            raise
+        except Exception as exc:
+            report["detail"][cat] = {"ok": 0, "error": str(exc)[:120]}
+
+    # 采完必须失效特征缓存，否则界面上看到的还是旧值
+    try:
+        from app.modules.factor.features import get_provider
+        get_provider().invalidate()
+    except Exception:
+        pass
+    return report
+
+
+__all__ = ["CollectionService", "parse_interval", "run_full_collection"]

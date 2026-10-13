@@ -322,6 +322,61 @@ def throttle_stats() -> Dict[str, int]:
         }
 
 
+# ===========================================================================
+# 分类日志：报错类要"带标签 + 带复现上下文"
+# ===========================================================================
+# 用户排查线上问题的核心诉求：报错日志不能只是一句"同步失败"，
+# 要能看出"哪条链路、什么异常类型、涉及哪些标的、当时的关键参数"，
+# 否则只能靠猜。这里把"分类 + 结构化上下文"做成一等公民。
+def _fmt_ctx(ctx: Dict[str, Any]) -> str:
+    if not ctx:
+        return ""
+    try:
+        body = json.dumps(ctx, ensure_ascii=False, default=str)
+    except Exception:
+        body = str(ctx)
+    if len(body) > 600:
+        body = body[:600] + "…"
+    return " | ctx=" + body
+
+
+def log_error(category: str, message: str, *,
+              exc: Optional[BaseException] = None, **ctx: Any) -> None:
+    """记录一条**错误类**日志：带分类标签 + 异常类型 + 复现上下文。
+
+    :param category: 业务分类，如 ``fund_flow`` / ``storage`` / ``collect`` /
+        ``scheduler``，便于在日志里按链路过滤。
+    :param message: 一句话结论。
+    :param exc: 原始异常（有则额外记 ``exc_type=...`` 并带堆栈）。
+    :param ctx: 复现上下文（symbols / count / 变量数 / 参数…），落进日志正文。
+    """
+    text = f"[{category}] {message}"
+    if exc is not None:
+        text += f" | exc_type={type(exc).__name__}: {exc}"
+    text += _fmt_ctx(ctx)
+    if exc is not None:
+        # 用 .opt(exception=exc) 挂堆栈，且**不**把 exc 当 format 参数，
+        # 否则含 { } 的 ctx 正文会被 loguru 当成占位符而 KeyError。
+        logger.opt(exception=exc).error(text)
+    else:
+        logger.error(text)
+
+
+def log_warning(category: str, message: str, *,
+                exc: Optional[BaseException] = None, **ctx: Any) -> None:
+    """记录一条**告警类**日志：同样带分类标签与上下文（不附完整堆栈）。"""
+    text = f"[{category}] {message}"
+    if exc is not None:
+        text += f" | exc_type={type(exc).__name__}: {exc}"
+    text += _fmt_ctx(ctx)
+    logger.warning(text)
+
+
+def log_info(category: str, message: str, **ctx: Any) -> None:
+    """记录一条**信息类**日志：带分类标签，便于在长日志里按链路定位。"""
+    logger.info(f"[{category}] {message}{_fmt_ctx(ctx)}")
+
+
 def reset_throttle() -> None:
     """仅供测试使用。"""
     with _THROTTLE_LOCK:

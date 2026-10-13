@@ -1889,7 +1889,7 @@
     }
     // ---- 股票池 ----
     if(b.id === 'btn-pool-refresh'){
-      $('pool-msg').textContent = '刷新中…（联网同步 + 打分，可能需要几十秒）';
+      $('pool-msg').textContent = '提交中…（联网同步 + 打分，可能需要几十秒）';
       var excl = {
         exclude_st: $('pool-ex-st').checked,
         exclude_cyb: $('pool-ex-cyb').checked,
@@ -1902,33 +1902,22 @@
         sync: $('pool-sync').checked,
         force: $('pool-force').checked,
         exclusions: excl,
-      }, 120).then(function(r){
-        if(r && r.ok){
-          var msg = '完成：' + (r.count || 0) + ' 只';
-          if(r.data_day){
-            if(r.is_recent_day) msg += '（数据日 ' + r.data_day + ' · 上一交易日）';
-            else msg += '（数据日 ' + r.data_day + '）';
-          }
-          var ex = r.excluded || {};
-          var exN = (ex.st||0) + (ex.cyb||0) + (ex.kcb||0) + (ex.bj||0);
-          if(exN) msg += '（剔除 ' + exN + ' 只：ST ' + (ex.st||0) +
-            ' · 创业板 ' + (ex.cyb||0) + ' · 科创板 ' + (ex.kcb||0) +
-            ' · 北交所 ' + (ex.bj||0) + '）';
-          // 本次各类型实际用了哪个数据源 —— 采集出问题时一眼能看出数据从哪来
-          var ds = r.data_sources || {};
-          var dsTxt = Object.keys(ds).map(function(k){ return k + '=' + ds[k]; }).join('、');
-          if(dsTxt) msg += '（数据源 ' + dsTxt + '）';
-          var sk = r.skipped || [];
-          if(sk.length) msg += '（跳过重复采集: ' + sk.join('、') + '）';
-          $('pool-msg').textContent = msg;
-          renderPoolWarn(r.warnings || [], sk);
-          toast(r.warnings && r.warnings.length ? '刷新完成，但有告警' : '股票池已刷新',
-                !!(r.warnings && r.warnings.length));
-        } else {
+      }, 30).then(function(r){
+        if(!r || !r.ok){
           $('pool-msg').textContent = '失败: ' + ((r && r.error) || '未知错误');
-          renderPoolWarn(r && r.warnings ? r.warnings : [], []);
           toast('股票池刷新失败', true);
+          return;
         }
+        // 调度器模式：返回 task_id，轮询任务直到出结果（进任务明细可跟踪）
+        if(r.task_id){
+          $('pool-msg').textContent = '已提交任务 ' + r.task_id +
+            '，在研究池排队执行…（可在「任务明细」跟踪）';
+          toast('股票池刷新已提交：任务 ' + r.task_id);
+          _pollPoolRefresh(r.task_id, Date.now() + 600000);
+          return;
+        }
+        // 降级直连：直接渲染报告
+        _renderPoolRefreshResult(r);
         loadPool();
       }).catch(function(e){ $('pool-msg').textContent = '失败: ' + e.message; });
       return;
@@ -1973,15 +1962,9 @@
     // ---- 行情采集 ----
     if(act_ === 'col-now'){
       var sym = b.getAttribute('data-sym');
-      b.disabled = true; b.textContent = '采集中…';
-      post('/api/collector/now', {symbol: sym}).then(function(r){
-        b.disabled = false; b.textContent = '补采';
-        if(r && r.ok){ toast('补采完成，入库 ' + (r.rows||0) + ' 条'); loadCollector(); }
-        else toast('补采失败: ' + ((r && r.error) || '未知错误'), true);
-      }).catch(function(e){
-        b.disabled = false; b.textContent = '补采';
-        toast('补采失败: ' + e.message, true);
-      });
+      b.disabled = true;
+      _submitCollectKline(sym, null);
+      setTimeout(function(){ b.disabled = false; }, 1500);
       return;
     }
     if(act_ === 'col-del'){
@@ -2005,13 +1988,7 @@
       return;
     }
     if(b.id === 'btn-col-now'){
-      $('col-msg').textContent = '后台采集中…';
-      post('/api/collector/now', {symbol: $('col-sym').value.trim()}).then(function(r){
-        $('col-msg').textContent = '';
-        if(r && r.ok) toast('补采完成，入库 ' + (r.rows||0) + ' 条');
-        else toast('补采失败: ' + ((r && r.error) || ''), true);
-        loadCollector();
-      }).catch(function(e){ $('col-msg').textContent = ''; toast('补采失败: ' + e.message, true); });
+      _submitCollectKline($('col-sym').value.trim(), $('col-msg'));
       return;
     }
     if(b.id === 'btn-col-reload'){
@@ -2231,6 +2208,145 @@
     }
     if(html){ box.classList.remove('hidden'); box.innerHTML = html; }
     else { box.classList.add('hidden'); box.innerHTML = ''; }
+  }
+
+  // 股票池刷新结果渲染：兼容两种来源
+  //   - 调度器模式：r = {ok:true, result:{report:{...}}}（r.result 即任务 result）
+  //   - 降级直连：r = {ok:true, count, data_sources, ...}（报告平铺在 r 上）
+  function _renderPoolRefreshResult(r){
+    var rep = (r && r.result && r.result.report) ? r.result.report : (r || {});
+    if(rep.error){
+      $('pool-msg').textContent = '失败: ' + rep.error;
+      renderPoolWarn(rep.warnings || [], []);
+      toast('股票池刷新失败', true);
+      return;
+    }
+    if(!r || r.ok === false){
+      $('pool-msg').textContent = '失败: ' + ((r && r.error) || '未知错误');
+      toast('股票池刷新失败', true);
+      return;
+    }
+    var msg = '完成：' + (rep.count || 0) + ' 只';
+    if(rep.data_day){
+      if(rep.is_recent_day) msg += '（数据日 ' + rep.data_day + ' · 上一交易日）';
+      else msg += '（数据日 ' + rep.data_day + '）';
+    }
+    var ex = rep.excluded || {};
+    var exN = (ex.st||0) + (ex.cyb||0) + (ex.kcb||0) + (ex.bj||0);
+    if(exN) msg += '（剔除 ' + exN + ' 只：ST ' + (ex.st||0) +
+      ' · 创业板 ' + (ex.cyb||0) + ' · 科创板 ' + (ex.kcb||0) +
+      ' · 北交所 ' + (ex.bj||0) + '）';
+    var ds = rep.data_sources || {};
+    var dsTxt = Object.keys(ds).map(function(k){ return k + '=' + ds[k]; }).join('、');
+    if(dsTxt) msg += '（数据源 ' + dsTxt + '）';
+    var sk = rep.skipped || [];
+    if(sk.length) msg += '（跳过重复采集: ' + sk.join('、') + '）';
+    $('pool-msg').textContent = msg;
+    renderPoolWarn(rep.warnings || [], sk);
+    toast(rep.warnings && rep.warnings.length ? '刷新完成，但有告警' : '股票池已刷新',
+          !!(rep.warnings && rep.warnings.length));
+  }
+
+  // 轮询引擎任务直到终态，再渲染结果（让刷新在「任务明细」可见、可恢复）
+  function _pollPoolRefresh(task_id, deadline){
+    if(Date.now() > deadline){
+      $('pool-msg').textContent += '（仍在进行，可在「任务明细」查看进度）';
+      return;
+    }
+    api('/api/engine_tasks?id=' + encodeURIComponent(task_id)).then(function(d){
+      var t = d && d.task;
+      if(!t){ $('pool-msg').textContent = '查询任务失败（可在「任务明细」查看）'; return; }
+      var st = t.status || '';
+      if(st === 'SUCCESS' || st === 'FAILED' || st === 'DEAD_LETTER' || st === 'CANCELLED'){
+        if(st === 'SUCCESS'){
+          // 任务跑完了但业务无结果（例如候选池为空）：result.ok=False
+          if(t.result && t.result.ok === false){
+            $('pool-msg').textContent = '完成但无结果: ' + (t.result.error || '候选池为空');
+            renderPoolWarn((t.result.report && t.result.report.warnings) || [], []);
+            toast('股票池刷新无结果', true);
+          } else {
+            _renderPoolRefreshResult({ok: true, result: t.result});
+          }
+        } else {
+          var err = (t.error || (t.result && t.result.error) || '任务未成功');
+          $('pool-msg').textContent = '刷新失败（' + (t.status_label || st) + '）：' + err;
+          toast('股票池刷新失败', true);
+        }
+        loadPool();
+        return;
+      }
+      $('pool-msg').textContent = '任务 ' + task_id + ' 进行中（' +
+        (t.status_label || st) + '）…';
+      setTimeout(function(){ _pollPoolRefresh(task_id, deadline); }, 2000);
+    }).catch(function(e){
+      $('pool-msg').textContent = '查询任务失败: ' + e.message + '（可在「任务明细」查看）';
+    });
+  }
+
+  // 通用：轮询引擎任务直到终态，再回调（让采集类动作也在「任务明细」可见/可恢复）
+  function _pollEngineTask(task_id, deadline, onTerminal){
+    if(Date.now() > deadline){
+      onTerminal(null, 'timeout');
+      return;
+    }
+    api('/api/engine_tasks?id=' + encodeURIComponent(task_id)).then(function(d){
+      var t = d && d.task;
+      if(!t){ onTerminal(null, 'no_task'); return; }
+      var st = t.status || '';
+      if(st === 'SUCCESS' || st === 'FAILED' || st === 'DEAD_LETTER' || st === 'CANCELLED'){
+        onTerminal(t, st);
+      } else {
+        setTimeout(function(){ _pollEngineTask(task_id, deadline, onTerminal); }, 1500);
+      }
+    }).catch(function(e){ onTerminal(null, 'err:' + e.message); });
+  }
+
+  // 全类别立即采集的报告渲染（任务 result 与直连 report 结构一致）
+  function _renderCollectReport(r){
+    if(!r || r.ok === false){
+      $('c-msg').textContent = '采集失败: ' + ((r && r.error) || '?');
+      return;
+    }
+    $('c-msg').textContent = '✅ 采集完成：' + ((r.symbols || []).join('、') || '（市场级）');
+    var kv = [];
+    Object.keys(r.detail || {}).forEach(function(k){
+      var d = r.detail[k];
+      kv.push([k, '成功 ' + (d.ok || 0) + (d.failed && d.failed.length
+        ? ('，失败 ' + d.failed.length) : '') + (d.error ? ('（' + d.error + '）') : '')]);
+    });
+    $('c-report').innerHTML = kv.map(function(x){
+      return '<div class="kv"><span class="k">' + esc(x[0]) +
+             '</span><span class="v">' + esc(String(x[1])) + '</span></div>';
+    }).join('');
+  }
+
+  // K 线补采：统一走调度器提交 + 轮询（无调度器时直连）
+  function _submitCollectKline(symbol, msgEl){
+    var setMsg = msgEl ? function(m){ msgEl.textContent = m; } : function(){};
+    setMsg('提交中…');
+    post('/api/collector/now', {symbol: symbol}).then(function(r){
+      if(!r || !r.ok){ setMsg('失败: ' + ((r && r.error) || '未知错误')); toast('补采失败', true); return; }
+      if(r.task_id){
+        setMsg('已提交任务 ' + r.task_id + '，在行情池排队执行…');
+        toast('补采已提交：任务 ' + r.task_id);
+        _pollEngineTask(r.task_id, Date.now() + 600000, function(t, st){
+          if(!t){ setMsg('补采仍在进行，可在「任务明细」查看'); loadCollector(); return; }
+          if(st === 'SUCCESS'){
+            setMsg('');
+            toast('补采完成，入库 ' + ((t.result && t.result.rows) || 0) + ' 条');
+          } else {
+            setMsg('补采失败（' + (t.status_label || st) + '）：' +
+                   (t.error || (t.result && t.result.error) || ''));
+            toast('补采失败', true);
+          }
+          loadCollector();
+        });
+        return;
+      }
+      setMsg('');
+      toast('补采完成，入库 ' + (r.rows || 0) + ' 条');
+      loadCollector();
+    }).catch(function(e){ setMsg('失败: ' + e.message); toast('补采失败', true); });
   }
 
   function renderPool(d){
@@ -2701,19 +2817,27 @@
     $('btn-c-now').disabled = true;
     post('/api/collect/now', {symbols: syms}).then(function(r){
       $('btn-c-now').disabled = false;
-      if(!r.ok){ $('c-msg').textContent = '采集失败: ' + (r.error||'?'); return; }
-      $('c-msg').textContent = '✅ 采集完成：' + (r.symbols||[]).join('、');
-      var kv = [];
-      Object.keys(r.detail||{}).forEach(function(k){
-        var d = r.detail[k];
-        kv.push([k, '成功 ' + (d.ok||0) + (d.failed && d.failed.length
-          ? ('，失败 ' + d.failed.length) : '') + (d.error ? ('（' + d.error + '）') : '')]);
-      });
-      $('c-report').innerHTML = kv.map(function(x){
-        return '<div class="kv"><span class="k">' + esc(x[0]) +
-               '</span><span class="v">' + esc(String(x[1])) + '</span></div>';
-      }).join('');
-      loadFactors();   // 采完因子可用性标注会变，刷新一下
+      if(!r || !r.ok){ $('c-msg').textContent = '采集失败: ' + (r.error||'?'); return; }
+      // 调度器模式：返回 task_id，轮询任务直到出结果（进任务明细可跟踪）
+      if(r.task_id){
+        $('c-msg').textContent = '已提交任务 ' + r.task_id +
+          '，在行情池排队执行…（可在「任务明细」跟踪）';
+        toast('立即采集已提交：任务 ' + r.task_id);
+        _pollEngineTask(r.task_id, Date.now() + 600000, function(t, st){
+          if(!t){ $('c-msg').textContent = '采集仍在进行，可在「任务明细」查看'; return; }
+          if(st === 'SUCCESS'){ _renderCollectReport(t.result || {}); }
+          else {
+            $('c-msg').textContent = '采集失败（' + (t.status_label || st) + '）：' +
+              (t.error || (t.result && t.result.error) || '任务未成功');
+            toast('立即采集失败', true);
+          }
+          loadFactors();   // 采完因子可用性标注会变，刷新一下
+        });
+        return;
+      }
+      // 降级直连：直接渲染报告
+      _renderCollectReport(r);
+      loadFactors();
     }).catch(function(e){
       $('btn-c-now').disabled = false;
       $('c-msg').textContent = '采集失败: ' + e.message;

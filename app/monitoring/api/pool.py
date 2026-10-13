@@ -60,22 +60,73 @@ class PoolViewsMixin:
     def refresh_pool(self, source: str = "", limit: Any = None,
                      sync: Any = None, symbols: Any = None,
                      exclusions: Any = None, force: Any = None) -> Dict[str, Any]:
-        """刷新股票池（工作线程执行）。
+        """刷新股票池。
 
-        面板点一下就可能触发几十只票的联网同步 + 打分，
-        同步阻塞会把行情、策略、撮合一起停摆。
+        **优先交给引擎调度器分配为 ``pool.refresh`` 任务**：
+
+          * 联网同步 + 打分可能几十秒，放进研究池排队，不挤占实盘/行情资源；
+          * 走任务体系后，面板「任务明细」看得见它、失败会进错误队列可人工重投、
+            引擎重启能从流水账里捞回来；
+          * 之前直接 ``threads.deferToThread(StockPool().refresh())`` 只写了
+            control audit 一条内存记录，既不进任务明细、也不进死信，
+            崩溃即无从追查（与回测曾经的问题一致，已对齐修法）。
+
+        调度器不可用（纯监控进程 serve、CLI）时降级为直接跑，并明确标注
+        ``dispatched=direct``，避免"看起来提交成功、实际没人管"。
 
         :param force: True = 忽略"库里已有"判断强制重采。默认 False：
             同一交易日的数据重复拉没有意义，还容易被限流。
         """
+        from app.monitoring.api.backtest import _audit_safe, _engine_scheduler
+
+        params = {
+            "source": source or "",
+            "limit": limit,
+            "sync": sync,
+            "symbols": list(symbols) if symbols else None,
+            "exclusions": (
+                {k: bool(v) for k, v in exclusions.items()}
+                if isinstance(exclusions, dict) else None
+            ),
+            "force": bool(force),
+        }
+        sch = _engine_scheduler(self)
+        handlers = getattr(sch, "handlers", None)
+        if sch is not None and handlers is not None and handlers.has("pool.refresh"):
+            ok, reason, task_id = sch.submit_engine_task_detail(
+                task_type="pool.refresh",
+                params=params,
+                priority=5,
+                dedup_key="",  # 每次刷新都是独立用户动作，不靠 dedup 去重
+                max_retries=0,
+                # 资金流/筹码/基本面同步 + 打分，全市场候选池可能几分钟
+                timeout_seconds=1800.0,
+            )
+            _audit_safe(self, "pool_refresh", {
+                "via": "scheduler", "source": source or None,
+                "task_id": task_id, "ok": ok,
+            })
+            if not ok:
+                return {
+                    "ok": False,
+                    "error": f"股票池刷新任务未入队：{reason}",
+                    "dispatched": "scheduler",
+                }
+            return {
+                "ok": True,
+                "dispatched": "scheduler",
+                "task_id": task_id,
+                "reason": reason,
+            }
+
+        # ---- 降级：没有调度器（serve/CLI）时直接跑 ----
         try:
             from app.modules.universe.pool import StockPool
 
-            pool = StockPool()
             excl = None
             if isinstance(exclusions, dict):
                 excl = {k: bool(v) for k, v in exclusions.items()}
-            report = pool.refresh(
+            report = StockPool().refresh(
                 source=source or None,
                 limit=int(limit) if limit else None,
                 do_sync=None if sync is None else bool(sync),
@@ -84,16 +135,16 @@ class PoolViewsMixin:
                 force=bool(force),
             )
             if report.get("error"):
-                return {"ok": False, "error": report["error"]}
+                return {"ok": False, "error": report["error"], "dispatched": "direct"}
             self.audit.append({
                 "at": datetime.now().isoformat(), "action": "pool_refresh",
                 "detail": {"source": report.get("source"),
                            "count": report.get("count")},
             })
-            return {"ok": True, **report}
+            return {"ok": True, "dispatched": "direct", **report}
         except Exception as exc:
             logger.error(f"股票池刷新失败: {exc}", exc_info=True)
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc), "dispatched": "direct"}
 
     def stock_score(self, symbol: str) -> Dict[str, Any]:
         """单只票的多维度评分明细。"""

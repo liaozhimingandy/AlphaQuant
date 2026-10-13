@@ -306,6 +306,12 @@ class TaskType:
     SENTIMENT_ANALYZE = "sentiment.analyze"
     FUNDAMENTAL_COLLECT = "fundamental.collect"
     FACTOR_CALCULATE = "factor.calculate"
+    POOL_REFRESH = "pool.refresh"   # 股票池刷新：候选池来源＋资金流/筹码/基本面同步＋打分
+
+    # —— 采集域（手动触发，经调度器统一分配）——
+    COLLECT_NOW = "collect.now"      # 全类别立即采集（指定标的）
+    COLLECT_CROSS = "collect.cross"  # 定向采集（指定标的 × 指定类别）
+    COLLECT_KLINE = "collect.kline"  # 立即补采 K 线
 
     # —— 策略域 ——
     STRATEGY_RUN = "strategy.run"
@@ -415,13 +421,15 @@ class Pool:
         SYSTEM: frozenset({
             TaskType.SYSTEM_RECOVER, TaskType.SNAPSHOT_PERSIST,
         }),
-        MARKET: frozenset({
-            TaskType.MARKET_KLINE_COLLECT, TaskType.MARKET_KLINE_BACKFILL,
-            TaskType.MARKET_QUOTE_SNAPSHOT, TaskType.DATA_INTEGRITY_CHECK,
-        }),
+    MARKET: frozenset({
+        TaskType.MARKET_KLINE_COLLECT, TaskType.MARKET_KLINE_BACKFILL,
+        TaskType.MARKET_QUOTE_SNAPSHOT, TaskType.DATA_INTEGRITY_CHECK,
+        TaskType.COLLECT_NOW, TaskType.COLLECT_CROSS, TaskType.COLLECT_KLINE,
+    }),
         RESEARCH: frozenset({
             TaskType.NEWS_COLLECT, TaskType.SENTIMENT_ANALYZE,
             TaskType.FUNDAMENTAL_COLLECT, TaskType.FACTOR_CALCULATE,
+            TaskType.POOL_REFRESH,
         }),
         STRATEGY: frozenset({
             TaskType.STRATEGY_RUN, TaskType.UNIVERSE_RANK,
@@ -465,6 +473,10 @@ TASK_QUEUE: Dict[str, str] = {
     TaskType.SENTIMENT_ANALYZE: Queue.RESEARCH,
     TaskType.FUNDAMENTAL_COLLECT: Queue.RESEARCH,
     TaskType.FACTOR_CALCULATE: Queue.RESEARCH,
+    TaskType.POOL_REFRESH: Queue.RESEARCH,
+    TaskType.COLLECT_NOW: Queue.MARKET,
+    TaskType.COLLECT_CROSS: Queue.MARKET,
+    TaskType.COLLECT_KLINE: Queue.MARKET,
     TaskType.STRATEGY_RUN: Queue.STRATEGY,
     TaskType.UNIVERSE_RANK: Queue.STRATEGY,
     TaskType.RISK_EVALUATE: Queue.TRADING,

@@ -437,12 +437,16 @@ class MonitorResource(Resource):
 
         # ---- 标的即时采集（全类别）----
         if seg[1] == "collect" and len(seg) >= 3 and seg[2] == "now":
-            # 要跑十几个接口，必须异步（否则把 reactor 连同面板一起堵死）
+            # 统一走调度器分配任务：进任务明细、失败可进错误队列重放。
+            # 无调度器（serve/CLI 模式）时退回直连执行，保持旧行为。
+            syms = body.get("symbols") or None
+            cats = body.get("categories") or None
+            disp = c.control.dispatch_task(
+                "collect.now", {"symbols": syms, "categories": cats})
+            if disp.get("ok"):
+                return self._json(request, disp)
             return self._async(request, threads.deferToThread(
-                c.collect_now,
-                body.get("symbols") or None,
-                body.get("categories") or None,
-            ))
+                c.collect_now, syms, cats))
 
         # ---- 采集时间窗口设置 ----
         if seg[1] == "schedule" and len(seg) >= 3 and seg[2] == "save":
@@ -510,8 +514,12 @@ class MonitorResource(Resource):
         if seg[1] == "collector" and len(seg) >= 3:
             op = seg[2]
             if op == "now":
-                # 采集是秒级网络 IO，必须异步：同步返回会把 reactor 连同
-                # 行情、策略、撮合、面板一起堵住。这里挂 Deferred 延迟写响应。
+                # 统一走调度器分配任务（进任务明细、失败可进错误队列重放）。
+                # 无调度器时退回 collector_now_async（自带工作单元限流）。
+                disp = c.control.dispatch_task(
+                    "collect.kline", {"symbol": str(body.get("symbol") or "")})
+                if disp.get("ok"):
+                    return self._json(request, disp)
                 return self._async(request, c.control.collector_now_async(
                     str(body.get("symbol") or "")
                 ))
@@ -533,7 +541,15 @@ class MonitorResource(Resource):
         #   body: {"symbols": ["600519"], "categories": ["fundamental"]}
         # 与 /api/collector/now 的区别：后者补 K 线，这里补日频截面
         # （基本面/资金流/筹码/龙虎榜…），且标的与类别由调用方指定。
+        # 统一走调度器分配任务（进任务明细、失败可进错误队列重放）。
         if seg[1] == "cross" and len(seg) >= 3 and seg[2] == "collect":
+            disp = c.control.dispatch_task(
+                "collect.cross",
+                {"symbols": body.get("symbols"),
+                 "categories": body.get("categories")},
+            )
+            if disp.get("ok"):
+                return self._json(request, disp)
             return self._async(request, c.control.cross_collect_async(
                 body.get("symbols"), body.get("categories"),
             ))

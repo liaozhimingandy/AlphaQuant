@@ -748,6 +748,10 @@ scheduler.rules.register(Rule(
 | 错误队列人工干预 | ✅ | 继续（额度重置）/ 丢弃；下单类不可重投 |
 | 启动预检 | ✅ | 配置/目录/数据库/数据/磁盘/网关，三档结论 |
 | 回测任务接入 | ✅ | `backtest.run` 注册处理器，走 `backtest` 池（capacity=1），幂等 |
+| 股票池刷新接入 | ✅ | `pool.refresh` 注册处理器，走 `research` 池；面板「刷新」改为经调度器分配任务，进任务明细/可重投/可恢复（修复前只写内存 audit，不进任务系统） |
+| 采集任务统一调度 | ✅ | `collect.now`/`collect.cross`/`collect.kline` 注册处理器，均走 `market` 池（capacity=3）；面板「立即采集/补采/定向采集」改为经调度器分配任务，进任务明细/可重投/可恢复（修复前 `deferToThread` 直接跑，绕过任务系统） |
+| 落库兼容性 | ✅ | `kline_repo._upsert` 按 SQLite 默认变量上限（999）分块执行多行 INSERT，根治 `too many SQL variables`（资金流一次攒几百只×60 天极易触发） |
+| 存储错误进错误队列 | ✅ | 同步层 `_flush` 在「批量 + 逐条都写不进」时上浮 `StorageError`（磁盘满/库锁/权限/连接断开），任务判失败→进死信→可重放；单只数据坏仍走 `failed` 列表不误报 |
 | 任务结果可核对 | ✅ | 成功看 `result`（处理器返回值），失败看 `error` |
 | **Outbox / 可靠投递** | ✅ | 事件发布即落盘（`output/runtime/events.db`），含订阅者数；重启后可查可重放 |
 | **执行器心跳与租约** | ❌ | 单进程内不需要；跨进程后必须补 |

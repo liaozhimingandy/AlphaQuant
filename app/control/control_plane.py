@@ -1082,7 +1082,7 @@ class ControlCenter:
         code = getattr(priority, "code", None)
         if code is not None:
             prio = int(code) * 2 + 1
-        ok, reason = sch.submit_engine_task(
+        ok, reason, task_id = sch.submit_engine_task_detail(
             task_type=task_type,
             params=dict(params or {}),
             priority=int(prio) if prio is not None else 5,
@@ -1091,9 +1091,13 @@ class ControlCenter:
         )
         self._audit(
             "dispatch_task",
-            {"task_type": task_type, "pool": pool, "params": dict(params or {})},
+            {"task_type": task_type, "pool": pool, "params": dict(params or {}),
+             "task_id": task_id},
         )
-        return {"ok": ok, "reason": reason, "pool": pool, "task_type": task_type}
+        return {
+            "ok": ok, "reason": reason, "pool": pool,
+            "task_type": task_type, "task_id": task_id,
+        }
 
     def set_rule_enabled(self, name: str, enabled: bool = True) -> Dict[str, Any]:
         """启停一条调度规则。

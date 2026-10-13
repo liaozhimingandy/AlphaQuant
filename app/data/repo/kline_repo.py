@@ -66,19 +66,34 @@ def _date(value: Any) -> Optional[date]:
         return None
 
 
+#: SQLite 单条语句的 host 参数上限（编译期常量，官方默认 999；
+#: 个别构建放开到 32766，但取保守值才能跨环境不踩坑）。
+#: 多行拼进一个 ``INSERT`` 时占位符数 = 行数 × 列数，一旦超过就报
+#: ``(sqlite3.OperationalError) too many SQL variables`` —— 资金流一次攒
+#: 几百只票 × 60 天就是几千行，极易触发。按列数分块即可根治。
+_SQLITE_MAX_VARS = 999
+
+
 def _upsert(session: Session, model: Any, rows: Sequence[Dict[str, Any]],
             key_fields: Sequence[str]) -> int:
     if not rows:
         return 0
-    stmt = insert(model).values(list(rows))
-    updatable = {
-        c.name: getattr(stmt.excluded, c.name)
-        for c in model.__table__.columns
-        if c.name not in key_fields and c.name != "id"
-    }
-    stmt = stmt.on_conflict_do_update(index_elements=list(key_fields), set_=updatable)
-    session.execute(stmt)
-    return len(rows)
+    ncols = len(rows[0]) if isinstance(rows[0], dict) else len(model.__table__.columns)
+    # 每块最多插多少行：留出余量，避免边界情况（如 upsert 额外引用列）撞上限
+    per = max(1, (_SQLITE_MAX_VARS - 8) // max(1, ncols))
+    saved = 0
+    for i in range(0, len(rows), per):
+        batch = rows[i:i + per]
+        stmt = insert(model).values(list(batch))
+        updatable = {
+            c.name: getattr(stmt.excluded, c.name)
+            for c in model.__table__.columns
+            if c.name not in key_fields and c.name != "id"
+        }
+        stmt = stmt.on_conflict_do_update(index_elements=list(key_fields), set_=updatable)
+        session.execute(stmt)
+        saved += len(batch)
+    return saved
 
 
 def _clean(model: Any, row: Dict[str, Any], fields: Sequence[str]) -> Dict[str, Any]:
